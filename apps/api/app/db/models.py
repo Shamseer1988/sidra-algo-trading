@@ -284,3 +284,96 @@ class PaperSignalOutcome(TimestampMixin, Base):
     realized_r: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
     mfe_r: Mapped[Decimal] = mapped_column(Numeric(12, 4), default=0)
     mae_r: Mapped[Decimal] = mapped_column(Numeric(12, 4), default=0)
+
+
+class PaperOrder(TimestampMixin, Base):
+    """A simulated order only. It has no broker identifier or submission path."""
+
+    __tablename__ = "paper_orders"
+    __table_args__ = (
+        UniqueConstraint("client_order_id", name="uq_paper_orders_client_order_id"),
+        UniqueConstraint("paper_signal_id", "order_role", name="uq_paper_orders_signal_role"),
+        Index("ix_paper_orders_session_status", "session_date", "status"),
+        Index("ix_paper_orders_instrument_status", "instrument_token", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    paper_signal_id: Mapped[UUID] = mapped_column(ForeignKey("paper_signals.id", ondelete="CASCADE"), index=True)
+    client_order_id: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    instrument_token: Mapped[str] = mapped_column(String(64), index=True)
+    session_date: Mapped[date] = mapped_column(Date, index=True)
+    strategy_version: Mapped[str] = mapped_column(String(80))
+    side: Mapped[str] = mapped_column(String(10), index=True)
+    order_type: Mapped[str] = mapped_column(String(20))
+    order_role: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    quantity: Mapped[int] = mapped_column(Integer)
+    filled_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    average_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    limit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    stop_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    eligible_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fee_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    rejection_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    simulation_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class PaperFill(TimestampMixin, Base):
+    """An immutable simulated fill and its complete cost breakdown."""
+
+    __tablename__ = "paper_fills"
+    __table_args__ = (
+        UniqueConstraint("fill_key", name="uq_paper_fills_fill_key"),
+        Index("ix_paper_fills_order_occurred", "paper_order_id", "occurred_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    paper_order_id: Mapped[UUID] = mapped_column(ForeignKey("paper_orders.id", ondelete="CASCADE"), index=True)
+    fill_key: Mapped[str] = mapped_column(String(220), unique=True, index=True)
+    instrument_token: Mapped[str] = mapped_column(String(64), index=True)
+    side: Mapped[str] = mapped_column(String(10))
+    quantity: Mapped[int] = mapped_column(Integer)
+    price: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    gross_value: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    slippage_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    brokerage: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    stt: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    exchange_charge: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    gst: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    sebi_charge: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    stamp_duty: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    total_fees: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class PaperPosition(TimestampMixin, Base):
+    """One paper position per source signal, never a broker-held position."""
+
+    __tablename__ = "paper_positions"
+    __table_args__ = (
+        UniqueConstraint("paper_signal_id", name="uq_paper_positions_paper_signal_id"),
+        Index("ix_paper_positions_session_status", "session_date", "status"),
+        Index("ix_paper_positions_instrument_status", "instrument_token", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    paper_signal_id: Mapped[UUID] = mapped_column(ForeignKey("paper_signals.id", ondelete="CASCADE"), index=True)
+    instrument_token: Mapped[str] = mapped_column(String(64), index=True)
+    session_date: Mapped[date] = mapped_column(Date, index=True)
+    strategy_version: Mapped[str] = mapped_column(String(80))
+    side: Mapped[str] = mapped_column(String(10), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="OPENING", index=True)
+    initial_quantity: Mapped[int] = mapped_column(Integer)
+    open_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    average_entry_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    average_exit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    current_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    stop_price: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    target_price: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    realized_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    fees_total: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    total_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

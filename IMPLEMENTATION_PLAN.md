@@ -89,9 +89,14 @@ Completed:
 - Added acceptance metrics and a glassmorphism strategy workspace with safe administrator controls and read-only RBAC behavior.
 - Added deterministic registry coverage and browser coverage for the strategy workspace.
 
-## Phase 5 — Advanced paper trading
+## Phase 5 — Advanced paper trading (complete)
 
-- Broker-independent paper order manager, fills, costs, slippage, partial fills, positions, P&L, and journal.
+- Added a broker-independent, paper-only order manager with no broker identifier, credential, or submission path.
+- Added durable paper orders, immutable fills with complete fee breakdowns, and signal-linked paper positions through Alembic migration `0010_paper_execution`.
+- Simulated execution is deterministic and uses only subsequent completed candles, bounded participation for partial fills, configurable slippage, and configurable Indian equity transaction-cost components.
+- Added simulated market, limit, and stop order handling; OCO-style target/stop brackets conservatively prioritize the stop when one completed candle touches both levels.
+- Added mark-to-market realized/unrealized/net P&L, fees, order lifecycle, positions, paper-execution APIs, and premium glassmorphism Orderbook and Positions workspaces.
+- Kept scanner outcomes and the CSV journal intact while explicitly separating them from the simulated execution ledger.
 
 ## Phase 6 — Risk engine
 
@@ -131,8 +136,8 @@ Completed:
 
 ## Current validated checkpoint
 
-- Backend: 44 tests passed.
+- Backend: 48 tests passed.
 - Python: Ruff lint and format checks passed.
 - Frontend: ESLint passed.
 - Frontend: Next.js production build passed.
-- Browser: 10 Playwright journeys passed, including single-flight access-token refresh, rejected-setup inspection, and the strategy workspace.
+- Browser: 11 Playwright journeys passed, including single-flight access-token refresh, rejected-setup inspection, strategy configuration, and paper-execution workspaces.

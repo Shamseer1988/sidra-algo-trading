@@ -12,6 +12,7 @@ import { ControlPanel } from "../features/controls/control-panel";
 import { Dashboard } from "../features/dashboard/dashboard";
 import { JournalPanel } from "../features/journal/journal-panel";
 import { MarketPanel } from "../features/market/market-panel";
+import { PaperExecutionPanel } from "../features/paper/paper-execution-panel";
 import { ScannerPanel } from "../features/scanner/scanner-panel";
 import { BrokerSettingsCard, SecurityPanel, SettingsPanel } from "../features/settings/settings-panel";
 import { SignalsPanel } from "../features/signals/signals-panel";
@@ -90,6 +91,8 @@ export function AppShell() {
     case "scanner": content = <ScannerPanel scanner={scanner} safety={safety} dataQuality={dataQuality} refreshKey={scannerRevision} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />; break;
     case "signals": content = <SignalsPanel signals={signals} />; break;
     case "strategies": content = <StrategiesPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
+    case "orders": content = <PaperExecutionPanel view="orders" />; break;
+    case "positions": content = <PaperExecutionPanel view="positions" />; break;
     case "risk": case "telegram": content = controlsPanel; break;
     case "journal": content = <JournalPanel signals={signals} />; break;
     case "upstox": content = <BrokerSettingsCard isAdmin={Boolean(isAdmin)} onMessage={setMessage} focus="UPSTOX" />; break;

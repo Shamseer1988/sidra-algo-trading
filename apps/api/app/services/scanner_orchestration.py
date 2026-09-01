@@ -15,6 +15,7 @@ from app.core.config import Settings
 from app.db.models import ApplicationSetting, PaperSignal, ScannerEvaluation, TelegramAlert
 from app.db.session import SessionLocal
 from app.services.market_calculations import CompletedCandle
+from app.services.paper_execution import PaperOrderManager
 from app.services.paper_strategy import AWAITING, SIGNALLED
 from app.services.safety import emergency_stop_state, paper_tracking_enabled
 from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
@@ -341,6 +342,10 @@ class PaperScannerOrchestrator:
             signal = await self._record(candle, decision, indicators, strategy, strategy_snapshot)
             if signal is None:
                 continue
+            try:
+                await PaperOrderManager().queue_signal(signal)
+            except Exception:
+                self._logger.exception("scanner.paper_order_queue_failed", signal_id=str(signal.id))
             await self._redis.set(
                 f"scanner:last_signal:{candle.instrument_token}",
                 json.dumps({"signal_id": str(signal.id), "at": datetime.now(UTC).isoformat()}),

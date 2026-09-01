@@ -56,8 +56,8 @@ export const navigationSections: NavigationSection[] = [
       { id: "scanner", label: "Scanner", icon: RadioTower, available: true },
       { id: "signals", label: "Signals", icon: BarChart3, available: true },
       { id: "strategies", label: "Strategies", icon: SlidersHorizontal, available: true },
-      { id: "orders", label: "Orders", icon: ClipboardList, available: false },
-      { id: "positions", label: "Positions", icon: BriefcaseBusiness, available: false },
+      { id: "orders", label: "Orders", icon: ClipboardList, available: true },
+      { id: "positions", label: "Positions", icon: BriefcaseBusiness, available: true },
     ],
   },
   {

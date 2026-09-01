@@ -14,6 +14,7 @@ from app.db.models import MarketCandle, MarketIndicatorSnapshot
 from app.db.session import SessionLocal
 from app.services.data_quality import MarketDataQualityService
 from app.services.market_calculations import CompletedCandle, indicator_snapshot, is_regular_market_timestamp
+from app.services.paper_execution import PaperOrderManager
 from app.services.paper_journal import update_outcomes
 from app.services.trading_calendar import DEFAULT_TRADING_CALENDAR, TradingCalendar
 
@@ -294,5 +295,6 @@ class MarketCalculationPersistenceService:
             ex=60 * 60 * 18,
         )
         await update_outcomes(candle)
+        await PaperOrderManager().process_completed_candle(candle)
         if self._on_snapshot and notify_snapshot:
             await self._on_snapshot(candle, values)
