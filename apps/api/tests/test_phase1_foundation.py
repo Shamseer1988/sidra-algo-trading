@@ -22,6 +22,9 @@ class MemoryRedis:
         self.values[key] = value
         return True
 
+    async def publish(self, _: str, __: str) -> int:
+        return 0
+
 
 def settings(**overrides: object) -> Settings:
     values: dict[str, object] = {

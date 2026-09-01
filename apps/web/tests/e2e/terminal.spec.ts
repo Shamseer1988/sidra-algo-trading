@@ -72,6 +72,58 @@ const MOCK_DATA_QUALITY = [{
   allows_signals: true,
 }];
 
+const MOCK_EVALUATIONS = [{
+  id: "eval-001",
+  instrument_token: "NSE:RELIANCE",
+  session_date: "2026-08-31",
+  candle_opened_at: new Date().toISOString(),
+  strategy_id: "orb-default",
+  strategy_name: "ORB Retest — Default",
+  strategy_version: 1,
+  status: "ACCEPTED",
+  decision_state: "SIGNALLED",
+  side: "LONG",
+  reason: "Paper signal confirmed",
+  failed_conditions: [],
+  data_quality_state: "GOOD",
+  candle_close: 2850.5,
+  candle_volume: 1500,
+  score: 95,
+  score_breakdown: { breakout_retest: 20, vwap_alignment: 20, ema_alignment: 20, volume_confirmation: 20, market_confirmation: 15 },
+  indicator_snapshot: { vwap: 2848.2, ema_fast: 2850.1, ema_slow: 2844.3, volume: { relative_volume: 1.6 }, relative_strength: { relative_strength_percent: 0.4 }, nifty_regime: { regime: "BULLISH" } },
+  entry_price: 2850.5,
+  stop_price: 2835,
+  target_price: 2880,
+  quantity: 32,
+  risk_amount: 500,
+  created_at: new Date().toISOString(),
+}, {
+  id: "eval-002",
+  instrument_token: "NSE:INFY",
+  session_date: "2026-08-31",
+  candle_opened_at: new Date().toISOString(),
+  strategy_id: "orb-default",
+  strategy_name: "ORB Retest — Default",
+  strategy_version: 1,
+  status: "REJECTED",
+  decision_state: "AWAITING_BREAKOUT",
+  side: null,
+  reason: "EMA spread indicates choppy market",
+  failed_conditions: ["EMA spread indicates choppy market"],
+  data_quality_state: "DEGRADED",
+  candle_close: 1820,
+  candle_volume: 900,
+  score: 0,
+  score_breakdown: {},
+  indicator_snapshot: { vwap: 1822, ema_fast: 1820.01, ema_slow: 1820, volume: { relative_volume: 0.9 }, relative_strength: { relative_strength_percent: -0.1 }, nifty_regime: { regime: "NEUTRAL" } },
+  entry_price: null,
+  stop_price: null,
+  target_price: null,
+  quantity: null,
+  risk_amount: null,
+  created_at: new Date().toISOString(),
+}];
+
 const MOCK_CONTROLS = {
   account_capital: 100000,
   risk_per_trade_percent: 0.5,
@@ -169,6 +221,10 @@ async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN
 
   await page.route("**/api/v1/scanner/data-quality", async (route: Route) => {
     await route.fulfill({ json: MOCK_DATA_QUALITY });
+  });
+
+  await page.route("**/api/v1/scanner/evaluations*", async (route: Route) => {
+    await route.fulfill({ json: MOCK_EVALUATIONS });
   });
 
   await page.route("**/api/v1/safety/status", async (route: Route) => {
@@ -334,6 +390,22 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText("Score breakdown")).toBeVisible();
     await expect(page.getByText("Completed-candle chart")).toBeVisible();
     await expect(page.locator('[data-testid="candle-chart"] svg polyline')).toBeVisible();
+  });
+
+  test("4b. Scanner workspace: filters rejected evaluations and opens the setup inspector", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Scanner", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Scanner workspace" })).toBeVisible();
+    await expect(page.getByText("NSE:RELIANCE", { exact: true }).first()).toBeVisible();
+
+    await page.getByLabel("Evaluation state").selectOption("REJECTED");
+    await expect(page.getByText("NSE:INFY", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("NSE:RELIANCE", { exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Inspect NSE:INFY" }).click();
+    await expect(page.getByText("Failed conditions")).toBeVisible();
+    await expect(page.locator("aside ul li").filter({ hasText: "EMA spread indicates choppy market" })).toBeVisible();
   });
 
   test("5. Settings & Risk Controls: Form modification and submission", async ({ page }) => {

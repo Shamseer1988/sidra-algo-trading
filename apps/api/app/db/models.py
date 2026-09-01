@@ -232,6 +232,42 @@ class PaperSignal(TimestampMixin, Base):
     alert_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
+class ScannerEvaluation(TimestampMixin, Base):
+    """One auditable strategy evaluation, including non-signalling decisions."""
+
+    __tablename__ = "scanner_evaluations"
+    __table_args__ = (
+        UniqueConstraint("evaluation_key", name="uq_scanner_evaluation_key"),
+        Index("ix_scanner_evaluations_session_status", "session_date", "status"),
+        Index("ix_scanner_evaluations_instrument_created", "instrument_token", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    evaluation_key: Mapped[str] = mapped_column(String(220), unique=True, index=True)
+    instrument_token: Mapped[str] = mapped_column(String(64), index=True)
+    session_date: Mapped[date] = mapped_column(Date, index=True)
+    candle_opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    strategy_id: Mapped[str] = mapped_column(String(100), index=True)
+    strategy_name: Mapped[str] = mapped_column(String(120))
+    strategy_version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    decision_state: Mapped[str] = mapped_column(String(40))
+    side: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    reason: Mapped[str] = mapped_column(Text)
+    failed_conditions: Mapped[list] = mapped_column(JSON, default=list)
+    data_quality_state: Mapped[str] = mapped_column(String(20), default="MISSING")
+    candle_close: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    candle_volume: Mapped[int] = mapped_column(BigInteger, default=0)
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    score_breakdown: Mapped[dict] = mapped_column(JSON, default=dict)
+    indicator_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    entry_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    stop_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    target_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    risk_amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+
+
 class PaperSignalOutcome(TimestampMixin, Base):
     """Paper-only post-signal outcome derived from later completed candles."""
 

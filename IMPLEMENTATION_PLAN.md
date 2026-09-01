@@ -71,11 +71,14 @@ Completed:
 - Added shared responsive toolbar, table, status, data-list, skeleton, and empty-state primitives.
 - Unified glassmorphism system across navigation, headers, cards, forms, tables, status badges, authentication, and broker callback states in both light and dark themes.
 
-Phase 3 continues with the detailed scanner explorer, saved views, and setup-inspector contracts.
+## Phase 3 — Scanner workspace (complete)
 
-## Phase 3 — Scanner workspace
-
-- Data-quality states, sortable/filterable columns, saved views, setup inspector, rejected evaluations, and TradingView Lightweight Charts.
+- Added a durable, idempotent scanner-evaluation audit record for accepted, watching, rejected, and data-quality-blocked completed-candle decisions.
+- Added Alembic migration `0008_scanner_evaluations`; also fixed Alembic handling for valid percent-encoded database URLs.
+- Added authenticated scanner-evaluation APIs and real-time event notifications.
+- Built a professional scanner workspace with search, sorting, state and quality filters, persisted device-local saved views/watchlist, data-quality strip, responsive evaluation tape, and setup inspector.
+- The inspector shows only recorded completed candles and strategy output: score breakdown, conditions, failures, proposed paper entry/stop/target/quantity/risk, and reward:risk. It does not imply a broker order or position.
+- Added backend coverage for evaluation classification and browser coverage for rejected-setup filtering and inspection.
 
 ## Phase 4 — Strategy platform
 
@@ -123,8 +126,8 @@ Phase 3 continues with the detailed scanner explorer, saved views, and setup-ins
 
 ## Current validated checkpoint
 
-- Backend: 41 tests passed.
+- Backend: 42 tests passed.
 - Python: Ruff lint and format checks passed.
 - Frontend: ESLint passed.
 - Frontend: Next.js production build passed.
-- Browser: 8 Playwright journeys passed, including single-flight access-token refresh.
+- Browser: 9 Playwright journeys passed, including single-flight access-token refresh and rejected-setup inspection.

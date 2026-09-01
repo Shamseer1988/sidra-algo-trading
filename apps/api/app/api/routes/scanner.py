@@ -7,7 +7,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
-from app.db.models import AuditLog, PaperSignal, User, UserRole
+from app.db.models import AuditLog, PaperSignal, ScannerEvaluation, User, UserRole
 from app.db.session import SessionLocal
 from app.services.data_quality import DATA_QUALITY_PREFIX
 from app.services.safety import emergency_stop_state
@@ -58,6 +58,33 @@ class PaperSignalResponse(BaseModel):
     quantity: int
     score: int
     score_breakdown: dict
+    created_at: datetime
+
+
+class ScannerEvaluationResponse(BaseModel):
+    id: str
+    instrument_token: str
+    session_date: str
+    candle_opened_at: datetime
+    strategy_id: str
+    strategy_name: str
+    strategy_version: int
+    status: str
+    decision_state: str
+    side: str | None
+    reason: str
+    failed_conditions: list[str]
+    data_quality_state: str
+    candle_close: float
+    candle_volume: int
+    score: int
+    score_breakdown: dict
+    indicator_snapshot: dict
+    entry_price: float | None
+    stop_price: float | None
+    target_price: float | None
+    quantity: int | None
+    risk_amount: float | None
     created_at: datetime
 
 
@@ -129,6 +156,70 @@ async def latest_paper_signals(_: CurrentUser, session: DbSession) -> list[Paper
         )
         for row in rows
     ]
+
+
+def _evaluation_response(row: ScannerEvaluation) -> ScannerEvaluationResponse:
+    return ScannerEvaluationResponse(
+        id=str(row.id),
+        instrument_token=row.instrument_token,
+        session_date=row.session_date.isoformat(),
+        candle_opened_at=row.candle_opened_at,
+        strategy_id=row.strategy_id,
+        strategy_name=row.strategy_name,
+        strategy_version=row.strategy_version,
+        status=row.status,
+        decision_state=row.decision_state,
+        side=row.side,
+        reason=row.reason,
+        failed_conditions=[str(item) for item in row.failed_conditions],
+        data_quality_state=row.data_quality_state,
+        candle_close=float(row.candle_close),
+        candle_volume=row.candle_volume,
+        score=row.score,
+        score_breakdown=row.score_breakdown,
+        indicator_snapshot=row.indicator_snapshot,
+        entry_price=float(row.entry_price) if row.entry_price is not None else None,
+        stop_price=float(row.stop_price) if row.stop_price is not None else None,
+        target_price=float(row.target_price) if row.target_price is not None else None,
+        quantity=row.quantity,
+        risk_amount=float(row.risk_amount) if row.risk_amount is not None else None,
+        created_at=row.created_at,
+    )
+
+
+@router.get("/evaluations", response_model=list[ScannerEvaluationResponse])
+async def latest_scanner_evaluations(
+    _: CurrentUser,
+    session: DbSession,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[ScannerEvaluationResponse]:
+    bounded_limit = min(max(limit, 1), 250)
+    bounded_offset = max(offset, 0)
+    rows = list(
+        (
+            await session.scalars(
+                select(ScannerEvaluation)
+                .order_by(ScannerEvaluation.candle_opened_at.desc(), ScannerEvaluation.created_at.desc())
+                .offset(bounded_offset)
+                .limit(bounded_limit)
+            )
+        ).all()
+    )
+    return [_evaluation_response(row) for row in rows]
+
+
+@router.get("/evaluations/{evaluation_id}", response_model=ScannerEvaluationResponse)
+async def scanner_evaluation_detail(
+    evaluation_id: str, _: CurrentUser, session: DbSession
+) -> ScannerEvaluationResponse:
+    try:
+        row = await session.get(ScannerEvaluation, evaluation_id)
+    except (TypeError, ValueError):
+        row = None
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scanner evaluation was not found")
+    return _evaluation_response(row)
 
 
 @router.get("/data-quality", response_model=list[DataQualityResponse])

@@ -35,6 +35,7 @@ export function AppShell() {
   const [signals, setSignals] = useState<PaperSignal[]>([]);
   const [marketSession, setMarketSession] = useState<MarketSession | null>(null);
   const [dataQuality, setDataQuality] = useState<DataQuality[]>([]);
+  const [scannerRevision, setScannerRevision] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -58,7 +59,7 @@ export function AppShell() {
     if (!user) return;
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     const socket = new WebSocket(`${protocol}://${window.location.host}/api/v1/events/scanner`);
-    socket.onmessage = (event) => { try { if ((JSON.parse(event.data) as { type?: string }).type === "paper_signal") void load(); } catch { /* polling remains the safe fallback */ } };
+    socket.onmessage = (event) => { try { const payload = JSON.parse(event.data) as { type?: string }; if (payload.type === "paper_signal" || payload.type === "scanner_evaluation") { setScannerRevision((value) => value + 1); void load(); } } catch { /* polling remains the safe fallback */ } };
     return () => socket.close();
   }, [load, user]);
 
@@ -86,7 +87,7 @@ export function AppShell() {
   switch (active) {
     case "overview": content = <Dashboard services={services} scanner={scanner} safety={safety} signals={signals} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />; break;
     case "market": content = <MarketPanel session={marketSession} quality={dataQuality} overview={overview} scanner={scanner} onRefresh={refreshAll} />; break;
-    case "scanner": content = <ScannerPanel scanner={scanner} safety={safety} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />; break;
+    case "scanner": content = <ScannerPanel scanner={scanner} safety={safety} dataQuality={dataQuality} refreshKey={scannerRevision} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />; break;
     case "signals": content = <SignalsPanel signals={signals} />; break;
     case "strategies": content = <StrategiesPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
     case "risk": case "telegram": content = controlsPanel; break;

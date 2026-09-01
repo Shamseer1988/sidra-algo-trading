@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from app.api.routes.events import SCANNER_EVENTS_CHANNEL
 from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
 from app.core.config import Settings
-from app.db.models import ApplicationSetting, PaperSignal, TelegramAlert
+from app.db.models import ApplicationSetting, PaperSignal, ScannerEvaluation, TelegramAlert
 from app.db.session import SessionLocal
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_strategy import AWAITING, SIGNALLED, STRATEGY_VERSION, evaluate_orb_retest
@@ -111,6 +111,108 @@ class PaperScannerOrchestrator:
             await session.refresh(signal)
         return signal
 
+    @staticmethod
+    def _evaluation_status(decision) -> str:
+        if decision.next_state == SIGNALLED and decision.side:
+            return "ACCEPTED"
+        if decision.reason and decision.reason.lower().startswith("awaiting"):
+            return "WATCHING"
+        return "REJECTED"
+
+    @staticmethod
+    def _failed_conditions(decision) -> list[str]:
+        failed = [] if decision.next_state == SIGNALLED else [decision.reason or "Strategy conditions were not met"]
+        failed.extend(
+            key.replace("_", " ").title() for key, value in (decision.score_breakdown or {}).items() if value == 0
+        )
+        return list(dict.fromkeys(failed))
+
+    async def _record_evaluation(
+        self, candle: CompletedCandle, indicators: dict, strategy: StrategyConfiguration, decision
+    ):
+        quality = indicators.get("data_quality") if isinstance(indicators.get("data_quality"), dict) else {}
+        evaluation = ScannerEvaluation(
+            evaluation_key=(
+                f"{strategy.id}:v{strategy.version}:{candle.session_date.isoformat()}:"
+                f"{candle.instrument_token}:{candle.opened_at.isoformat()}"
+            ),
+            instrument_token=candle.instrument_token,
+            session_date=candle.session_date,
+            candle_opened_at=candle.opened_at,
+            strategy_id=strategy.id,
+            strategy_name=strategy.name,
+            strategy_version=strategy.version,
+            status=self._evaluation_status(decision),
+            decision_state=decision.next_state,
+            side=decision.side,
+            reason=decision.reason or "Strategy evaluation completed",
+            failed_conditions=self._failed_conditions(decision),
+            data_quality_state=str(quality.get("state", "MISSING")),
+            candle_close=candle.close,
+            candle_volume=candle.volume,
+            score=decision.score,
+            score_breakdown=decision.score_breakdown or {},
+            indicator_snapshot=indicators,
+            entry_price=decision.entry_price,
+            stop_price=decision.stop_price,
+            target_price=decision.target_price,
+            quantity=decision.quantity or None,
+            risk_amount=decision.risk_amount,
+        )
+        async with SessionLocal() as session:
+            session.add(evaluation)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                return None
+            await session.refresh(evaluation)
+        return evaluation
+
+    async def _record_quality_block(self, candle: CompletedCandle, indicators: dict):
+        quality = indicators.get("data_quality") if isinstance(indicators.get("data_quality"), dict) else {}
+        reason = str(quality.get("reason", "Quality snapshot unavailable"))
+        evaluation = ScannerEvaluation(
+            evaluation_key=f"data-quality:{candle.session_date.isoformat()}:{candle.instrument_token}:{candle.opened_at.isoformat()}",
+            instrument_token=candle.instrument_token,
+            session_date=candle.session_date,
+            candle_opened_at=candle.opened_at,
+            strategy_id="data-quality",
+            strategy_name="Data quality gate",
+            strategy_version=1,
+            status="REJECTED",
+            decision_state="BLOCKED",
+            reason=reason,
+            failed_conditions=[reason],
+            data_quality_state=str(quality.get("state", "MISSING")),
+            candle_close=candle.close,
+            candle_volume=candle.volume,
+            indicator_snapshot=indicators,
+        )
+        async with SessionLocal() as session:
+            session.add(evaluation)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                return None
+            await session.refresh(evaluation)
+        return evaluation
+
+    async def _publish_evaluation(self, evaluation: ScannerEvaluation) -> None:
+        await self._redis.publish(
+            SCANNER_EVENTS_CHANNEL,
+            json.dumps(
+                {
+                    "type": "scanner_evaluation",
+                    "evaluation_id": str(evaluation.id),
+                    "instrument_token": evaluation.instrument_token,
+                    "status": evaluation.status,
+                    "score": evaluation.score,
+                }
+            ),
+        )
+
     async def _alert(self, signal: PaperSignal) -> None:
         telegram_settings = await configured_settings(self._settings)
         if not telegram_settings.telegram_is_configured:
@@ -161,6 +263,9 @@ class PaperScannerOrchestrator:
             return
         quality = indicators.get("data_quality")
         if not isinstance(quality, dict) or quality.get("state") in {"INVALID", "STALE", None}:
+            evaluation = await self._record_quality_block(candle, indicators)
+            if evaluation:
+                await self._publish_evaluation(evaluation)
             self._logger.warning(
                 "scanner.signal_blocked_data_quality",
                 instrument_token=candle.instrument_token,
@@ -186,6 +291,9 @@ class PaperScannerOrchestrator:
             ):
                 decision = decision.__class__(next_state=AWAITING, reason="Daily paper-risk limit reached")
             await self._redis.set(state_key, decision.next_state, ex=STATE_TTL_SECONDS)
+            evaluation = await self._record_evaluation(candle, indicators, strategy, decision)
+            if evaluation:
+                await self._publish_evaluation(evaluation)
             if decision.next_state != SIGNALLED or decision.side is None:
                 continue
             signal = await self._record(candle, decision, indicators, strategy)
