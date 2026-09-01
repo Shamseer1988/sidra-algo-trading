@@ -17,6 +17,7 @@ from app.db.session import SessionLocal
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_strategy import AWAITING, SIGNALLED, STRATEGY_VERSION, evaluate_orb_retest
 from app.services.safety import emergency_stop_state, paper_tracking_enabled
+from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 from app.services.telegram import TelegramError, TelegramNotificationService
 from app.services.telegram_config import configured_settings
 
@@ -32,8 +33,11 @@ class PaperScannerOrchestrator:
         self._logger = structlog.get_logger("scanner.paper")
         self._benchmark_token = benchmark_token or settings.nifty_benchmark_token
 
-    def _state_key(self, candle: CompletedCandle) -> str:
-        return f"scanner:strategy_state:{candle.session_date.isoformat()}:{candle.instrument_token}"
+    def _state_key(self, candle: CompletedCandle, strategy: StrategyConfiguration) -> str:
+        return (
+            f"scanner:strategy_state:{candle.session_date.isoformat()}:"
+            f"{candle.instrument_token}:{strategy.id}:v{strategy.version}"
+        )
 
     async def _controls(self) -> dict:
         async with SessionLocal() as session:
@@ -72,16 +76,21 @@ class PaperScannerOrchestrator:
             )
         return Decimal(str(committed or 0)) + Decimal(str(risk_amount)) <= daily_limit
 
-    async def _record(self, candle: CompletedCandle, decision, indicators: dict) -> PaperSignal | None:
+    async def _record(
+        self, candle: CompletedCandle, decision, indicators: dict, strategy: StrategyConfiguration
+    ) -> PaperSignal | None:
         assert decision.side and decision.entry_price and decision.stop_price and decision.target_price
         assert decision.risk_amount is not None and decision.score_breakdown is not None
-        signal_key = f"{STRATEGY_VERSION}:{candle.session_date.isoformat()}:{candle.instrument_token}:{decision.side}"
+        signal_key = (
+            f"{strategy.id}:v{strategy.version}:{candle.session_date.isoformat()}:"
+            f"{candle.instrument_token}:{decision.side}"
+        )
         signal = PaperSignal(
             signal_key=signal_key,
             instrument_token=candle.instrument_token,
             session_date=candle.session_date,
             candle_opened_at=candle.opened_at,
-            strategy_version=STRATEGY_VERSION,
+            strategy_version=f"{STRATEGY_VERSION}@{strategy.version}",
             side=decision.side,
             entry_price=decision.entry_price,
             stop_price=decision.stop_price,
@@ -153,43 +162,51 @@ class PaperScannerOrchestrator:
         controls = await self._controls()
         if not await self._can_signal(candle, controls):
             return
-        prior_state = await self._redis.get(self._state_key(candle)) or AWAITING
-        decision = evaluate_orb_retest(candle, indicators, await self._nifty_snapshot(), controls, prior_state)
-        if (
-            decision.next_state == SIGNALLED
-            and decision.risk_amount is not None
-            and not await self._within_daily_risk_limit(candle, decision.risk_amount, controls)
-        ):
-            decision = decision.__class__(next_state=AWAITING, reason="Daily paper-risk limit reached")
-        await self._redis.set(self._state_key(candle), decision.next_state, ex=STATE_TTL_SECONDS)
-        if decision.next_state != SIGNALLED or decision.side is None:
-            return
-        signal = await self._record(candle, decision, indicators)
-        if signal is None:
-            return
-        await self._redis.set(
-            f"scanner:last_signal:{candle.instrument_token}",
-            json.dumps({"signal_id": str(signal.id), "at": datetime.now(UTC).isoformat()}),
-            ex=STATE_TTL_SECONDS,
-        )
-        await self._alert(signal)
-        await self._redis.publish(
-            SCANNER_EVENTS_CHANNEL,
-            json.dumps(
-                {
-                    "type": "paper_signal",
-                    "signal_id": str(signal.id),
-                    "instrument_token": signal.instrument_token,
-                    "side": signal.side,
-                    "status": signal.status,
-                    "score": signal.score,
-                }
-            ),
-        )
-        self._logger.info(
-            "scanner.paper_signal_recorded",
-            instrument_token=candle.instrument_token,
-            side=signal.side,
-            score=signal.score,
-            live_trading_enabled=False,
-        )
+        nifty = await self._nifty_snapshot()
+        async with SessionLocal() as session:
+            strategies = await StrategyRegistry.enabled(session)
+        for strategy in strategies:
+            effective_controls = strategy.effective_controls(controls)
+            state_key = self._state_key(candle, strategy)
+            prior_state = await self._redis.get(state_key) or AWAITING
+            decision = evaluate_orb_retest(candle, indicators, nifty, effective_controls, prior_state)
+            if (
+                decision.next_state == SIGNALLED
+                and decision.risk_amount is not None
+                and not await self._within_daily_risk_limit(candle, decision.risk_amount, effective_controls)
+            ):
+                decision = decision.__class__(next_state=AWAITING, reason="Daily paper-risk limit reached")
+            await self._redis.set(state_key, decision.next_state, ex=STATE_TTL_SECONDS)
+            if decision.next_state != SIGNALLED or decision.side is None:
+                continue
+            signal = await self._record(candle, decision, indicators, strategy)
+            if signal is None:
+                continue
+            await self._redis.set(
+                f"scanner:last_signal:{candle.instrument_token}",
+                json.dumps({"signal_id": str(signal.id), "at": datetime.now(UTC).isoformat()}),
+                ex=STATE_TTL_SECONDS,
+            )
+            await self._alert(signal)
+            await self._redis.publish(
+                SCANNER_EVENTS_CHANNEL,
+                json.dumps(
+                    {
+                        "type": "paper_signal",
+                        "signal_id": str(signal.id),
+                        "instrument_token": signal.instrument_token,
+                        "side": signal.side,
+                        "status": signal.status,
+                        "score": signal.score,
+                    }
+                ),
+            )
+            self._logger.info(
+                "scanner.paper_signal_recorded",
+                strategy_id=strategy.id,
+                strategy_version=strategy.version,
+                instrument_token=candle.instrument_token,
+                side=signal.side,
+                score=signal.score,
+                live_trading_enabled=False,
+            )

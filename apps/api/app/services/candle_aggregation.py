@@ -16,12 +16,45 @@ from app.services.market_calculations import CompletedCandle, indicator_snapshot
 from app.services.paper_journal import update_outcomes
 
 
+def normalize_market_timestamp(value: object, fallback: datetime) -> datetime:
+    """Normalize broker timestamps (ISO, seconds, milliseconds, or microseconds)."""
+    if isinstance(value, datetime):
+        return value.astimezone(UTC) if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        stripped = value.strip()
+        try:
+            parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+            return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        except ValueError:
+            value = stripped
+    try:
+        epoch = Decimal(str(value))
+        if epoch > Decimal("100000000000000"):
+            epoch /= Decimal("1000000")
+        elif epoch > Decimal("100000000000"):
+            epoch /= Decimal("1000")
+        return datetime.fromtimestamp(float(epoch), tz=UTC)
+    except (ArithmeticError, ValueError, TypeError, OSError, OverflowError):
+        return fallback
+
+
 @dataclass(frozen=True)
 class MarketTick:
     instrument_token: str
     price: Decimal
     cumulative_volume: int | None
-    occurred_at: datetime
+    exchange_timestamp: datetime
+    received_timestamp: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.received_timestamp is None:
+            object.__setattr__(self, "received_timestamp", self.exchange_timestamp)
+
+    @property
+    def latency_ms(self) -> int:
+        """Transport latency without affecting deterministic candle assignment."""
+        assert self.received_timestamp is not None
+        return max(int((self.received_timestamp - self.exchange_timestamp).total_seconds() * 1000), 0)
 
 
 @dataclass
@@ -83,9 +116,9 @@ class CandleAggregationService:
         return tick.cumulative_volume - previous if tick.cumulative_volume >= previous else tick.cumulative_volume
 
     async def consume(self, tick: MarketTick) -> None:
-        if not is_regular_market_timestamp(tick.occurred_at):
+        if not is_regular_market_timestamp(tick.exchange_timestamp):
             return
-        bucket = _bucket_start(tick.occurred_at, self._timeframe_seconds)
+        bucket = _bucket_start(tick.exchange_timestamp, self._timeframe_seconds)
         current = self._open.get(tick.instrument_token)
         if current is not None and bucket < current.opened_at:
             return  # Late tick: never mutate a closed candle or introduce look-ahead data.

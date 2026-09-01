@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page, type Route } from "@playwright/test";
 
 const MOCK_ADMIN_USER = {
   email: "admin@sentinel.internal",
@@ -102,45 +102,45 @@ const MOCK_AUDIT = [
   { id: "aud-1", event_type: "auth.login_success", created_at: new Date().toISOString(), user_id: "u-1", ip_address: "127.0.0.1", message: "Admin sign-in", metadata_json: {} },
 ];
 
-async function setupMockRoutes(page: any, userRole: "ADMIN" | "VIEWER" = "ADMIN") {
+async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN") {
   const user = userRole === "ADMIN" ? MOCK_ADMIN_USER : MOCK_VIEWER_USER;
   let currentScanner = { status: "STOPPED", last_heartbeat: new Date().toISOString(), detail: "Scanner is paused" };
 
-  await page.route("**/api/v1/auth/me", async (route: any) => {
+  await page.route("**/api/v1/auth/me", async (route: Route) => {
     await route.fulfill({ json: user });
   });
 
-  await page.route("**/api/v1/system/overview", async (route: any) => {
+  await page.route("**/api/v1/system/overview", async (route: Route) => {
     await route.fulfill({ json: MOCK_OVERVIEW });
   });
 
-  await page.route("**/api/v1/scanner/status", async (route: any) => {
+  await page.route("**/api/v1/scanner/status", async (route: Route) => {
     await route.fulfill({ json: currentScanner });
   });
 
-  await page.route("**/api/v1/scanner/start", async (route: any) => {
+  await page.route("**/api/v1/scanner/start", async (route: Route) => {
     currentScanner = { status: "RUNNING", last_heartbeat: new Date().toISOString(), detail: "Scanner active" };
     await route.fulfill({ json: currentScanner });
   });
 
-  await page.route("**/api/v1/scanner/stop", async (route: any) => {
+  await page.route("**/api/v1/scanner/stop", async (route: Route) => {
     currentScanner = { status: "STOPPED", last_heartbeat: new Date().toISOString(), detail: "Scanner is paused" };
     await route.fulfill({ json: currentScanner });
   });
 
-  await page.route("**/api/v1/scanner/signals", async (route: any) => {
+  await page.route("**/api/v1/scanner/signals", async (route: Route) => {
     await route.fulfill({ json: MOCK_SIGNALS });
   });
 
-  await page.route("**/api/v1/safety/status", async (route: any) => {
+  await page.route("**/api/v1/safety/status", async (route: Route) => {
     await route.fulfill({ json: MOCK_SAFETY });
   });
 
-  await page.route("**/api/v1/telegram/status", async (route: any) => {
+  await page.route("**/api/v1/telegram/status", async (route: Route) => {
     await route.fulfill({ json: MOCK_TELEGRAM });
   });
 
-  await page.route("**/api/v1/settings/trading", async (route: any) => {
+  await page.route("**/api/v1/settings/trading", async (route: Route) => {
     if (route.request().method() === "PUT") {
       const body = route.request().postDataJSON();
       await route.fulfill({ json: body });
@@ -149,27 +149,27 @@ async function setupMockRoutes(page: any, userRole: "ADMIN" | "VIEWER" = "ADMIN"
     }
   });
 
-  await page.route("**/api/v1/market-data/brokers", async (route: any) => {
+  await page.route("**/api/v1/market-data/brokers", async (route: Route) => {
     await route.fulfill({ json: { upstox_paper_enabled: true, firstock_feed_enabled: false } });
   });
 
-  await page.route("**/api/v1/market-data/candles/**", async (route: any) => {
+  await page.route("**/api/v1/market-data/candles/**", async (route: Route) => {
     await route.fulfill({ json: MOCK_CANDLES });
   });
 
-  await page.route("**/api/v1/auth/sessions", async (route: any) => {
+  await page.route("**/api/v1/auth/sessions", async (route: Route) => {
     await route.fulfill({ json: MOCK_SESSIONS });
   });
 
-  await page.route("**/api/v1/auth/sessions/*", async (route: any) => {
+  await page.route("**/api/v1/auth/sessions/*", async (route: Route) => {
     await route.fulfill({ status: 204 });
   });
 
-  await page.route("**/api/v1/auth/audit-logs", async (route: any) => {
+  await page.route("**/api/v1/auth/audit-logs", async (route: Route) => {
     await route.fulfill({ json: MOCK_AUDIT });
   });
 
-  await page.route("**/api/v1/journal/export.csv*", async (route: any) => {
+  await page.route("**/api/v1/journal/export.csv*", async (route: Route) => {
     await route.fulfill({
       status: 200,
       contentType: "text/csv",
@@ -180,6 +180,25 @@ async function setupMockRoutes(page: any, userRole: "ADMIN" | "VIEWER" = "ADMIN"
 }
 
 test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
+  test("expired access token refreshes once and retries the protected request", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    let refreshed = false;
+    let refreshCalls = 0;
+    await page.route("**/api/v1/auth/refresh", async (route) => {
+      refreshCalls += 1;
+      refreshed = true;
+      await route.fulfill({ json: { email: MOCK_ADMIN_USER.email, role: "ADMIN" } });
+    });
+    await page.route("**/api/v1/auth/me", async (route) => {
+      await route.fulfill(refreshed ? { json: MOCK_ADMIN_USER } : { status: 401, json: { detail: "Access token expired" } });
+    });
+
+    await page.goto("/");
+
+    await expect(page.getByText("Sidra Command Center")).toBeVisible();
+    expect(refreshCalls).toBe(1);
+  });
+
   test("1. Login Page: Rejection on invalid credentials & successful login flow", async ({ page }) => {
     await page.route("**/api/v1/auth/me", async (route) => {
       await route.fulfill({ status: 401, json: { detail: "Authentication required" } });
@@ -229,8 +248,8 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await page.goto("/");
 
     // Check dashboard loaded
-    await expect(page.getByText("Intraday Sentinel")).toBeVisible();
-    await expect(page.getByText("PAPER MODE")).toBeVisible();
+    await expect(page.getByText("Sidra Command Center")).toBeVisible();
+    await expect(page.getByText("PAPER", { exact: true }).first()).toBeVisible();
 
     // Trigger Start Scanner
     const startBtn = page.getByRole("button", { name: "Start scanner" });

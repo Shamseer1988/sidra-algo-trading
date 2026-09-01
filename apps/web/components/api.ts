@@ -5,7 +5,7 @@ export type ScannerStatus = { status: string; last_heartbeat: string | null; det
 export type PaperSignal = { id: string; instrument_token: string; session_date: string; candle_opened_at: string; side: "LONG" | "SHORT"; status: string; entry_price: number; stop_price: number; target_price: number; quantity: number; score: number; score_breakdown: Record<string, number>; created_at: string };
 export type MarketCandle = { opened_at: string; closed_at: string; open: number; high: number; low: number; close: number; volume: number };
 export type TradingControls = { account_capital: number; risk_per_trade_percent: number; maximum_daily_risk_percent: number; maximum_signals: number; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number; trade_start_time: string; trade_cutoff_time: string };
-export type PaperStrategy = { id: string; name: string; enabled: boolean; strategy_type: string; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number };
+export type PaperStrategy = { id: string; name: string; enabled: boolean; strategy_type: string; version: number; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number };
 export type SafetyStatus = { paper_tracking_enabled: boolean; live_trading_enabled: boolean; live_execution_available: boolean; emergency_stop_active: boolean; emergency_stop_reason: string | null; emergency_stop_source: string | null; emergency_stop_at: string | null };
 export type TelegramStatus = { configured: boolean; webhook_configured: boolean; inbound_enabled: boolean; detail: string };
 export type BrokerControls = { upstox_paper_enabled: boolean; firstock_feed_enabled: boolean };
@@ -17,11 +17,38 @@ function csrfToken(): string | undefined {
   return document.cookie.split("; ").find((value) => value.startsWith("csrf_token="))?.split("=")[1];
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+let refreshInFlight: Promise<boolean> | null = null;
+
+async function refreshAccessToken(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      const token = csrfToken();
+      const response = await fetch("/api/v1/auth/refresh", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", ...(token ? { "X-CSRF-Token": decodeURIComponent(token) } : {}) },
+      });
+      return response.ok;
+    })().finally(() => { refreshInFlight = null; });
+  }
+  return refreshInFlight;
+}
+
+async function request<T>(path: string, init?: RequestInit, allowRefresh = true): Promise<T> {
   const method = init?.method?.toUpperCase() ?? "GET";
   const csrf = ["POST", "PUT", "PATCH", "DELETE"].includes(method) && path !== "/auth/login" ? csrfToken() : undefined;
   const response = await fetch(`/api/v1${path}`, { ...init, credentials: "include", headers: { "Content-Type": "application/json", ...(csrf ? { "X-CSRF-Token": decodeURIComponent(csrf) } : {}), ...(init?.headers ?? {}) } });
-  if (!response.ok) { const body = await response.json().catch(() => null) as { detail?: string } | null; throw new Error(body?.detail ?? "Request failed"); }
+  if (response.status === 401 && allowRefresh && !["/auth/login", "/auth/refresh"].includes(path)) {
+    if (await refreshAccessToken()) return request<T>(path, init, false);
+  }
+  if (!response.ok) { const body = await response.json().catch(() => null) as { detail?: string } | null; throw new ApiError(body?.detail ?? "Request failed", response.status); }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }

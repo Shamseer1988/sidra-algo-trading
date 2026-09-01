@@ -1,6 +1,6 @@
-# Intraday Sentinel
+# Sidra Algo Trading
 
-Self-hosted, paper-first NSE intraday scanning and outbound Telegram alerting platform. Release 1 has no order submission path. `LIVE_TRADING_ENABLED=false` is the mandatory default.
+Self-hosted, paper-first NSE algorithmic trading command center. The current release has no order-submission path. `LIVE_TRADING_ENABLED=false` is the mandatory default.
 
 ## Current state
 
@@ -27,7 +27,7 @@ outside this release.
    .\scripts\start.ps1
    ```
 
-3. Open `http://localhost` and API docs at `http://localhost:8000/docs`.
+3. Open the protected web terminal on the configured local web port (default `http://127.0.0.1:3001`). FastAPI stays private inside Docker and is reached through same-origin `/api` routes.
 4. Create the first administrator after the stack is healthy:
 
    ```powershell
@@ -38,9 +38,9 @@ The command prompts for a password; one is never shipped in the repository.
 
 For a production-style deployment, run migrations before starting the API with `docker compose exec api alembic upgrade head` and set `AUTO_CREATE_SCHEMA=false`.
 
-## Phase 2 terminal
+## Sidra terminal
 
-Sign in at the web address shown by `docker compose ps` (normally `http://localhost` or `http://127.0.0.1:3001`). The terminal reports actual API, PostgreSQL, Redis, and scanner-worker state. ADMIN users can change paper-risk controls and start or stop the scanner worker. START does not create signals until Firstock market-data integration is delivered.
+Sign in at the web address shown by `docker compose ps` (normally `http://127.0.0.1:3001`). The terminal reports actual API, PostgreSQL, Redis, market-feed, notification, and scanner-worker state. ADMIN users can change paper-risk controls and start or stop the scanner worker.
 
 ## Market-data connectors
 

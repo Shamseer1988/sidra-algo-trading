@@ -12,7 +12,7 @@ from redis.asyncio import Redis
 from websockets.exceptions import WebSocketException
 
 from app.core.config import Settings
-from app.services.candle_aggregation import MarketTick
+from app.services.candle_aggregation import MarketTick, normalize_market_timestamp
 from app.services.firstock.client import FirstockClient, FirstockError, FirstockSession
 
 FIRSTOCK_WS_URL = "wss://socket.firstock.in/V2/ws"
@@ -94,12 +94,14 @@ class FirstockMarketDataService:
             if price is None:
                 continue
             volume = parse_volume(tick.get("i_volume_traded_today"))
+            exchange_timestamp = normalize_market_timestamp(tick.get("i_feed_time"), received_datetime)
             normalized = {
                 "instrument_token": instrument_token,
                 "price": price,
                 "volume": volume,
-                "exchange_feed_time": tick.get("i_feed_time"),
-                "received_at": received_at,
+                "exchange_timestamp": exchange_timestamp.isoformat(),
+                "received_timestamp": received_at,
+                "latency_ms": max(int((received_datetime - exchange_timestamp).total_seconds() * 1000), 0),
             }
             pipe.set(f"market:tick:{instrument_token}", json.dumps(normalized), ex=90)
             market_ticks.append(
@@ -107,7 +109,8 @@ class FirstockMarketDataService:
                     instrument_token=instrument_token,
                     price=Decimal(price),
                     cumulative_volume=volume,
-                    occurred_at=received_datetime,
+                    exchange_timestamp=exchange_timestamp,
+                    received_timestamp=received_datetime,
                 )
             )
             tick_count += 1

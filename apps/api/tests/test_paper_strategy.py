@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_strategy import AWAITING, LONG_BREAKOUT, SIGNALLED, evaluate_orb_retest
+from app.services.strategy_registry import StrategyConfiguration
 
 CONTROLS = {
     "account_capital": 100_000.0,
@@ -105,3 +106,18 @@ def test_strategy_resets_unknown_state_and_handles_invalid_risk_plan() -> None:
         LONG_BREAKOUT,
     )
     assert no_risk.next_state == AWAITING
+
+
+def test_registry_configuration_overrides_global_strategy_parameters() -> None:
+    strategy = StrategyConfiguration(
+        name="Conservative ORB",
+        minimum_score=100,
+        minimum_rr=2.25,
+        volume_multiplier=1.8,
+    )
+    effective = strategy.effective_controls(CONTROLS)
+
+    assert effective["minimum_score"] == 100
+    assert effective["minimum_rr"] == 2.25
+    assert effective["volume_multiplier"] == 1.8
+    assert CONTROLS["minimum_score"] == 90

@@ -1,14 +1,12 @@
-from uuid import uuid4
-
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from app.api.deps import CurrentUser, DbSession, require_roles
 from app.db.models import ApplicationSetting, AuditLog, User, UserRole
+from app.services.strategy_registry import DEFAULT_STRATEGIES, STRATEGIES_KEY, StrategyConfiguration
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 TRADING_KEY = "trading_controls"
-STRATEGIES_KEY = "paper_strategies"
 DEFAULT_TRADING_CONTROLS = {
     "account_capital": 100000.0,
     "risk_per_trade_percent": 0.5,
@@ -36,21 +34,6 @@ class TradingControls(BaseModel):
     minimum_ema_spread_percent: float = Field(default=0.05, ge=0, le=5)
     trade_start_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     trade_cutoff_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
-
-
-class PaperStrategy(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid4()))
-    name: str = Field(min_length=3, max_length=80)
-    enabled: bool = True
-    strategy_type: str = "orb-retest-v1"
-    minimum_score: int = Field(default=90, ge=0, le=100)
-    minimum_rr: float = Field(default=1.5, ge=1, le=10)
-    volume_multiplier: float = Field(default=1.3, ge=0.5, le=10)
-    retest_tolerance_percent: float = Field(default=0.15, ge=0.05, le=1)
-    minimum_ema_spread_percent: float = Field(default=0.05, ge=0, le=5)
-
-
-DEFAULT_STRATEGIES = [PaperStrategy(name="ORB Retest — Default").model_dump()]
 
 
 async def _get_controls(session: DbSession) -> TradingControls:
@@ -87,16 +70,16 @@ async def update_trading_controls(
     return controls
 
 
-@router.get("/strategies", response_model=list[PaperStrategy])
-async def get_strategies(_: CurrentUser, session: DbSession) -> list[PaperStrategy]:
+@router.get("/strategies", response_model=list[StrategyConfiguration])
+async def get_strategies(_: CurrentUser, session: DbSession) -> list[StrategyConfiguration]:
     setting = await session.get(ApplicationSetting, STRATEGIES_KEY)
-    return [PaperStrategy.model_validate(item) for item in (setting.value if setting else DEFAULT_STRATEGIES)]
+    return [StrategyConfiguration.model_validate(item) for item in (setting.value if setting else DEFAULT_STRATEGIES)]
 
 
-@router.put("/strategies", response_model=list[PaperStrategy])
+@router.put("/strategies", response_model=list[StrategyConfiguration])
 async def update_strategies(
-    strategies: list[PaperStrategy], session: DbSession, user: User = Depends(require_roles(UserRole.ADMIN))
-) -> list[PaperStrategy]:
+    strategies: list[StrategyConfiguration], session: DbSession, user: User = Depends(require_roles(UserRole.ADMIN))
+) -> list[StrategyConfiguration]:
     if not strategies or len({item.id for item in strategies}) != len(strategies):
         from fastapi import HTTPException, status
 
@@ -104,7 +87,20 @@ async def update_strategies(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Keep one or more uniquely identified strategies"
         )
     setting = await session.get(ApplicationSetting, STRATEGIES_KEY)
-    value = [item.model_dump() for item in strategies]
+    previous = {
+        item.id: item
+        for item in [
+            StrategyConfiguration.model_validate(value) for value in (setting.value if setting else DEFAULT_STRATEGIES)
+        ]
+    }
+    normalized: list[StrategyConfiguration] = []
+    for item in strategies:
+        old = previous.get(item.id)
+        new_payload = item.model_dump(exclude={"version"})
+        old_payload = old.model_dump(exclude={"version"}) if old else None
+        version = old.version + 1 if old and new_payload != old_payload else old.version if old else 1
+        normalized.append(item.model_copy(update={"version": version}))
+    value = [item.model_dump() for item in normalized]
     if setting is None:
         session.add(ApplicationSetting(key=STRATEGIES_KEY, value=value, updated_by_user_id=user.id))
     else:
@@ -113,4 +109,4 @@ async def update_strategies(
         AuditLog(user_id=user.id, event_type="settings.strategies_updated", metadata_json={"count": len(strategies)})
     )
     await session.commit()
-    return strategies
+    return normalized

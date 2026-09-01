@@ -50,7 +50,9 @@ async def backfill_today_candles(
             try:
                 response = await client.get(url)
                 if response.status_code != 200:
-                    logger.warning("upstox.backfill_failed_status", instrument=instrument_key, status=response.status_code)
+                    logger.warning(
+                        "upstox.backfill_failed_status", instrument=instrument_key, status=response.status_code
+                    )
                     continue
 
                 data = response.json()

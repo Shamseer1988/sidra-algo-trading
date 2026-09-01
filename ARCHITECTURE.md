@@ -1,8 +1,8 @@
-# Intraday Sentinel Architecture
+# Sidra Algo Trading Architecture
 
 ## Purpose and safety boundary
 
-Intraday Sentinel is a self-hosted NSE intraday scanner. Release 1 ingests market data, creates completed candles, evaluates deterministic strategies, sends outbound Telegram alerts, and journals paper outcomes. It does **not** submit orders. `LIVE_TRADING_ENABLED` defaults to `false`; all future execution interfaces must reject calls unless that server-only flag is explicitly changed.
+Sidra Algo Trading is a self-hosted NSE trading platform currently operating as a paper-only scanner. It ingests market data, creates completed candles, evaluates deterministic strategies, sends Telegram alerts, and journals paper outcomes. It does **not** submit orders. `LIVE_TRADING_ENABLED` defaults to `false`; future execution interfaces require explicit safety and compliance gates.
 
 ## Runtime topology
 
@@ -19,7 +19,7 @@ Browser ──HTTP──> Next.js web ──same-origin proxy──> FastAPI API
                                       Telegram sendMessage only (future service)
 ```
 
-Docker exposes only the web application on `127.0.0.1:80` and the API on `127.0.0.1:8000`. PostgreSQL and Redis live on an internal Docker network and are not internet-facing.
+Docker exposes only the web application on `127.0.0.1:${WEB_PORT:-3001}`. FastAPI, PostgreSQL, Redis, and the scanner worker live on internal Docker networks and are not internet-facing.
 
 ## Modules
 

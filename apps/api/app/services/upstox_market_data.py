@@ -16,7 +16,7 @@ import structlog
 from redis.asyncio import Redis
 
 from app.core.config import Settings
-from app.services.candle_aggregation import MarketTick
+from app.services.candle_aggregation import MarketTick, normalize_market_timestamp
 from app.services.firstock.market_data import CONNECTION_STATE_KEY, LAST_TICK_KEY
 
 
@@ -105,6 +105,7 @@ class UpstoxMarketDataService:
             if price is None:
                 continue
             volume = _volume(full_feed)
+            exchange_timestamp = normalize_market_timestamp(ltpc.get("ltt") or payload.get("currentTs"), received_at)
             pipe.set(
                 f"market:tick:{instrument_key}",
                 json.dumps(
@@ -112,13 +113,23 @@ class UpstoxMarketDataService:
                         "instrument_token": instrument_key,
                         "price": str(price),
                         "volume": volume,
-                        "received_at": received_at.isoformat(),
+                        "exchange_timestamp": exchange_timestamp.isoformat(),
+                        "received_timestamp": received_at.isoformat(),
+                        "latency_ms": max(int((received_at - exchange_timestamp).total_seconds() * 1000), 0),
                         "provider": "UPSTOX",
                     }
                 ),
                 ex=90,
             )
-            normalized_ticks.append(MarketTick(instrument_key, price, volume, received_at))
+            normalized_ticks.append(
+                MarketTick(
+                    instrument_token=instrument_key,
+                    price=price,
+                    cumulative_volume=volume,
+                    exchange_timestamp=exchange_timestamp,
+                    received_timestamp=received_at,
+                )
+            )
         if normalized_ticks:
             pipe.set(LAST_TICK_KEY, received_at.isoformat(), ex=90)
             await pipe.execute()

@@ -2,27 +2,85 @@
 @tailwind components;
 @tailwind utilities;
 
-:root { color-scheme: dark; }
+:root {
+  color-scheme: dark;
+  --background: #070b11;
+  --foreground: #e8edf5;
+  --surface: #0d131c;
+  --surface-muted: #121a25;
+  --surface-elevated: #16202d;
+  --border: #253142;
+  --border-subtle: #1b2634;
+  --muted: #8491a5;
+  --muted-strong: #aab5c4;
+  --primary: #2dd4a3;
+  --primary-strong: #13b887;
+  --primary-soft: rgba(45, 212, 163, .12);
+  --positive: #34d399;
+  --negative: #fb7185;
+  --warning: #f6c453;
+  --info: #60a5fa;
+  --shadow: rgba(0, 0, 0, .28);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --background: #f2f5f8;
+  --foreground: #111827;
+  --surface: #ffffff;
+  --surface-muted: #f7f9fb;
+  --surface-elevated: #edf2f6;
+  --border: #d8e0e8;
+  --border-subtle: #e7ecf1;
+  --muted: #647184;
+  --muted-strong: #465468;
+  --primary: #047857;
+  --primary-strong: #066b50;
+  --primary-soft: rgba(4, 120, 87, .09);
+  --positive: #047857;
+  --negative: #be123c;
+  --warning: #a16207;
+  --info: #2563eb;
+  --shadow: rgba(15, 23, 42, .08);
+}
 * { box-sizing: border-box; }
-body { margin: 0; background: #090c10; color: #e5e7eb; font-family: Arial, Helvetica, sans-serif; }
-button, input { font: inherit; }
+body { margin: 0; background: var(--background); color: var(--foreground); font-family: "Geist", "Segoe UI Variable", "Segoe UI", sans-serif; }
+button, input, select { font: inherit; }
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+::selection { background: var(--primary-soft); color: var(--foreground); }
 
 @layer components {
-  .panel { @apply rounded-xl border border-slate-800 bg-terminal-900 shadow-sm shadow-black/20; }
-  .sidebar { @apply fixed inset-y-0 left-0 z-30 flex w-64 -translate-x-full flex-col border-r border-slate-800 bg-[#0d1218] transition-transform lg:translate-x-0; }
+  .panel { border: 1px solid var(--border-subtle); background: var(--surface); box-shadow: 0 10px 28px var(--shadow); @apply rounded-lg; }
+  .sidebar { background: var(--surface); border-color: var(--border-subtle); @apply fixed inset-y-0 left-0 z-30 flex w-64 -translate-x-full flex-col border-r transition-all duration-200 lg:translate-x-0; }
+  .sidebar-collapsed { @apply lg:w-[76px]; }
   .sidebar-open { @apply translate-x-0 shadow-2xl shadow-black/60; }
-  .nav-item { @apply flex items-center gap-3 rounded-md px-3 py-2.5 text-sm text-slate-400 transition hover:bg-terminal-800 hover:text-slate-100; }
-  .nav-active { @apply bg-emerald-950/60 text-emerald-300; }
+  .nav-item { color: var(--muted); @apply flex items-center gap-3 rounded-md px-3 py-2.5 text-sm transition; }
+  .nav-item:hover { background: var(--surface-elevated); color: var(--foreground); }
+  .nav-active { background: var(--primary-soft); color: var(--primary); box-shadow: inset 2px 0 0 var(--primary); }
   .status-pill { @apply inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide; }
   .status-good { @apply border-emerald-900 bg-emerald-950/50 text-emerald-300; }
   .status-watch { @apply border-amber-900 bg-amber-950/40 text-amber-300; }
   .status-bad { @apply border-rose-900 bg-rose-950/40 text-rose-300; }
-  .primary-button { @apply inline-flex items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 py-2.5 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-50; }
+  .primary-button { background: var(--primary); color: #04140f; @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-semibold transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50; }
   .danger-button { @apply inline-flex items-center justify-center gap-2 rounded-md bg-rose-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-rose-400 disabled:cursor-not-allowed disabled:opacity-50; }
-  .secondary-button { @apply inline-flex items-center justify-center gap-2 rounded-md border border-slate-700 bg-terminal-800 px-4 py-2.5 text-sm font-medium text-slate-300 transition hover:border-slate-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-50; }
+  .secondary-button { border-color: var(--border); background: var(--surface-muted); color: var(--muted-strong); @apply inline-flex items-center justify-center gap-2 rounded-md border px-4 py-2.5 text-sm font-medium transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50; }
   .field-label { @apply block text-xs font-medium text-slate-400; }
-  .field-input { @apply w-full rounded-md border border-slate-700 bg-terminal-950 px-3 py-2.5 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20; }
-  .eyebrow { @apply text-[11px] font-semibold uppercase tracking-[.16em] text-emerald-400; }
-  .page-title { @apply mt-2 text-2xl font-semibold tracking-tight text-white sm:text-3xl; }
-  .page-copy { @apply mt-2 max-w-2xl text-sm leading-6 text-slate-400; }
+  .field-input { border-color: var(--border); background: var(--background); color: var(--foreground); @apply w-full rounded-md border px-3 py-2.5 text-sm outline-none transition placeholder:text-slate-500 focus:ring-2 focus:ring-emerald-500/20; }
+  .eyebrow { color: var(--primary); @apply text-[10px] font-bold uppercase tracking-[.18em]; }
+  .page-title { color: var(--foreground); @apply mt-2 text-2xl font-semibold tracking-tight sm:text-3xl; }
+  .page-copy { color: var(--muted); @apply mt-2 max-w-2xl text-sm leading-6; }
+  .theme-control { border-color: var(--border); background: var(--surface-muted); color: var(--muted-strong); @apply inline-flex h-8 items-center gap-1.5 rounded-md border px-2 text-xs; }
+  .theme-control select { background: transparent; color: inherit; @apply cursor-pointer border-0 outline-none; }
+  .theme-control option { background: var(--surface); color: var(--foreground); }
+  .market-clock { color: var(--foreground); font-variant-numeric: tabular-nums; @apply hidden items-center gap-2 text-xs font-semibold tracking-wide sm:inline-flex; }
+  .market-clock span { color: var(--muted); @apply text-[9px] font-bold tracking-[.16em]; }
 }
+
+/* Existing terminal utilities are remapped so the light theme is deliberately designed. */
+:root[data-theme="light"] .bg-terminal-950 { background-color: var(--background); }
+:root[data-theme="light"] .bg-terminal-900, :root[data-theme="light"] .bg-\[\#0d1218\] { background-color: var(--surface); }
+:root[data-theme="light"] .bg-terminal-800, :root[data-theme="light"] .bg-terminal-800\/70 { background-color: var(--surface-muted); }
+:root[data-theme="light"] .text-white, :root[data-theme="light"] .text-slate-100, :root[data-theme="light"] .text-slate-200, :root[data-theme="light"] .text-slate-300 { color: var(--foreground); }
+:root[data-theme="light"] .text-slate-400, :root[data-theme="light"] .text-slate-500 { color: var(--muted); }
+:root[data-theme="light"] .border-slate-800, :root[data-theme="light"] .border-slate-800\/70, :root[data-theme="light"] .border-slate-700 { border-color: var(--border-subtle); }
+:root[data-theme="light"] .shadow-black\/20, :root[data-theme="light"] .shadow-black\/40, :root[data-theme="light"] .shadow-black\/60 { --tw-shadow-color: var(--shadow); }

@@ -126,8 +126,16 @@ async def test_aggregator_emits_only_after_candle_closes() -> None:
 
     aggregation = CandleAggregationService(60, receive)
     start = datetime(2026, 8, 31, 3, 45, 1, tzinfo=UTC)
-    await aggregation.consume(MarketTick("NSE:26000", Decimal("100"), 100, start))
-    await aggregation.consume(MarketTick("NSE:26000", Decimal("102"), 150, start + timedelta(seconds=20)))
+    await aggregation.consume(MarketTick("NSE:26000", Decimal("100"), 100, start, start + timedelta(milliseconds=80)))
+    await aggregation.consume(
+        MarketTick(
+            "NSE:26000",
+            Decimal("102"),
+            150,
+            start + timedelta(seconds=20),
+            start + timedelta(seconds=20, milliseconds=75),
+        )
+    )
     assert completed == []
     await aggregation.flush_expired(start + timedelta(seconds=61))
     assert len(completed) == 1
@@ -144,7 +152,8 @@ async def test_aggregator_rejects_ticks_outside_regular_market_session() -> None
         completed.append(candle)
 
     aggregation = CandleAggregationService(60, receive)
-    await aggregation.consume(MarketTick("NSE:26000", Decimal("100"), 100, datetime(2026, 8, 31, 3, 0, tzinfo=UTC)))
+    premarket = datetime(2026, 8, 31, 3, 0, tzinfo=UTC)
+    await aggregation.consume(MarketTick("NSE:26000", Decimal("100"), 100, premarket, premarket))
     await aggregation.flush_expired(datetime(2026, 8, 31, 4, 0, tzinfo=UTC))
     assert completed == []
 
@@ -158,9 +167,13 @@ async def test_aggregator_ignores_late_ticks_after_a_completed_bucket() -> None:
 
     aggregation = CandleAggregationService(60, receive)
     start = datetime(2026, 8, 31, 3, 45, tzinfo=UTC)
-    await aggregation.consume(MarketTick("NSE:26000", Decimal("100"), 100, start))
-    await aggregation.consume(MarketTick("NSE:26000", Decimal("101"), 110, start + timedelta(minutes=1)))
-    await aggregation.consume(MarketTick("NSE:26000", Decimal("50"), 120, start + timedelta(seconds=30)))
+    await aggregation.consume(MarketTick("NSE:26000", Decimal("100"), 100, start, start))
+    await aggregation.consume(
+        MarketTick("NSE:26000", Decimal("101"), 110, start + timedelta(minutes=1), start + timedelta(minutes=1))
+    )
+    await aggregation.consume(
+        MarketTick("NSE:26000", Decimal("50"), 120, start + timedelta(seconds=30), start + timedelta(minutes=2))
+    )
     assert completed[0].low == Decimal("100")
 
 
