@@ -66,6 +66,7 @@ Completed first slice:
 - Global header with real scanner/feed state, PAPER badge, and live IST clock.
 - Premium dashboard using backend-confirmed operational data only.
 - Feature extraction started with `features/dashboard`.
+- Unified glassmorphism system across navigation, headers, cards, forms, tables, status badges, authentication, and broker callback states in both light and dark themes.
 
 Next:
 
