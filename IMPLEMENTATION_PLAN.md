@@ -55,24 +55,23 @@ Completed:
 
 Production reverse proxy, TLS termination, resource limits, startup reconciliation, and operational monitoring remain Phase 12 work.
 
-## Phase 2 — Premium terminal UI (started)
+## Phase 2 — Premium terminal UI (complete)
 
-Completed first slice:
+Completed:
 
 - Sidra Algo visual identity and command-center information hierarchy.
 - Semantic Light, Dark, and System themes with persisted preference and no initial theme flash.
 - Compact responsive sidebar with collapsed icon mode and mobile drawer.
 - Global header with real scanner/feed state, PAPER badge, and live IST clock.
 - Premium dashboard using backend-confirmed operational data only.
-- Feature extraction started with `features/dashboard`.
+- Replaced the monolithic terminal shell with modular layout, navigation, shared formatting, and feature workspaces.
+- Added the complete information architecture: trading, risk and analytics, brokers, automation, and system sections with responsive drawer, collapsed navigation, active state, and planned-workspace notices.
+- Added real-data Market, Scanner, System Health, Journal, broker configuration, audit, controls, signals, strategies, and settings workspaces.
+- Added explicit unavailable states for order, position, performance, backtesting, automation, scheduler, and user-management areas; no placeholder trading data is presented.
+- Added shared responsive toolbar, table, status, data-list, skeleton, and empty-state primitives.
 - Unified glassmorphism system across navigation, headers, cards, forms, tables, status badges, authentication, and broker callback states in both light and dark themes.
 
-Next:
-
-- Complete feature-based shell extraction.
-- Add full navigation architecture as functional routes become available.
-- Build professional market strip, metrics, system-health, alerts, and table primitives from real API contracts.
-- Add loading, empty, error, reconnection, and permission states.
+Phase 3 continues with the detailed scanner explorer, saved views, and setup-inspector contracts.
 
 ## Phase 3 — Scanner workspace
 

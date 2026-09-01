@@ -127,6 +127,37 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   .theme-control option, .field-input option { background: var(--surface); color: var(--foreground); }
   .market-clock { color: var(--foreground); font-variant-numeric: tabular-nums; @apply hidden items-center gap-2 text-xs font-semibold tracking-wide sm:inline-flex; }
   .market-clock span { color: var(--muted); @apply text-[9px] font-bold tracking-[.16em]; }
+  .brand-mark { background: linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--primary) 55%, white 45%)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .42), 0 10px 24px color-mix(in srgb, var(--primary) 24%, transparent); color: #03130e; @apply grid h-9 w-9 shrink-0 place-items-center rounded-md; }
+  .icon-button { border: 1px solid var(--glass-border); background: var(--glass-muted); box-shadow: inset 0 1px 0 var(--glass-highlight); @apply grid h-8 w-8 place-items-center rounded-md transition hover:brightness-110; }
+  .user-menu { border: 1px solid var(--glass-border); background: var(--glass-muted); color: var(--foreground); @apply grid h-8 w-8 place-items-center rounded-full text-xs font-bold; }
+  .user-menu-popover { border: 1px solid var(--glass-border-strong); background: var(--glass-surface-strong); box-shadow: 0 12px 30px var(--glass-shadow); @apply absolute right-4 top-12 w-56 rounded-md p-3; }
+  .page-toolbar { @apply flex flex-col gap-4 border-b border-slate-800 pb-5 lg:flex-row lg:items-end lg:justify-between; }
+  .table-scroll { @apply overflow-x-auto; }
+  .terminal-table { @apply min-w-full text-left text-sm; }
+  .terminal-table thead { color: var(--muted); background: var(--glass-muted); @apply border-b border-slate-800 text-[10px] font-bold uppercase tracking-[.13em]; }
+  .terminal-table th { @apply whitespace-nowrap px-5 py-3; }
+  .terminal-table td { @apply whitespace-nowrap border-b border-slate-800/70 px-5 py-4 text-slate-300; }
+  .terminal-table tbody tr { @apply cursor-pointer transition-colors hover:bg-terminal-800; }
+  .terminal-table td strong { color: var(--foreground); @apply block font-medium; }
+  .terminal-table td span:not(.status-pill) { color: var(--muted); @apply mt-1 block text-xs; }
+  .table-selected { background: color-mix(in srgb, var(--primary-soft) 76%, transparent); }
+  .numeric { font-variant-numeric: tabular-nums; }
+  .muted-cell { color: var(--muted) !important; @apply text-xs; }
+  .signal-price-grid { @apply mt-6 grid grid-cols-3 gap-3; }
+  .signal-price-grid > div { border: 1px solid var(--glass-border); background: var(--glass-muted); @apply rounded-md p-3; }
+  .signal-price-grid p { color: var(--muted); @apply text-[10px] font-bold uppercase tracking-wide; }
+  .signal-price-grid strong { color: var(--foreground); @apply mt-2 block text-sm; }
+  .data-list { @apply divide-y divide-slate-800 border-y border-slate-800 text-sm; }
+  .data-list > div { @apply flex items-center justify-between gap-4 py-3; }
+  .data-list dt { color: var(--muted); }
+  .data-list dd { color: var(--foreground); @apply m-0 text-right; }
+  .score-track { background: var(--glass-muted); @apply h-1.5 overflow-hidden rounded-full; }
+  .score-fill { background: var(--primary); @apply h-full rounded-full; }
+  .signal-chart { border: 1px solid var(--glass-border); background: var(--glass-input); @apply w-full rounded-md; }
+  .empty-inset { border: 1px dashed var(--glass-border-strong); background: var(--glass-muted); color: var(--muted); @apply rounded-md p-5; }
+  .toggle-row { color: var(--muted-strong); @apply inline-flex items-center gap-2 text-sm; }
+  .toggle-row input { @apply h-4 w-4; }
+  .skeleton { background: linear-gradient(90deg, var(--glass-muted), var(--glass-highlight), var(--glass-muted)); background-size: 200% 100%; @apply animate-pulse rounded-md; }
   .glass-inset { border: 1px solid var(--glass-border); background: var(--glass-muted); box-shadow: inset 0 1px 0 var(--glass-highlight); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
   .glass-notice { border: 1px solid var(--glass-border-strong); background: var(--glass-surface); box-shadow: inset 0 1px 0 var(--glass-highlight), 0 12px 28px var(--glass-shadow); backdrop-filter: blur(20px) saturate(145%); -webkit-backdrop-filter: blur(20px) saturate(145%); }
   .glass-danger { border-color: rgba(251, 113, 133, .32); background: linear-gradient(135deg, rgba(225, 29, 72, .17), var(--glass-surface)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 14px 32px rgba(159, 18, 57, .14); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }

@@ -11,7 +11,7 @@ import {
 
 import type { PaperSignal, SafetyStatus, ScannerStatus } from "../../components/api";
 
-type Service = [string, { status: string; detail: string }, typeof Activity];
+type Service = readonly [string, { status: string; detail: string }, typeof Activity];
 
 function statusClass(status: string) {
   const value = status.toLowerCase();
@@ -54,7 +54,7 @@ export function Dashboard({
   onStop,
   onRefresh,
 }: {
-  services: Service[];
+  services: readonly Service[];
   scanner: ScannerStatus;
   safety: SafetyStatus;
   signals: PaperSignal[];

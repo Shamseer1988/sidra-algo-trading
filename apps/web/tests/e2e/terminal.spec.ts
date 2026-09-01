@@ -41,6 +41,37 @@ const MOCK_TELEGRAM = {
   detail: "Telegram bot configured",
 };
 
+const MOCK_MARKET_SESSION = {
+  phase: "regular",
+  trading_day: true,
+  reason: "Regular NSE market session",
+  local_timestamp: new Date().toISOString(),
+  session_date: "2026-08-31",
+  regular_open: "09:15",
+  regular_close: "15:30",
+  is_special_session: false,
+};
+
+const MOCK_DATA_QUALITY = [{
+  instrument_token: "NSE:RELIANCE",
+  state: "GOOD",
+  reason: "Completed-candle feed is current",
+  session_date: "2026-08-31",
+  expected_bars: 60,
+  received_bars: 60,
+  missing_buckets: [],
+  received_ticks: 1300,
+  duplicate_ticks: 0,
+  out_of_order_ticks: 0,
+  invalid_ticks: 0,
+  average_latency_ms: 42,
+  max_latency_ms: 96,
+  last_exchange_timestamp: new Date().toISOString(),
+  last_received_timestamp: new Date().toISOString(),
+  observed_at: new Date().toISOString(),
+  allows_signals: true,
+}];
+
 const MOCK_CONTROLS = {
   account_capital: 100000,
   risk_per_trade_percent: 0.5,
@@ -114,6 +145,10 @@ async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN
     await route.fulfill({ json: MOCK_OVERVIEW });
   });
 
+  await page.route("**/api/v1/system/market-session", async (route: Route) => {
+    await route.fulfill({ json: MOCK_MARKET_SESSION });
+  });
+
   await page.route("**/api/v1/scanner/status", async (route: Route) => {
     await route.fulfill({ json: currentScanner });
   });
@@ -130,6 +165,10 @@ async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN
 
   await page.route("**/api/v1/scanner/signals", async (route: Route) => {
     await route.fulfill({ json: MOCK_SIGNALS });
+  });
+
+  await page.route("**/api/v1/scanner/data-quality", async (route: Route) => {
+    await route.fulfill({ json: MOCK_DATA_QUALITY });
   });
 
   await page.route("**/api/v1/safety/status", async (route: Route) => {
