@@ -6,38 +6,50 @@
 - Add a production-oriented API configuration, database session factory, initial user/session/audit models, health endpoint, auth primitives, and admin bootstrap command.
 - Keep `LIVE_TRADING_ENABLED=false` immutable by default.
 
-## Phase 2 — Application shell and access control
+## Phase 2 — Application shell and access control (completed)
 
-- Finish login UX, refresh-token rotation, CSRF, RBAC middleware, settings views, system-health interface, dark terminal layout, and audit views.
+- Completed: login UX, RBAC middleware, account lockout, paper-risk settings, scanner control surface, system-health interface, and dark terminal layout.
+- Completed hardening: refresh-token rotation, CSRF protection, Redis-backed login rate limits, session revocation, and audit-log views.
 
-## Phase 3 — Firstock and market ingestion
+## Phase 3 — Market-data connectors and ingestion (completed)
 
-- Verify the current official Firstock API documentation immediately before implementation.
-- Implement an isolated REST/auth adapter and WebSocket V2 market-feed adapter, instrument import, reconnect/heartbeat/staleness handling, and connection telemetry. Order and position streams remain inactive.
+- Implement the Upstox V3 paper-market-data adapter using its official SDK, with an
+  exclusive persisted connector selector. Firstock remains a disabled-by-default
+  alternative feed. Order, position, and live-trading streams remain inactive.
+- Completed hardening: state-validated server-side OAuth code exchange, encrypted
+  token persistence, and automated NSE instrument-master validation refresh.
 
-## Phase 4 — Market calculations
+## Phase 4 — Market calculations (completed)
 
-- Build tick-to-candle aggregation, complete-candle persistence, session VWAP, EMAs, volume metrics, opening range, relative strength, and NIFTY regime; unit-test each independently.
+- Completed tick-to-candle aggregation, complete-candle persistence, session VWAP,
+  EMAs, volume metrics, opening range, timestamp-aligned relative strength, and
+  NIFTY regime. Calculations reject pre-/post-market ticks and use completed candles only.
 
-## Phase 5 — Strategy and scanner
+## Phase 5 — Strategy and scanner (completed)
 
-- Implement configurable long/short state machines, chop filters, score breakdowns, risk/target calculations, duplicate prevention, scanner orchestration, and historical/replay-safe evaluation.
+- Completed configurable long/short state machines, EMA-spread chop filtering, score
+  breakdowns, risk/target calculations, daily risk and signal limits, duplicate
+  prevention, scanner orchestration, and deterministic completed-candle evaluation.
 
-## Phase 6 — Realtime UI
+## Phase 6 — Realtime UI (completed)
 
-- Add dashboard, scanner table, charts, stock detail, native WebSocket event fan-out, system status, sorting/filtering, and responsive terminal components.
+- Completed dashboard, scanner table, authenticated completed-candle charts, stock
+  detail, native WebSocket event fan-out, system status, sorting/filtering, and
+  responsive terminal components.
 
 ## Phase 7 — Telegram
 
 - Add outbound-only notification service, encrypted-at-rest configuration, Redis cooldown/duplication controls, delivery history, and test notifications.
 
-## Phase 8 — Journal and analytics
+## Phase 8 — Journal and analytics (completed)
 
-- Track paper signals without look-ahead bias, calculate outcome/MFE/MAE/R, and provide analytics and exports.
+- Completed: completed-candle-only paper outcome tracking with MFE/MAE and realized R,
+  authenticated performance summaries, and CSV export.
 
-## Phase 9 — Replay and quality
+## Phase 9 — Replay and quality (in progress)
 
-- Add replay driver, synthetic scenarios, component tests, Playwright coverage, load checks, and failure/recovery testing.
+- In progress: deterministic completed-candle replay driver and unit coverage.
+  Synthetic scenarios, browser coverage, load checks, and failure/recovery tests remain.
 
 ## Phase 10 — Deployment hardening
 

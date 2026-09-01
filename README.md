@@ -4,7 +4,12 @@ Self-hosted, paper-first NSE intraday scanning and outbound Telegram alerting pl
 
 ## Current state
 
-Phase 1 foundation is scaffolded: Docker topology, FastAPI API, database models/migrations, authentication primitives, scanner worker lifecycle, Next.js terminal shell, environment template, and Windows scripts. Firstock connectivity, market data, strategies, and Telegram delivery are intentionally planned for later phases.
+The available foundation includes Docker topology, FastAPI, database migrations,
+protected login/RBAC, scanner safety controls, Upstox paper-market-data ingestion,
+retained Firstock market-data support, completed
+one-minute candle calculations, and dedicated-bot Telegram control-plane support.
+Strategy signals, journals, analytics, replay, and every order-submission path remain
+outside this release.
 
 ## Prerequisites
 
@@ -32,6 +37,41 @@ Phase 1 foundation is scaffolded: Docker topology, FastAPI API, database models/
 The command prompts for a password; one is never shipped in the repository.
 
 For a production-style deployment, run migrations before starting the API with `docker compose exec api alembic upgrade head` and set `AUTO_CREATE_SCHEMA=false`.
+
+## Phase 2 terminal
+
+Sign in at the web address shown by `docker compose ps` (normally `http://localhost` or `http://127.0.0.1:3001`). The terminal reports actual API, PostgreSQL, Redis, and scanner-worker state. ADMIN users can change paper-risk controls and start or stop the scanner worker. START does not create signals until Firstock market-data integration is delivered.
+
+## Market-data connectors
+
+Upstox is the default paper-market-data connector. Follow [docs/UPSTOX.md](docs/UPSTOX.md)
+to set its server-only token and confirmed instrument keys, rebuild the stack, then
+select **Use Upstox PAPER** in the protected **Settings** page. The connector uses
+the market-data feed only; it has no order-submission implementation.
+
+Firstock remains available as a disabled-by-default alternative for future
+evaluation. Follow [docs/FIRSTOCK.md](docs/FIRSTOCK.md) if you choose to configure
+that feed. Only one connector can be active at a time.
+
+## Firstock market-data setup
+
+The backend includes a Firstock V2 market-feed adapter. It remains disabled by
+default; configure it only if you select it in Settings. It receives market data
+only and has no order-placing API. Phase 4 persists completed one-minute candles and
+calculates intraday indicators; see [docs/STRATEGY.md](docs/STRATEGY.md).
+
+## Safety and Telegram controls
+
+The terminal Control Plane provides scanner start/stop, paper-tracking enable/disable, emergency stop, and Telegram status. Live execution is intentionally locked in Release 1. Configure a dedicated Telegram bot according to [docs/TELEGRAM.md](docs/TELEGRAM.md); inbound Approve/Reject actions are stored as non-executing intents, while Emergency Stop halts the scanner.
+
+## Signals terminal
+
+The protected **Signals** workspace lists persisted paper-only scanner decisions with
+filters, risk/target detail, and the strategy score breakdown. It receives a small
+authenticated scanner-event notification when a new paper signal is recorded, with a
+15-second API refresh fallback. The selected signal shows its authenticated,
+persisted completed-candle chart with entry and stop overlays. It does not display
+generated sample prices or expose an order action.
 
 ## Local development
 

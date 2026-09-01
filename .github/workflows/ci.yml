@@ -1,0 +1,67 @@
+name: Release Gates CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  backend-quality-and-tests:
+    name: Backend Lint, Unit, Load & Recovery Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "apps/api[dev]"
+
+      - name: Run Ruff Lint & Format Check
+        run: |
+          python -m ruff check apps/api
+          python -m ruff format --check apps/api
+
+      - name: Run Backend Unit & Integration Tests
+        run: |
+          pytest apps/api/tests -v
+
+      - name: Run Backend Load & Recovery Tests
+        run: |
+          pytest apps/api/tests/load apps/api/tests/recovery -v
+
+  frontend-build-and-browser-tests:
+    name: Frontend Lint, Typecheck, Build & Playwright Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Lint and Typecheck Web
+        run: npm --workspace @intraday-sentinel/web run lint
+
+      - name: Build Web Application
+        run: npm --workspace @intraday-sentinel/web run build
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright E2E Tests
+        run: npm --workspace @intraday-sentinel/web run test:e2e
+        env:
+          CI: true

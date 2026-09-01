@@ -7,7 +7,9 @@ Intraday Sentinel is a self-hosted NSE intraday scanner. Release 1 ingests marke
 ## Runtime topology
 
 ```text
-Browser ──HTTP/WebSocket──> Next.js web ──same-origin proxy──> FastAPI API
+Browser ──HTTP──> Next.js web ──same-origin proxy──> FastAPI API
+   │                                                   ▲
+   └──authenticated scanner WebSocket──────────────────┘
                                                               │
                                                     Redis <───┼──> scanner worker
                                                               │
@@ -23,7 +25,7 @@ Docker exposes only the web application on `127.0.0.1:80` and the API on `127.0.
 
 | Area | Responsibility |
 | --- | --- |
-| `apps/api/app/api` | Versioned HTTP and WebSocket entry points; no trading rules. |
+| `apps/api/app/api` | Versioned HTTP and authenticated WebSocket entry points; no trading rules. |
 | `apps/api/app/domain` | Entities, enums, and strategy-independent business types. |
 | `apps/api/app/services` | Authentication, health, scanner orchestration, notifications, and future broker adapters. |
 | `apps/api/app/db` | SQLAlchemy models, sessions, repositories, and Alembic migrations. |

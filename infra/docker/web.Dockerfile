@@ -13,6 +13,11 @@ COPY apps/web ./apps/web
 RUN mkdir -p /app/apps/web/public
 ARG NEXT_PUBLIC_API_BASE_URL=/api
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+# Next.js evaluates rewrites while producing the standalone server.  Supply the
+# Docker network hostname at build time; localhost would mean the web container
+# itself, not the API service.
+ARG API_UPSTREAM=http://api:8000
+ENV API_UPSTREAM=$API_UPSTREAM
 RUN npm --workspace @intraday-sentinel/web run build
 
 FROM node:20-alpine

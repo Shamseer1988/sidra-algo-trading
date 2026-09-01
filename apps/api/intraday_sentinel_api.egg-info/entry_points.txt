@@ -1,0 +1,2 @@
+[console_scripts]
+intraday-sentinel = app.cli:main

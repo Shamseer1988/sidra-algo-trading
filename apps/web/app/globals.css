@@ -6,3 +6,23 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: #090c10; color: #e5e7eb; font-family: Arial, Helvetica, sans-serif; }
 button, input { font: inherit; }
+
+@layer components {
+  .panel { @apply rounded-xl border border-slate-800 bg-terminal-900 shadow-sm shadow-black/20; }
+  .sidebar { @apply fixed inset-y-0 left-0 z-30 flex w-64 -translate-x-full flex-col border-r border-slate-800 bg-[#0d1218] transition-transform lg:translate-x-0; }
+  .sidebar-open { @apply translate-x-0 shadow-2xl shadow-black/60; }
+  .nav-item { @apply flex items-center gap-3 rounded-md px-3 py-2.5 text-sm text-slate-400 transition hover:bg-terminal-800 hover:text-slate-100; }
+  .nav-active { @apply bg-emerald-950/60 text-emerald-300; }
+  .status-pill { @apply inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide; }
+  .status-good { @apply border-emerald-900 bg-emerald-950/50 text-emerald-300; }
+  .status-watch { @apply border-amber-900 bg-amber-950/40 text-amber-300; }
+  .status-bad { @apply border-rose-900 bg-rose-950/40 text-rose-300; }
+  .primary-button { @apply inline-flex items-center justify-center gap-2 rounded-md bg-emerald-400 px-4 py-2.5 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-50; }
+  .danger-button { @apply inline-flex items-center justify-center gap-2 rounded-md bg-rose-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-rose-400 disabled:cursor-not-allowed disabled:opacity-50; }
+  .secondary-button { @apply inline-flex items-center justify-center gap-2 rounded-md border border-slate-700 bg-terminal-800 px-4 py-2.5 text-sm font-medium text-slate-300 transition hover:border-slate-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-50; }
+  .field-label { @apply block text-xs font-medium text-slate-400; }
+  .field-input { @apply w-full rounded-md border border-slate-700 bg-terminal-950 px-3 py-2.5 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20; }
+  .eyebrow { @apply text-[11px] font-semibold uppercase tracking-[.16em] text-emerald-400; }
+  .page-title { @apply mt-2 text-2xl font-semibold tracking-tight text-white sm:text-3xl; }
+  .page-copy { @apply mt-2 max-w-2xl text-sm leading-6 text-slate-400; }
+}

@@ -6,7 +6,8 @@
   "scripts": {
     "dev:web": "npm --workspace @intraday-sentinel/web run dev",
     "build:web": "npm --workspace @intraday-sentinel/web run build",
-    "lint:web": "npm --workspace @intraday-sentinel/web run lint"
+    "lint:web": "npm --workspace @intraday-sentinel/web run lint",
+    "test:e2e": "npm --workspace @intraday-sentinel/web run test:e2e"
   },
   "engines": { "node": ">=20.11" }
 }

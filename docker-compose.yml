@@ -10,6 +10,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
@@ -23,6 +25,8 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -40,9 +44,9 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     ports:
-      - "127.0.0.1:8000:8000"
+      - "0.0.0.0:8000:8000"
     volumes:
-      - ./logs:/app/logs
+      - app_logs:/app/logs
     networks: [internal, edge]
 
   scanner-worker:
@@ -56,8 +60,8 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     volumes:
-      - ./logs:/app/logs
-    networks: [internal]
+      - app_logs:/app/logs
+    networks: [internal, edge]
 
   web:
     build:
@@ -65,6 +69,7 @@ services:
       dockerfile: infra/docker/web.Dockerfile
       args:
         NEXT_PUBLIC_API_BASE_URL: /api
+        API_UPSTREAM: http://api:8000
     restart: unless-stopped
     environment:
       API_UPSTREAM: http://api:8000
@@ -77,6 +82,7 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  app_logs:
 
 networks:
   internal:
