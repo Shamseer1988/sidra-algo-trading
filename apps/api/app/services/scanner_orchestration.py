@@ -15,7 +15,7 @@ from app.core.config import Settings
 from app.db.models import ApplicationSetting, PaperSignal, ScannerEvaluation, TelegramAlert
 from app.db.session import SessionLocal
 from app.services.market_calculations import CompletedCandle
-from app.services.paper_strategy import AWAITING, SIGNALLED, STRATEGY_VERSION, evaluate_orb_retest
+from app.services.paper_strategy import AWAITING, SIGNALLED
 from app.services.safety import emergency_stop_state, paper_tracking_enabled
 from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 from app.services.telegram import TelegramError, TelegramNotificationService
@@ -76,8 +76,37 @@ class PaperScannerOrchestrator:
             )
         return Decimal(str(committed or 0)) + Decimal(str(risk_amount)) <= daily_limit
 
+    async def _strategy_limit_reason(self, candle: CompletedCandle, strategy: StrategyConfiguration) -> str | None:
+        """Return a paper-only configuration limit violation before recording a signal."""
+        async with SessionLocal() as session:
+            accepted = await session.scalar(
+                select(func.count(ScannerEvaluation.id)).where(
+                    ScannerEvaluation.session_date == candle.session_date,
+                    ScannerEvaluation.strategy_id == strategy.id,
+                    ScannerEvaluation.status == "ACCEPTED",
+                )
+            )
+            if int(accepted or 0) >= strategy.max_trades_per_day:
+                return "Strategy maximum paper trades reached"
+            if strategy.cooldown_minutes:
+                latest = await session.scalar(
+                    select(func.max(ScannerEvaluation.candle_opened_at)).where(
+                        ScannerEvaluation.session_date == candle.session_date,
+                        ScannerEvaluation.strategy_id == strategy.id,
+                        ScannerEvaluation.status == "ACCEPTED",
+                    )
+                )
+        if latest and (candle.opened_at - latest).total_seconds() < strategy.cooldown_minutes * 60:
+            return "Strategy paper-signal cooldown is active"
+        return None
+
     async def _record(
-        self, candle: CompletedCandle, decision, indicators: dict, strategy: StrategyConfiguration
+        self,
+        candle: CompletedCandle,
+        decision,
+        indicators: dict,
+        strategy: StrategyConfiguration,
+        strategy_snapshot: dict,
     ) -> PaperSignal | None:
         assert decision.side and decision.entry_price and decision.stop_price and decision.target_price
         assert decision.risk_amount is not None and decision.score_breakdown is not None
@@ -90,7 +119,7 @@ class PaperScannerOrchestrator:
             instrument_token=candle.instrument_token,
             session_date=candle.session_date,
             candle_opened_at=candle.opened_at,
-            strategy_version=f"{STRATEGY_VERSION}@{strategy.version}",
+            strategy_version=f"{strategy.strategy_type}@{strategy.version}",
             side=decision.side,
             entry_price=decision.entry_price,
             stop_price=decision.stop_price,
@@ -99,6 +128,7 @@ class PaperScannerOrchestrator:
             risk_amount=decision.risk_amount,
             score=decision.score,
             score_breakdown=decision.score_breakdown,
+            strategy_snapshot=strategy_snapshot,
             indicator_snapshot=indicators,
         )
         async with SessionLocal() as session:
@@ -128,7 +158,12 @@ class PaperScannerOrchestrator:
         return list(dict.fromkeys(failed))
 
     async def _record_evaluation(
-        self, candle: CompletedCandle, indicators: dict, strategy: StrategyConfiguration, decision
+        self,
+        candle: CompletedCandle,
+        indicators: dict,
+        strategy: StrategyConfiguration,
+        decision,
+        strategy_snapshot: dict,
     ):
         quality = indicators.get("data_quality") if isinstance(indicators.get("data_quality"), dict) else {}
         evaluation = ScannerEvaluation(
@@ -152,6 +187,7 @@ class PaperScannerOrchestrator:
             candle_volume=candle.volume,
             score=decision.score,
             score_breakdown=decision.score_breakdown or {},
+            strategy_snapshot=strategy_snapshot,
             indicator_snapshot=indicators,
             entry_price=decision.entry_price,
             stop_price=decision.stop_price,
@@ -187,6 +223,7 @@ class PaperScannerOrchestrator:
             data_quality_state=str(quality.get("state", "MISSING")),
             candle_close=candle.close,
             candle_volume=candle.volume,
+            strategy_snapshot={},
             indicator_snapshot=indicators,
         )
         async with SessionLocal() as session:
@@ -281,9 +318,14 @@ class PaperScannerOrchestrator:
             strategies = await StrategyRegistry.enabled(session)
         for strategy in strategies:
             effective_controls = strategy.effective_controls(controls)
+            strategy_snapshot = strategy.snapshot(controls)
             state_key = self._state_key(candle, strategy)
             prior_state = await self._redis.get(state_key) or AWAITING
-            decision = evaluate_orb_retest(candle, indicators, nifty, effective_controls, prior_state)
+            decision = StrategyRegistry.evaluate(strategy, candle, indicators, nifty, effective_controls, prior_state)
+            if decision.next_state == SIGNALLED:
+                limit_reason = await self._strategy_limit_reason(candle, strategy)
+                if limit_reason:
+                    decision = decision.__class__(next_state=AWAITING, reason=limit_reason)
             if (
                 decision.next_state == SIGNALLED
                 and decision.risk_amount is not None
@@ -291,12 +333,12 @@ class PaperScannerOrchestrator:
             ):
                 decision = decision.__class__(next_state=AWAITING, reason="Daily paper-risk limit reached")
             await self._redis.set(state_key, decision.next_state, ex=STATE_TTL_SECONDS)
-            evaluation = await self._record_evaluation(candle, indicators, strategy, decision)
+            evaluation = await self._record_evaluation(candle, indicators, strategy, decision, strategy_snapshot)
             if evaluation:
                 await self._publish_evaluation(evaluation)
             if decision.next_state != SIGNALLED or decision.side is None:
                 continue
-            signal = await self._record(candle, decision, indicators, strategy)
+            signal = await self._record(candle, decision, indicators, strategy, strategy_snapshot)
             if signal is None:
                 continue
             await self._redis.set(

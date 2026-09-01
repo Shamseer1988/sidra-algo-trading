@@ -1,9 +1,15 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession, require_roles
-from app.db.models import ApplicationSetting, AuditLog, User, UserRole
-from app.services.strategy_registry import DEFAULT_STRATEGIES, STRATEGIES_KEY, StrategyConfiguration
+from app.db.models import ApplicationSetting, AuditLog, ScannerEvaluation, User, UserRole
+from app.services.strategy_registry import (
+    DEFAULT_STRATEGIES,
+    STRATEGIES_KEY,
+    StrategyConfiguration,
+    StrategyRegistry,
+)
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 TRADING_KEY = "trading_controls"
@@ -34,6 +40,17 @@ class TradingControls(BaseModel):
     minimum_ema_spread_percent: float = Field(default=0.05, ge=0, le=5)
     trade_start_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     trade_cutoff_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+class StrategyMetric(BaseModel):
+    strategy_id: str
+    strategy_name: str
+    strategy_version: int
+    evaluations: int
+    accepted: int
+    rejected: int
+    watching: int
+    acceptance_rate: float
 
 
 async def _get_controls(session: DbSession) -> TradingControls:
@@ -86,6 +103,15 @@ async def update_strategies(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Keep one or more uniquely identified strategies"
         )
+    supported = {definition.identifier for definition in StrategyRegistry.metadata()}
+    unsupported = sorted({item.strategy_type for item in strategies} - supported)
+    if unsupported:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported strategy type: {', '.join(unsupported)}",
+        )
     setting = await session.get(ApplicationSetting, STRATEGIES_KEY)
     previous = {
         item.id: item
@@ -110,3 +136,33 @@ async def update_strategies(
     )
     await session.commit()
     return normalized
+
+
+@router.get("/strategies/metrics", response_model=list[StrategyMetric])
+async def strategy_metrics(_: CurrentUser, session: DbSession) -> list[StrategyMetric]:
+    rows = list(
+        (
+            await session.scalars(select(ScannerEvaluation).order_by(ScannerEvaluation.created_at.desc()).limit(1000))
+        ).all()
+    )
+    metrics: dict[tuple[str, str, int], dict[str, int]] = {}
+    for row in rows:
+        key = (row.strategy_id, row.strategy_name, row.strategy_version)
+        values = metrics.setdefault(key, {"evaluations": 0, "accepted": 0, "rejected": 0, "watching": 0})
+        values["evaluations"] += 1
+        if row.status == "ACCEPTED":
+            values["accepted"] += 1
+        elif row.status == "REJECTED":
+            values["rejected"] += 1
+        else:
+            values["watching"] += 1
+    return [
+        StrategyMetric(
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            strategy_version=strategy_version,
+            **values,
+            acceptance_rate=round(values["accepted"] * 100 / values["evaluations"], 2),
+        )
+        for (strategy_id, strategy_name, strategy_version), values in metrics.items()
+    ]

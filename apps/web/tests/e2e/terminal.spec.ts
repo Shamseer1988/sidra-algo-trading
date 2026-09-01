@@ -138,6 +138,36 @@ const MOCK_CONTROLS = {
   trade_cutoff_time: "14:45",
 };
 
+const MOCK_STRATEGIES = [{
+  id: "orb-default",
+  name: "ORB Retest — Default",
+  enabled: true,
+  strategy_type: "orb-retest-v1",
+  version: 1,
+  universe: ["NSE:RELIANCE", "NSE:INFY"],
+  allowed_sides: ["LONG", "SHORT"],
+  allowed_sessions: ["REGULAR"],
+  max_trades_per_day: 2,
+  cooldown_minutes: 5,
+  risk_per_trade_percent: 0.5,
+  minimum_score: 90,
+  minimum_rr: 1.5,
+  volume_multiplier: 1.3,
+  retest_tolerance_percent: 0.15,
+  minimum_ema_spread_percent: 0.05,
+}];
+
+const MOCK_STRATEGY_METRICS = [{
+  strategy_id: "orb-default",
+  strategy_name: "ORB Retest — Default",
+  strategy_version: 1,
+  evaluations: 12,
+  accepted: 3,
+  rejected: 7,
+  watching: 2,
+  acceptance_rate: 25,
+}];
+
 const MOCK_SIGNALS = [
   {
     id: "sig-001",
@@ -241,6 +271,18 @@ async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN
       await route.fulfill({ json: body });
     } else {
       await route.fulfill({ json: MOCK_CONTROLS });
+    }
+  });
+
+  await page.route("**/api/v1/settings/strategies/metrics", async (route: Route) => {
+    await route.fulfill({ json: MOCK_STRATEGY_METRICS });
+  });
+
+  await page.route("**/api/v1/settings/strategies", async (route: Route) => {
+    if (route.request().method() === "PUT") {
+      await route.fulfill({ json: route.request().postDataJSON() });
+    } else {
+      await route.fulfill({ json: MOCK_STRATEGIES });
     }
   });
 
@@ -421,6 +463,18 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(saveBtn).toBeVisible();
     await saveBtn.click();
     await expect(page.getByText("Trading controls saved.")).toBeVisible();
+  });
+
+  test("5b. Strategy workspace: versioned glass panel and strategy metrics", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Strategies", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Strategies" })).toBeVisible();
+    await expect(page.getByText("ORB Retest — Default · v1")).toBeVisible();
+    await expect(page.getByText("25%")).toBeVisible();
+    await expect(page.getByLabel("Strategy name ORB Retest — Default")).toBeVisible();
+    await expect(page.getByLabel(/Universe/)).toHaveValue("NSE:RELIANCE, NSE:INFY");
   });
 
   test("6. Security Panel: Active sessions list and session revocation", async ({ page }) => {

@@ -58,6 +58,7 @@ class PaperSignalResponse(BaseModel):
     quantity: int
     score: int
     score_breakdown: dict
+    strategy_snapshot: dict
     created_at: datetime
 
 
@@ -79,6 +80,7 @@ class ScannerEvaluationResponse(BaseModel):
     candle_volume: int
     score: int
     score_breakdown: dict
+    strategy_snapshot: dict
     indicator_snapshot: dict
     entry_price: float | None
     stop_price: float | None
@@ -152,6 +154,7 @@ async def latest_paper_signals(_: CurrentUser, session: DbSession) -> list[Paper
             quantity=row.quantity,
             score=row.score,
             score_breakdown=row.score_breakdown,
+            strategy_snapshot=row.strategy_snapshot,
             created_at=row.created_at,
         )
         for row in rows
@@ -177,6 +180,7 @@ def _evaluation_response(row: ScannerEvaluation) -> ScannerEvaluationResponse:
         candle_volume=row.candle_volume,
         score=row.score,
         score_breakdown=row.score_breakdown,
+        strategy_snapshot=row.strategy_snapshot,
         indicator_snapshot=row.indicator_snapshot,
         entry_price=float(row.entry_price) if row.entry_price is not None else None,
         stop_price=float(row.stop_price) if row.stop_price is not None else None,

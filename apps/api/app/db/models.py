@@ -228,6 +228,7 @@ class PaperSignal(TimestampMixin, Base):
     risk_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     score: Mapped[int] = mapped_column(Integer)
     score_breakdown: Mapped[dict] = mapped_column(JSON, default=dict)
+    strategy_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     indicator_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     alert_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
@@ -260,6 +261,7 @@ class ScannerEvaluation(TimestampMixin, Base):
     candle_volume: Mapped[int] = mapped_column(BigInteger, default=0)
     score: Mapped[int] = mapped_column(Integer, default=0)
     score_breakdown: Mapped[dict] = mapped_column(JSON, default=dict)
+    strategy_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     indicator_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     entry_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     stop_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)

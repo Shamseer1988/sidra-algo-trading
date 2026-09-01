@@ -80,9 +80,14 @@ Completed:
 - The inspector shows only recorded completed candles and strategy output: score breakdown, conditions, failures, proposed paper entry/stop/target/quantity/risk, and reward:risk. It does not imply a broker order or position.
 - Added backend coverage for evaluation classification and browser coverage for rejected-setup filtering and inspection.
 
-## Phase 4 — Strategy platform
+## Phase 4 — Strategy platform (complete)
 
-- Formal registry interfaces, strategy definitions and versions, universe/session/risk settings, deterministic replay, ORB migration, and configuration snapshots on every signal.
+- Added a formal, versioned `StrategyRegistry` and deterministic ORB Retest definition; unsupported strategy implementations cannot be persisted.
+- Strategy configuration now covers enabled state, universe, session policy, allowed sides, score/reward:risk/indicator thresholds, per-strategy risk, daily paper-trade cap, and cooldown.
+- Every scanner evaluation and paper signal stores its immutable strategy configuration plus the effective trading-control snapshot; Alembic migration `0009_strategy_snapshots` is applied.
+- Strategy configuration changes increment a version, while strategy-specific state and signal keys remain versioned and deterministic.
+- Added acceptance metrics and a glassmorphism strategy workspace with safe administrator controls and read-only RBAC behavior.
+- Added deterministic registry coverage and browser coverage for the strategy workspace.
 
 ## Phase 5 — Advanced paper trading
 
@@ -126,8 +131,8 @@ Completed:
 
 ## Current validated checkpoint
 
-- Backend: 42 tests passed.
+- Backend: 44 tests passed.
 - Python: Ruff lint and format checks passed.
 - Frontend: ESLint passed.
 - Frontend: Next.js production build passed.
-- Browser: 9 Playwright journeys passed, including single-flight access-token refresh and rejected-setup inspection.
+- Browser: 10 Playwright journeys passed, including single-flight access-token refresh, rejected-setup inspection, and the strategy workspace.

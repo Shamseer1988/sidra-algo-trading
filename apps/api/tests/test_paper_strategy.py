@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_strategy import AWAITING, LONG_BREAKOUT, SIGNALLED, evaluate_orb_retest
-from app.services.strategy_registry import StrategyConfiguration
+from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 
 CONTROLS = {
     "account_capital": 100_000.0,
@@ -121,3 +121,54 @@ def test_registry_configuration_overrides_global_strategy_parameters() -> None:
     assert effective["minimum_rr"] == 2.25
     assert effective["volume_multiplier"] == 1.8
     assert CONTROLS["minimum_score"] == 90
+
+
+def test_versioned_registry_replays_orb_deterministically_with_an_immutable_snapshot() -> None:
+    strategy = StrategyConfiguration(name="ORB Replay", universe=["NSE:2885"])
+    effective = strategy.effective_controls(CONTROLS)
+    breakout = StrategyRegistry.evaluate(
+        strategy, candle(close="111", low="110.8", high="112"), INDICATORS, NIFTY, effective, AWAITING
+    )
+    replayed = StrategyRegistry.evaluate(
+        strategy,
+        candle(close="112", low="110.1", high="112.5"),
+        INDICATORS,
+        NIFTY,
+        effective,
+        breakout.next_state,
+    )
+    direct = evaluate_orb_retest(
+        candle(close="112", low="110.1", high="112.5"), INDICATORS, NIFTY, effective, breakout.next_state
+    )
+
+    assert replayed == direct
+    assert replayed.next_state == SIGNALLED
+    assert strategy.snapshot(CONTROLS) == {
+        "configuration": strategy.model_dump(),
+        "effective_controls": effective,
+    }
+
+
+def test_registry_enforces_scope_session_and_directional_configuration() -> None:
+    out_of_scope = StrategyConfiguration(name="Scoped ORB", universe=["NSE:OTHER"])
+    decision = StrategyRegistry.evaluate(
+        out_of_scope, candle(close="111", low="110.8", high="112"), INDICATORS, NIFTY, CONTROLS, AWAITING
+    )
+    assert decision.reason == "Instrument is outside this strategy universe"
+
+    session_disabled = StrategyConfiguration(name="Paused Session", allowed_sessions=[])
+    decision = StrategyRegistry.evaluate(
+        session_disabled, candle(close="111", low="110.8", high="112"), INDICATORS, NIFTY, CONTROLS, AWAITING
+    )
+    assert decision.reason == "Regular-session signals are disabled"
+
+    short_only = StrategyConfiguration(name="Short Only", allowed_sides=["SHORT"])
+    decision = StrategyRegistry.evaluate(
+        short_only,
+        candle(close="112", low="110.1", high="112.5"),
+        INDICATORS,
+        NIFTY,
+        CONTROLS,
+        LONG_BREAKOUT,
+    )
+    assert decision.reason == "Long signals are disabled"
