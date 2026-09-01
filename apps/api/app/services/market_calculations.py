@@ -5,18 +5,25 @@ deterministic so replay and strategy evaluation can use exactly the same math.
 """
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
-MARKET_TIMEZONE = ZoneInfo("Asia/Kolkata")
-MARKET_OPEN = time(9, 15)
-MARKET_CLOSE = time(15, 30)
+from app.services.trading_calendar import (
+    DEFAULT_TRADING_CALENDAR,
+    MARKET_TIMEZONE,
+    TradingCalendar,
+)
+from app.services.trading_calendar import (
+    REGULAR_CLOSE as MARKET_CLOSE,
+)
+from app.services.trading_calendar import (
+    REGULAR_OPEN as MARKET_OPEN,
+)
 
 
-def is_regular_market_timestamp(timestamp: datetime) -> bool:
-    local = timestamp.astimezone(MARKET_TIMEZONE)
-    return MARKET_OPEN <= local.time() < MARKET_CLOSE
+def is_regular_market_timestamp(timestamp: datetime, calendar: TradingCalendar | None = None) -> bool:
+    """Return true only when a confirmed exchange session is open."""
+    return (calendar or DEFAULT_TRADING_CALENDAR).is_open(timestamp)
 
 
 @dataclass(frozen=True)

@@ -70,14 +70,14 @@ This document specifies the verification criteria, test commands, performance th
   npm run lint:web
   npm run build:web
   ```
-- **Ruff Findings**: 0 errors across all 60 Python files in `apps/api/`.
+- **Ruff Findings**: 0 errors across all 66 Python files in `apps/api/`.
 - **Continuous Integration**: Unified GitHub Actions workflow at `.github/workflows/ci.yml`.
 
 ---
 
 ## 2. Release Acceptance Checklist
 
-- [x] **Browser Tests**: All 7 Playwright E2E browser test suites pass with 100% success rate.
+- [x] **Browser Tests**: All 8 Playwright E2E browser journeys pass with 100% success rate.
 - [x] **Load SLA**: 50 concurrent API users pass with $p95 < 200\text{ ms}$ and 0 errors.
 - [x] **WebSocket Fan-out**: 100 concurrent WebSocket subscribers receive all broadcast messages without drops.
 - [x] **Throughput**: Candle aggregation processes $> 1,000\text{ ticks/sec}$ sustained.

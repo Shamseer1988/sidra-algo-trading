@@ -36,7 +36,7 @@ This plan supersedes the earlier Intraday Sentinel release plan. The V2 master p
 - Replaced the obsolete roadmap with this V2 plan.
 - Cleared baseline lint and formatting failures.
 
-## Phase 1 — Safety foundation (in progress)
+## Phase 1 — Safety foundation (complete)
 
 Completed:
 
@@ -46,15 +46,14 @@ Completed:
 - API requests use single-flight refresh and retry once; unrelated server failures no longer force login redirects.
 - Scanner WebSockets use same-origin `ws/wss`.
 - FastAPI is internal-only in Compose; API, worker, and web containers run non-root with dropped capabilities.
-- Unsupported broker credential/TOTP browser automation and its runtime dependencies were removed.
+- Unsupported Upstox browser-login automation was removed; Firstock's supported server-side TOTP dependency remains.
 - Authoritative encrypted Telegram configuration remains shared across status, notifications, and callbacks.
+- The fail-closed NSE Trading Calendar distinguishes weekends, official holidays, pre-open, regular, post-market, and operator-configured special sessions.
+- Per-instrument data quality tracks expected/received bars, missing buckets, freshness, latency, duplicate ticks, and out-of-order ticks. `INVALID` and `STALE` snapshots block signals.
+- The scanner supervises market-data tasks with bounded exponential restart backoff, durable health detail, restart counts, and recovery from iteration-level infrastructure failures.
+- Production startup validation rejects insecure cookies, HTTP browser origins, schema auto-creation, placeholder JWT secrets, and malformed calendar configuration.
 
-Remaining:
-
-- Trading Calendar with holidays and special sessions.
-- Market-data quality state and execution blocking.
-- Structured worker supervision and recovery improvements.
-- Production reverse proxy, TLS, headers, and startup configuration validation.
+Production reverse proxy, TLS termination, resource limits, startup reconciliation, and operational monitoring remain Phase 12 work.
 
 ## Phase 2 — Premium terminal UI (started)
 
@@ -125,7 +124,7 @@ Next:
 
 ## Current validated checkpoint
 
-- Backend: 31 tests passed.
+- Backend: 41 tests passed.
 - Python: Ruff lint and format checks passed.
 - Frontend: ESLint passed.
 - Frontend: Next.js production build passed.

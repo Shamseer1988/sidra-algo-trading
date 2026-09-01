@@ -10,6 +10,7 @@ from app.api.routes.scanner import get_scanner_status
 from app.core.config import get_settings
 from app.db.session import engine
 from app.services.firstock.market_data import CONNECTION_STATE_KEY
+from app.services.trading_calendar import TradingCalendar
 
 router = APIRouter(prefix="/system", tags=["System"])
 
@@ -39,6 +40,17 @@ class SystemOverview(BaseModel):
     telegram: ServiceStatus
 
 
+class MarketSessionStatus(BaseModel):
+    phase: str
+    trading_day: bool
+    reason: str
+    local_timestamp: datetime
+    session_date: str | None
+    regular_open: str | None
+    regular_close: str | None
+    is_special_session: bool
+
+
 @router.get("/version", response_model=VersionResponse)
 async def version() -> VersionResponse:
     settings = get_settings()
@@ -48,6 +60,14 @@ async def version() -> VersionResponse:
         mode=settings.application_mode,
         live_trading_enabled=settings.live_trading_enabled,
     )
+
+
+@router.get("/market-session", response_model=MarketSessionStatus)
+async def market_session(_: CurrentUser, at: datetime | None = None) -> MarketSessionStatus:
+    settings = get_settings()
+    calendar = TradingCalendar.from_settings(settings)
+    status = calendar.status_at(at or datetime.now(UTC))
+    return MarketSessionStatus.model_validate(status.as_dict())
 
 
 @router.get("/overview", response_model=SystemOverview)

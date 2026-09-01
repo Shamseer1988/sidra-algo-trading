@@ -318,7 +318,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
 
     // Navigate to Settings -> Security Panel
     await page.click('button:has-text("Settings")');
-    await expect(page.getByText("Active sessions")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Active sessions", exact: true })).toBeVisible();
     await expect(page.getByText("Chrome on Windows")).toBeVisible();
     await expect(page.getByText("Firefox on macOS")).toBeVisible();
 

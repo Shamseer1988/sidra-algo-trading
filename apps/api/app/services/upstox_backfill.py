@@ -14,6 +14,7 @@ import structlog
 from app.core.config import Settings
 from app.services.candle_aggregation import MarketCalculationPersistenceService
 from app.services.market_calculations import CompletedCandle, is_regular_market_timestamp
+from app.services.trading_calendar import DEFAULT_TRADING_CALENDAR, TradingCalendar
 from app.services.upstox_market_data import configured_subscriptions
 
 logger = structlog.get_logger("upstox.backfill")
@@ -26,6 +27,7 @@ async def backfill_today_candles(
     persistence: MarketCalculationPersistenceService,
     access_token: str | None = None,
     benchmark_key: str | None = None,
+    calendar: TradingCalendar | None = None,
 ) -> int:
     """Fetch and persist today's historical 1-minute candles for all configured instruments."""
     token = access_token or settings.upstox_access_token
@@ -78,7 +80,7 @@ async def backfill_today_candles(
                     # Filter for today's session within regular market hours
                     if opened_at.astimezone(MARKET_TIMEZONE).date() != today_date:
                         continue
-                    if not is_regular_market_timestamp(opened_at):
+                    if not is_regular_market_timestamp(opened_at, calendar or DEFAULT_TRADING_CALENDAR):
                         continue
 
                     candle = CompletedCandle(
@@ -93,7 +95,9 @@ async def backfill_today_candles(
                         volume=int(vol or 0),
                         tick_count=1,
                     )
-                    await persistence.persist_completed(candle)
+                    # Backfill rebuilds indicators and quality history only. Strategy
+                    # evaluation is reserved for candles completed by the live feed.
+                    await persistence.persist_completed(candle, notify_snapshot=False)
                     instrument_count += 1
 
                 total_backfilled += instrument_count

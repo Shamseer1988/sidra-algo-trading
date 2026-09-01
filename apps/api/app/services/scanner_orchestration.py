@@ -159,6 +159,15 @@ class PaperScannerOrchestrator:
     async def on_completed_candle(self, candle: CompletedCandle, indicators: dict) -> None:
         if candle.instrument_token == self._benchmark_token:
             return
+        quality = indicators.get("data_quality")
+        if not isinstance(quality, dict) or quality.get("state") in {"INVALID", "STALE", None}:
+            self._logger.warning(
+                "scanner.signal_blocked_data_quality",
+                instrument_token=candle.instrument_token,
+                state=quality.get("state") if isinstance(quality, dict) else "MISSING",
+                reason=quality.get("reason") if isinstance(quality, dict) else "Quality snapshot unavailable",
+            )
+            return
         controls = await self._controls()
         if not await self._can_signal(candle, controls):
             return

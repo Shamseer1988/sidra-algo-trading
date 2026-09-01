@@ -6,10 +6,11 @@ Self-hosted, paper-first NSE algorithmic trading command center. The current rel
 
 The available foundation includes Docker topology, FastAPI, database migrations,
 protected login/RBAC, scanner safety controls, Upstox paper-market-data ingestion,
-retained Firstock market-data support, completed
-one-minute candle calculations, and dedicated-bot Telegram control-plane support.
-Strategy signals, journals, analytics, replay, and every order-submission path remain
-outside this release.
+retained Firstock market-data support, completed one-minute candle calculations,
+paper strategy signals, journal analytics, deterministic replay foundations, and
+dedicated-bot Telegram control-plane support. A fail-closed NSE calendar and
+per-instrument data-quality gates prevent unsafe signal evaluation. Every
+order-submission path remains outside this release.
 
 ## Prerequisites
 

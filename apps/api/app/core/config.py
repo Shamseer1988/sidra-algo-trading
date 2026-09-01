@@ -1,3 +1,4 @@
+from datetime import date, time
 from functools import lru_cache
 from typing import Literal
 
@@ -52,6 +53,13 @@ class Settings(BaseSettings):
     ema_slow_period: int = Field(default=21, ge=3, le=200)
     volume_lookback_candles: int = Field(default=20, ge=3, le=200)
     upstox_instrument_refresh_hours: int = Field(default=24, ge=1, le=168)
+    nse_calendar_confirmed_years: str = "2026"
+    nse_holiday_overrides: str = ""
+    nse_special_sessions: str = ""
+    data_quality_stale_after_seconds: int = Field(default=20, ge=5, le=300)
+    data_quality_max_tick_latency_ms: int = Field(default=5000, ge=100, le=60000)
+    data_quality_max_missing_bars: int = Field(default=0, ge=0, le=30)
+    data_quality_max_duplicate_percent: float = Field(default=10, ge=0, le=100)
 
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
@@ -92,7 +100,38 @@ class Settings(BaseSettings):
     def require_sensible_indicator_periods(self) -> "Settings":
         if self.ema_fast_period >= self.ema_slow_period:
             raise ValueError("EMA_FAST_PERIOD must be lower than EMA_SLOW_PERIOD")
+        if self.live_trading_enabled:
+            raise ValueError("LIVE_TRADING_ENABLED must remain false until live activation gates exist")
+        if not self.calendar_confirmed_years:
+            raise ValueError("NSE_CALENDAR_CONFIRMED_YEARS must contain at least one year")
+        try:
+            for value in self.nse_holiday_overrides.split(","):
+                if value.strip():
+                    date.fromisoformat(value.strip())
+            for value in self.nse_special_sessions.split(","):
+                if not value.strip():
+                    continue
+                date_part, hours = value.strip().split("@", 1)
+                open_part, close_part = hours.split("-", 1)
+                date.fromisoformat(date_part)
+                if time.fromisoformat(open_part) >= time.fromisoformat(close_part):
+                    raise ValueError("special-session close must be later than open")
+        except ValueError as exc:
+            raise ValueError("Invalid NSE holiday or special-session configuration") from exc
+        if self.app_env == "production":
+            if not self.cookie_secure:
+                raise ValueError("COOKIE_SECURE must be true in production")
+            if self.auto_create_schema:
+                raise ValueError("AUTO_CREATE_SCHEMA must be false in production")
+            if self.web_origin.scheme != "https":
+                raise ValueError("WEB_ORIGIN must use HTTPS in production")
+            if self.jwt_secret.lower().startswith(("change-this", "generate-a-")):
+                raise ValueError("JWT_SECRET must be replaced before production startup")
         return self
+
+    @property
+    def calendar_confirmed_years(self) -> set[int]:
+        return {int(value.strip()) for value in self.nse_calendar_confirmed_years.split(",") if value.strip().isdigit()}
 
     @field_validator("timezone")
     @classmethod

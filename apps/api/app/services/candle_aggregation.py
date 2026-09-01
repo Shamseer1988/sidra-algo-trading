@@ -12,8 +12,10 @@ from sqlalchemy import select
 from app.core.config import Settings
 from app.db.models import MarketCandle, MarketIndicatorSnapshot
 from app.db.session import SessionLocal
+from app.services.data_quality import MarketDataQualityService
 from app.services.market_calculations import CompletedCandle, indicator_snapshot, is_regular_market_timestamp
 from app.services.paper_journal import update_outcomes
+from app.services.trading_calendar import DEFAULT_TRADING_CALENDAR, TradingCalendar
 
 
 def normalize_market_timestamp(value: object, fallback: datetime) -> datetime:
@@ -100,9 +102,18 @@ def _bucket_start(timestamp: datetime, timeframe_seconds: int) -> datetime:
 class CandleAggregationService:
     """Produces only closed candles and tolerates feed reconnects/volume resets."""
 
-    def __init__(self, timeframe_seconds: int, on_completed: Callable[[CompletedCandle], Awaitable[None]]) -> None:
+    def __init__(
+        self,
+        timeframe_seconds: int,
+        on_completed: Callable[[CompletedCandle], Awaitable[None]],
+        *,
+        calendar: TradingCalendar | None = None,
+        data_quality: MarketDataQualityService | None = None,
+    ) -> None:
         self._timeframe_seconds = timeframe_seconds
         self._on_completed = on_completed
+        self._calendar = calendar or DEFAULT_TRADING_CALENDAR
+        self._data_quality = data_quality
         self._open: dict[str, _OpenCandle] = {}
         self._last_cumulative_volume: dict[str, int] = {}
 
@@ -116,8 +127,10 @@ class CandleAggregationService:
         return tick.cumulative_volume - previous if tick.cumulative_volume >= previous else tick.cumulative_volume
 
     async def consume(self, tick: MarketTick) -> None:
-        if not is_regular_market_timestamp(tick.exchange_timestamp):
+        if not is_regular_market_timestamp(tick.exchange_timestamp, self._calendar):
             return
+        if self._data_quality is not None:
+            await self._data_quality.observe_tick(tick)
         bucket = _bucket_start(tick.exchange_timestamp, self._timeframe_seconds)
         current = self._open.get(tick.instrument_token)
         if current is not None and bucket < current.opened_at:
@@ -188,13 +201,16 @@ class MarketCalculationPersistenceService:
         redis: Redis,
         on_snapshot: Callable[[CompletedCandle, dict], Awaitable[None]] | None = None,
         benchmark_token: str | None = None,
+        data_quality: MarketDataQualityService | None = None,
     ) -> None:
         self._settings = settings
         self._redis = redis
         self._on_snapshot = on_snapshot
         self._benchmark_token = benchmark_token or settings.nifty_benchmark_token
+        self._data_quality = data_quality
 
-    async def persist_completed(self, candle: CompletedCandle) -> None:
+    async def persist_completed(self, candle: CompletedCandle, *, notify_snapshot: bool = True) -> None:
+        quality_snapshot = await self._data_quality.observe_completed(candle) if self._data_quality else None
         async with SessionLocal() as session:
             existing = await session.scalar(
                 select(MarketCandle).where(
@@ -260,6 +276,8 @@ class MarketCalculationPersistenceService:
                 volume_lookback=self._settings.volume_lookback_candles,
                 is_nifty=candle.instrument_token == self._benchmark_token,
             )
+            if quality_snapshot is not None:
+                values["data_quality"] = quality_snapshot.as_dict()
             session.add(
                 MarketIndicatorSnapshot(
                     instrument_token=candle.instrument_token,
@@ -276,5 +294,5 @@ class MarketCalculationPersistenceService:
             ex=60 * 60 * 18,
         )
         await update_outcomes(candle)
-        if self._on_snapshot:
+        if self._on_snapshot and notify_snapshot:
             await self._on_snapshot(candle, values)

@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+import json
+from datetime import UTC, date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -8,7 +9,9 @@ from sqlalchemy import select
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import AuditLog, PaperSignal, User, UserRole
 from app.db.session import SessionLocal
+from app.services.data_quality import DATA_QUALITY_PREFIX
 from app.services.safety import emergency_stop_state
+from app.services.worker_supervision import WORKER_STATE_KEY
 
 router = APIRouter(prefix="/scanner", tags=["Scanner"])
 SCANNER_CONTROL_KEY = "scanner:control_state"
@@ -19,6 +22,27 @@ class ScannerStatus(BaseModel):
     status: str
     last_heartbeat: datetime | None = None
     detail: str
+    worker_restart_count: int = 0
+
+
+class DataQualityResponse(BaseModel):
+    instrument_token: str
+    state: str
+    reason: str
+    session_date: date
+    expected_bars: int
+    received_bars: int
+    missing_buckets: list[str]
+    received_ticks: int
+    duplicate_ticks: int
+    out_of_order_ticks: int
+    invalid_ticks: int
+    average_latency_ms: int
+    max_latency_ms: int
+    last_exchange_timestamp: datetime | None
+    last_received_timestamp: datetime | None
+    observed_at: datetime
+    allows_signals: bool
 
 
 class PaperSignalResponse(BaseModel):
@@ -40,9 +64,23 @@ class PaperSignalResponse(BaseModel):
 async def get_scanner_status(redis: Redis) -> ScannerStatus:
     control_state = await redis.get(SCANNER_CONTROL_KEY) or "STOPPED"
     heartbeat = await redis.get(SCANNER_HEARTBEAT_KEY)
+    worker_state = await redis.hgetall(WORKER_STATE_KEY)
+    restart_count = int(worker_state.get("restart_count", 0))
     parsed_heartbeat = datetime.fromisoformat(heartbeat) if heartbeat else None
     if control_state == "RUNNING" and parsed_heartbeat and (datetime.now(UTC) - parsed_heartbeat).total_seconds() > 90:
-        return ScannerStatus(status="DEGRADED", last_heartbeat=parsed_heartbeat, detail="Worker heartbeat is stale")
+        return ScannerStatus(
+            status="DEGRADED",
+            last_heartbeat=parsed_heartbeat,
+            detail="Worker heartbeat is stale",
+            worker_restart_count=restart_count,
+        )
+    if control_state == "RUNNING" and worker_state.get("status") == "DEGRADED":
+        return ScannerStatus(
+            status="DEGRADED",
+            last_heartbeat=parsed_heartbeat,
+            detail=worker_state.get("detail", "Scanner worker is recovering"),
+            worker_restart_count=restart_count,
+        )
     descriptions = {
         "STOPPED": "Scanner is paused; no market data or signals are processed.",
         "STARTING": "Scanner startup has been requested.",
@@ -53,6 +91,7 @@ async def get_scanner_status(redis: Redis) -> ScannerStatus:
         status=control_state,
         last_heartbeat=parsed_heartbeat,
         detail=descriptions.get(control_state, "Unknown scanner state"),
+        worker_restart_count=restart_count,
     )
 
 
@@ -90,6 +129,24 @@ async def latest_paper_signals(_: CurrentUser, session: DbSession) -> list[Paper
         )
         for row in rows
     ]
+
+
+@router.get("/data-quality", response_model=list[DataQualityResponse])
+async def current_data_quality(settings: AppSettings, _: CurrentUser) -> list[DataQualityResponse]:
+    redis = await _redis(settings)
+    snapshots: list[DataQualityResponse] = []
+    try:
+        async for key in redis.scan_iter(match=f"{DATA_QUALITY_PREFIX}*", count=100):
+            raw = await redis.get(key)
+            if not raw:
+                continue
+            try:
+                snapshots.append(DataQualityResponse.model_validate(json.loads(raw)))
+            except (json.JSONDecodeError, ValueError):
+                continue
+    finally:
+        await redis.aclose()
+    return sorted(snapshots, key=lambda item: item.instrument_token)
 
 
 async def _set_state(state: str, user: User, settings: AppSettings) -> ScannerStatus:
