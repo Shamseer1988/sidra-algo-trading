@@ -17,6 +17,8 @@ DEFAULT_TRADING_CONTROLS = {
     "account_capital": 100000.0,
     "risk_per_trade_percent": 0.5,
     "maximum_daily_risk_percent": 1.0,
+    "maximum_open_positions": 3,
+    "maximum_open_exposure_percent": 100.0,
     "maximum_signals": 2,
     "minimum_score": 90,
     "minimum_rr": 1.5,
@@ -32,6 +34,8 @@ class TradingControls(BaseModel):
     account_capital: float = Field(gt=0, le=100_000_000)
     risk_per_trade_percent: float = Field(gt=0, le=5)
     maximum_daily_risk_percent: float = Field(gt=0, le=10)
+    maximum_open_positions: int = Field(default=3, ge=1, le=20)
+    maximum_open_exposure_percent: float = Field(default=100, gt=0, le=1_000)
     maximum_signals: int = Field(ge=1, le=20)
     minimum_score: int = Field(ge=0, le=100)
     minimum_rr: float = Field(ge=1, le=10)

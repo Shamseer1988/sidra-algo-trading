@@ -377,3 +377,22 @@ class PaperPosition(TimestampMixin, Base):
     total_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
     opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RiskReservation(TimestampMixin, Base):
+    """A durable paper-risk allocation; it is never a broker margin reservation."""
+
+    __tablename__ = "risk_reservations"
+    __table_args__ = (
+        UniqueConstraint("paper_signal_id", name="uq_risk_reservations_paper_signal_id"),
+        Index("ix_risk_reservations_session_status", "session_date", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    paper_signal_id: Mapped[UUID] = mapped_column(ForeignKey("paper_signals.id", ondelete="CASCADE"), index=True)
+    session_date: Mapped[date] = mapped_column(Date, index=True)
+    instrument_token: Mapped[str] = mapped_column(String(64), index=True)
+    risk_amount: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", index=True)
+    decision_reason: Mapped[str] = mapped_column(String(255), default="Paper risk reserved")
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

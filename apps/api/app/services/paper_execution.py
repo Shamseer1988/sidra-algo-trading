@@ -174,7 +174,7 @@ class PaperOrderManager:
         controls: PaperExecutionControls,
         reference_price: Decimal,
         quantity: int,
-    ) -> None:
+    ) -> bool:
         price = slipped_price(reference_price, order.side, controls.slippage_bps)
         costs = transaction_costs(price, quantity, order.side, controls)
         previous_quantity = order.filled_quantity
@@ -205,6 +205,7 @@ class PaperOrderManager:
             )
         )
         position = await session.scalar(select(PaperPosition).where(PaperPosition.paper_signal_id == signal.id))
+        position_closed = False
         if order.order_role == "ENTRY":
             if position is None:
                 position = PaperPosition(
@@ -249,6 +250,7 @@ class PaperOrderManager:
             position.fees_total = _money(Decimal(str(position.fees_total)) + costs.total)
             position.status = "CLOSED" if position.open_quantity == 0 else "REDUCING"
             if position.status == "CLOSED":
+                position_closed = True
                 position.closed_at = candle.closed_at
                 for alternate in list(
                     (
@@ -266,6 +268,7 @@ class PaperOrderManager:
                     alternate.rejection_reason = "OCO counterpart completed"
         if position is not None:
             self._mark_to_market(position, candle.close)
+        return position_closed
 
     @staticmethod
     def _mark_to_market(position: PaperPosition, price: Decimal) -> None:
@@ -300,6 +303,7 @@ class PaperOrderManager:
             )
             orders.sort(key=lambda order: {"STOP": 0, "TARGET": 1, "ENTRY": 2}.get(order.order_role, 3))
             processed_exit_signals: set[object] = set()
+            settled_signal_ids: set[object] = set()
             for order in orders:
                 if order.order_role in {"TARGET", "STOP"} and order.paper_signal_id in processed_exit_signals:
                     continue
@@ -313,7 +317,8 @@ class PaperOrderManager:
                 remaining = order.quantity - order.filled_quantity
                 quantity = min(remaining, fill_capacity(candle.volume, controls.participation_percent))
                 if quantity > 0:
-                    await self._apply_fill(session, order, signal, candle, controls, reference, quantity)
+                    if await self._apply_fill(session, order, signal, candle, controls, reference, quantity):
+                        settled_signal_ids.add(signal.id)
                     if order.order_role in {"TARGET", "STOP"}:
                         processed_exit_signals.add(order.paper_signal_id)
             positions = list(
@@ -330,3 +335,9 @@ class PaperOrderManager:
             for position in positions:
                 self._mark_to_market(position, candle.close)
             await session.commit()
+        if settled_signal_ids:
+            from app.services.risk_engine import PaperRiskEngine
+
+            risk_engine = PaperRiskEngine()
+            for signal_id in settled_signal_ids:
+                await risk_engine.settle_signal(signal_id)

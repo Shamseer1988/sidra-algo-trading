@@ -98,9 +98,12 @@ Completed:
 - Added mark-to-market realized/unrealized/net P&L, fees, order lifecycle, positions, paper-execution APIs, and premium glassmorphism Orderbook and Positions workspaces.
 - Kept scanner outcomes and the CSV journal intact while explicitly separating them from the simulated execution ledger.
 
-## Phase 6 — Risk engine
+## Phase 6 — Risk engine (complete)
 
-- Account, position, exposure, market, infrastructure, and session controls; transactional risk reservations; durable emergency stop.
+- Added transactional, database-backed paper-risk reservations with a PostgreSQL advisory lock to prevent concurrent scanner workers from over-allocating daily risk.
+- Enforced daily allocation, maximum open positions, and maximum open exposure before any simulated entry order is queued; rejections are retained with their decision reason for auditability.
+- Settled reservations when a paper position closes while retaining that allocation in the day’s risk budget, and exposed verified allocation, capacity, and exposure through the Risk API.
+- Added a premium glassmorphism Risk Center and browser coverage for its live reservation-capacity metrics.
 
 ## Phase 7 — Backtesting
 

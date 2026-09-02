@@ -2,7 +2,6 @@
 
 import json
 from datetime import UTC, datetime
-from decimal import Decimal
 
 import structlog
 from redis.asyncio import Redis
@@ -17,6 +16,7 @@ from app.db.session import SessionLocal
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_execution import PaperOrderManager
 from app.services.paper_strategy import AWAITING, SIGNALLED
+from app.services.risk_engine import PaperRiskEngine
 from app.services.safety import emergency_stop_state, paper_tracking_enabled
 from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 from app.services.telegram import TelegramError, TelegramNotificationService
@@ -62,20 +62,6 @@ class PaperScannerOrchestrator:
                 select(func.count(PaperSignal.id)).where(PaperSignal.session_date == candle.session_date)
             )
         return int(count or 0) < int(controls["maximum_signals"])
-
-    async def _within_daily_risk_limit(self, candle: CompletedCandle, risk_amount, controls: dict) -> bool:
-        daily_limit = (
-            Decimal(str(controls["account_capital"]))
-            * Decimal(str(controls["maximum_daily_risk_percent"]))
-            / Decimal("100")
-        )
-        async with SessionLocal() as session:
-            committed = await session.scalar(
-                select(func.coalesce(func.sum(PaperSignal.risk_amount), 0)).where(
-                    PaperSignal.session_date == candle.session_date
-                )
-            )
-        return Decimal(str(committed or 0)) + Decimal(str(risk_amount)) <= daily_limit
 
     async def _strategy_limit_reason(self, candle: CompletedCandle, strategy: StrategyConfiguration) -> str | None:
         """Return a paper-only configuration limit violation before recording a signal."""
@@ -141,6 +127,14 @@ class PaperScannerOrchestrator:
                 return None
             await session.refresh(signal)
         return signal
+
+    async def _mark_signal_risk_block(self, signal: PaperSignal, reason: str) -> None:
+        async with SessionLocal() as session:
+            stored = await session.get(PaperSignal, signal.id)
+            if stored:
+                stored.status = "PAPER_RISK_REJECTED"
+                stored.alert_detail = reason
+                await session.commit()
 
     @staticmethod
     def _evaluation_status(decision) -> str:
@@ -327,12 +321,6 @@ class PaperScannerOrchestrator:
                 limit_reason = await self._strategy_limit_reason(candle, strategy)
                 if limit_reason:
                     decision = decision.__class__(next_state=AWAITING, reason=limit_reason)
-            if (
-                decision.next_state == SIGNALLED
-                and decision.risk_amount is not None
-                and not await self._within_daily_risk_limit(candle, decision.risk_amount, effective_controls)
-            ):
-                decision = decision.__class__(next_state=AWAITING, reason="Daily paper-risk limit reached")
             await self._redis.set(state_key, decision.next_state, ex=STATE_TTL_SECONDS)
             evaluation = await self._record_evaluation(candle, indicators, strategy, decision, strategy_snapshot)
             if evaluation:
@@ -343,9 +331,18 @@ class PaperScannerOrchestrator:
             if signal is None:
                 continue
             try:
+                risk = await PaperRiskEngine().reserve_signal(signal)
+                if not risk.allowed:
+                    await self._mark_signal_risk_block(signal, risk.reason)
+                    self._logger.info(
+                        "scanner.paper_signal_risk_rejected", signal_id=str(signal.id), reason=risk.reason
+                    )
+                    continue
                 await PaperOrderManager().queue_signal(signal)
             except Exception:
+                await self._mark_signal_risk_block(signal, "Paper risk reservation unavailable")
                 self._logger.exception("scanner.paper_order_queue_failed", signal_id=str(signal.id))
+                continue
             await self._redis.set(
                 f"scanner:last_signal:{candle.instrument_token}",
                 json.dumps({"signal_id": str(signal.id), "at": datetime.now(UTC).isoformat()}),

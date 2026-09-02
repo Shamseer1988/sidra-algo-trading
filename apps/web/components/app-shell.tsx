@@ -13,6 +13,7 @@ import { Dashboard } from "../features/dashboard/dashboard";
 import { JournalPanel } from "../features/journal/journal-panel";
 import { MarketPanel } from "../features/market/market-panel";
 import { PaperExecutionPanel } from "../features/paper/paper-execution-panel";
+import { RiskCenter } from "../features/risk/risk-center";
 import { ScannerPanel } from "../features/scanner/scanner-panel";
 import { BrokerSettingsCard, SecurityPanel, SettingsPanel } from "../features/settings/settings-panel";
 import { SignalsPanel } from "../features/signals/signals-panel";
@@ -76,7 +77,7 @@ export function AppShell() {
   async function paperAction() { try { if (safety) setSafety(safety.paper_tracking_enabled ? await api.disablePaper() : await api.enablePaper()); setMessage("Paper-tracking setting updated."); } catch (error) { setMessage(error instanceof Error ? error.message : "Paper setting failed"); } }
   async function telegramAction() { try { setTelegram(await api.testTelegram()); setMessage("Telegram test alert sent."); } catch (error) { setMessage(error instanceof Error ? error.message : "Telegram test failed"); } }
   async function saveControls(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (!controls) return; try { setControls(await api.updateControls(controls)); setMessage("Trading controls saved."); } catch (error) { setMessage(error instanceof Error ? error.message : "Settings save failed"); } }
-  function updateControl(key: keyof TradingControls, value: string) { if (!controls) return; const numeric = ["account_capital", "risk_per_trade_percent", "maximum_daily_risk_percent", "maximum_signals", "minimum_score", "minimum_rr", "volume_multiplier", "retest_tolerance_percent", "minimum_ema_spread_percent"].includes(key); setControls({ ...controls, [key]: numeric ? Number(value) : value }); }
+  function updateControl(key: keyof TradingControls, value: string) { if (!controls) return; const numeric = ["account_capital", "risk_per_trade_percent", "maximum_daily_risk_percent", "maximum_open_positions", "maximum_open_exposure_percent", "maximum_signals", "minimum_score", "minimum_rr", "volume_multiplier", "retest_tolerance_percent", "minimum_ema_spread_percent"].includes(key); setControls({ ...controls, [key]: numeric ? Number(value) : value }); }
   async function signOut() { await api.logout(); router.replace("/login"); router.refresh(); }
 
   if (loading) return <main className="grid min-h-screen place-items-center bg-terminal-950 text-sm text-slate-400"><RefreshCw className="mr-2 h-4 w-4 animate-spin" />Loading protected terminal…</main>;
@@ -93,7 +94,8 @@ export function AppShell() {
     case "strategies": content = <StrategiesPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
     case "orders": content = <PaperExecutionPanel view="orders" />; break;
     case "positions": content = <PaperExecutionPanel view="positions" />; break;
-    case "risk": case "telegram": content = controlsPanel; break;
+    case "risk": content = <RiskCenter safety={safety} telegram={telegram} canOperate={Boolean(canOperate)} isAdmin={Boolean(isAdmin)} onEmergency={() => void emergencyAction()} onClear={() => void emergencyAction(true)} onPaper={() => void paperAction()} onTelegram={() => void telegramAction()} />; break;
+    case "telegram": content = controlsPanel; break;
     case "journal": content = <JournalPanel signals={signals} />; break;
     case "upstox": content = <BrokerSettingsCard isAdmin={Boolean(isAdmin)} onMessage={setMessage} focus="UPSTOX" />; break;
     case "firstock": content = <BrokerSettingsCard isAdmin={Boolean(isAdmin)} onMessage={setMessage} focus="FIRSTOCK" />; break;

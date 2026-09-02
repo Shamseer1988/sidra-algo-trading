@@ -7,7 +7,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import app.db.models  # noqa: F401 - register declarative models
-from app.api.routes import auth, broker, events, health, journal, market_data, paper, safety, scanner, system, telegram
+from app.api.routes import (
+    auth,
+    broker,
+    events,
+    health,
+    journal,
+    market_data,
+    paper,
+    risk,
+    safety,
+    scanner,
+    system,
+    telegram,
+)
 from app.api.routes import settings as settings_routes
 from app.core.config import get_settings
 from app.core.logging import configure_logging
@@ -83,3 +96,4 @@ app.include_router(events.router, prefix="/api/v1")
 app.include_router(market_data.router, prefix="/api/v1")
 app.include_router(journal.router, prefix="/api/v1")
 app.include_router(paper.router, prefix="/api/v1")
+app.include_router(risk.router, prefix="/api/v1")

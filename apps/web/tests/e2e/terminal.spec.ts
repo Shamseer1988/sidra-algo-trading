@@ -128,6 +128,8 @@ const MOCK_CONTROLS = {
   account_capital: 100000,
   risk_per_trade_percent: 0.5,
   maximum_daily_risk_percent: 1.0,
+  maximum_open_positions: 3,
+  maximum_open_exposure_percent: 100,
   maximum_signals: 2,
   minimum_score: 90,
   minimum_rr: 1.5,
@@ -171,6 +173,7 @@ const MOCK_STRATEGY_METRICS = [{
 const MOCK_PAPER_SUMMARY = { orders: 3, pending_orders: 1, fills: 2, open_positions: 1, realized_pnl: 0, unrealized_pnl: 125.5, total_pnl: 110.25, fees_total: 15.25 };
 const MOCK_PAPER_ORDERS = [{ id: "paper-order-1", paper_signal_id: "sig-001", client_order_id: "paper:sig-001:entry", instrument_token: "NSE:RELIANCE", session_date: "2026-08-31", side: "BUY", order_type: "MARKET", order_role: "ENTRY", status: "FILLED", quantity: 32, filled_quantity: 32, average_fill_price: 2851, limit_price: null, stop_price: null, fee_total: 8.2, eligible_after: new Date().toISOString(), rejection_reason: null, created_at: new Date().toISOString() }];
 const MOCK_PAPER_POSITIONS = [{ id: "paper-position-1", paper_signal_id: "sig-001", instrument_token: "NSE:RELIANCE", session_date: "2026-08-31", strategy_version: "orb-retest-v1@1", side: "LONG", status: "OPEN", initial_quantity: 32, open_quantity: 32, average_entry_price: 2851, average_exit_price: null, current_price: 2855, stop_price: 2835, target_price: 2880, realized_pnl: 0, unrealized_pnl: 128, fees_total: 15.25, total_pnl: 112.75, opened_at: new Date().toISOString(), closed_at: null }];
+const MOCK_RISK_SUMMARY = { session_date: "2026-08-31", daily_risk_limit: 1000, daily_risk_allocated: 500, daily_risk_available: 500, maximum_open_positions: 3, active_reservations: 1, open_positions: 1, exposure_limit: 100000, current_exposure: 91232, exposure_available: 8768, rejected_reservations: 0 };
 
 const MOCK_SIGNALS = [
   {
@@ -293,6 +296,7 @@ async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN
   await page.route("**/api/v1/paper/summary", async (route: Route) => { await route.fulfill({ json: MOCK_PAPER_SUMMARY }); });
   await page.route("**/api/v1/paper/orders", async (route: Route) => { await route.fulfill({ json: MOCK_PAPER_ORDERS }); });
   await page.route("**/api/v1/paper/positions", async (route: Route) => { await route.fulfill({ json: MOCK_PAPER_POSITIONS }); });
+  await page.route("**/api/v1/risk/summary", async (route: Route) => { await route.fulfill({ json: MOCK_RISK_SUMMARY }); });
 
   await page.route("**/api/v1/market-data/brokers", async (route: Route) => {
     await route.fulfill({ json: { upstox_paper_enabled: true, firstock_feed_enabled: false } });
@@ -499,6 +503,18 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByRole("heading", { name: "Paper positions", exact: true })).toBeVisible();
     await expect(page.getByText("Signal-linked paper positions")).toBeVisible();
     await expect(page.getByText("32/32")).toBeVisible();
+  });
+
+  test("5d. Risk center: reservation capacity and exposure are visible", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Risk Center", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Risk center", exact: true })).toBeVisible();
+    await expect(page.getByText("Verified reservation capacity gates every simulated entry.")).toBeVisible();
+    await expect(page.getByText("₹500 / ₹1,000")).toBeVisible();
+    await expect(page.getByText("1/3")).toBeVisible();
+    await expect(page.getByText("₹8,768")).toBeVisible();
   });
 
   test("6. Security Panel: Active sessions list and session revocation", async ({ page }) => {
