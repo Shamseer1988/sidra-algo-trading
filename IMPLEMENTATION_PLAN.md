@@ -150,6 +150,7 @@ Completed foundation:
 - Added strict API CSP, clickjacking, MIME-sniffing, referrer, permissions, cross-origin isolation, and production-only HSTS headers with regression coverage.
 - Validated the Compose file and retained loopback-only web/database/Redis bindings; no public service port was introduced.
 - Added dependency-aware readiness probes, a safe startup paper-OMS reconciliation checkpoint, and backup/restore scripts that use the configured database identity and fail closed on restore errors.
+- Added a validated, opt-in Caddy HTTPS overlay with automatic HTTP-to-HTTPS redirects, WebSocket-compatible reverse proxying, durable certificate storage, and required DNS/ACME environment values; it is not part of the default local stack.
 
 Remaining:
 

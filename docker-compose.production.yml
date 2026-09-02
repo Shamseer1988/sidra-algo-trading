@@ -1,0 +1,29 @@
+# Opt-in public HTTPS edge. Invoke only after configuring PUBLIC_APP_HOST,
+# ACME_EMAIL, firewall rules, and WEB_ORIGIN=https://PUBLIC_APP_HOST.
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    environment:
+      PUBLIC_APP_HOST: ${PUBLIC_APP_HOST:?Set a public DNS hostname before enabling the HTTPS edge}
+      ACME_EMAIL: ${ACME_EMAIL:?Set the ACME contact email before enabling the HTTPS edge}
+    depends_on:
+      web: { condition: service_healthy }
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    pids_limit: 128
+    networks: [edge]
+
+volumes:
+  caddy_data:
+  caddy_config:

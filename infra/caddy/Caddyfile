@@ -1,0 +1,22 @@
+{
+	email {$ACME_EMAIL}
+}
+
+# This file is used only with docker-compose.production.yml. Caddy will refuse
+# to start until PUBLIC_APP_HOST and ACME_EMAIL are explicitly supplied.
+{$PUBLIC_APP_HOST} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "same-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+
+	reverse_proxy web:3000 {
+		header_up Host {host}
+	}
+}
