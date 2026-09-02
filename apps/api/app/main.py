@@ -37,6 +37,21 @@ configure_logging(settings.log_level)
 logger = structlog.get_logger("system")
 
 
+def security_header_values(app_env: str) -> dict[str, str]:
+    headers = {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "same-origin",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+        "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Resource-Policy": "same-site",
+    }
+    if app_env == "production":
+        headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return headers
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("application.starting", mode=settings.application_mode, live_trading_enabled=False)
@@ -82,10 +97,8 @@ async def csrf_protection(request: Request, call_next):
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response: Response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "same-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    for header, value in security_header_values(settings.app_env).items():
+        response.headers[header] = value
     return response
 
 

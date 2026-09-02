@@ -133,22 +133,26 @@ Completed:
 - Added an explicit broker-submission boundary: approvals can only reach `APPROVED_PAPER_ONLY`, where the system records that live broker submission is unavailable.
 - Added the premium glassmorphism Assisted Trading workspace, service-level regression coverage, and an assisted-approval browser journey.
 
-## Phase 11 — Live architecture (in progress)
-
-Completed foundation:
+## Phase 11 — Live architecture (complete, hard-locked)
 
 - Added an immutable live-readiness review ledger through Alembic migration `0016_live_readiness`, with administrator-audited review history.
 - Added a protected readiness API and premium glassmorphism Live Gates workspace that evaluates runtime locking, compliance, static egress IP, service health, broker adapter, live risk, reconciliation, and administrator activation prerequisites.
 - The readiness service hard-codes `overall_ready=false` and `live_execution_available=false`; no review, setting, or web action can enable trading or submit a broker order.
 - Added regression and browser coverage proving the hard execution boundary is retained.
 
-Remaining before any live architecture can progress:
+Live release remains unavailable by design: broker-approved submission, a separate live risk engine, external reconciliation, compliance, verified static IP, and a separately authorized activation must all exist and pass the gate before a future live release can be considered. No silent enablement.
 
-- A broker-approved submission adapter, separate live risk engine, external broker reconciliation, compliance process, verified static egress IP, and a separately authorized activation design. No silent enablement.
+## Phase 12 — Production hardening (in progress)
 
-## Phase 12 — Production hardening
+Completed foundation:
 
-- HTTPS reverse proxy, Windows home-PC deployment, security headers, monitoring, backups, recovery, resource limits, graceful shutdown, startup reconciliation, and secrets validation.
+- Added process liveness probes, dependency-aware web startup, restart-safe init processes, graceful stop windows, and PID limits to the Compose topology.
+- Added strict API CSP, clickjacking, MIME-sniffing, referrer, permissions, cross-origin isolation, and production-only HSTS headers with regression coverage.
+- Validated the Compose file and retained loopback-only web/database/Redis bindings; no public service port was introduced.
+
+Remaining:
+
+- HTTPS reverse-proxy and certificate deployment, Windows deployment runbook, monitoring/backup/recovery operations, resource sizing, startup reconciliation, and production secret rotation. These require the target domain, network, and operator infrastructure choices.
 
 ## Phase 13 — Final QA
 
@@ -160,7 +164,7 @@ Remaining before any live architecture can progress:
 
 ## Current validated checkpoint
 
-- Backend: 55 tests passed.
+- Backend: 56 tests passed.
 - Python: Ruff lint and format checks passed.
 - Frontend: ESLint and Next.js production build passed.
 - Browser: 15 Playwright journeys passed, including the live-readiness hard-lock boundary.

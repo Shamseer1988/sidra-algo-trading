@@ -25,6 +25,11 @@ class HealthResponse(BaseModel):
     redis: DependencyHealth
 
 
+class LivenessResponse(BaseModel):
+    status: str
+    timestamp: datetime
+
+
 async def _database_health() -> DependencyHealth:
     try:
         async with engine.connect() as connection:
@@ -58,3 +63,9 @@ async def health() -> HealthResponse:
         database=database,
         redis=redis,
     )
+
+
+@router.get("/live", response_model=LivenessResponse)
+async def liveness() -> LivenessResponse:
+    """Process-level probe; dependency readiness remains available from the main health endpoint."""
+    return LivenessResponse(status="healthy", timestamp=datetime.now(UTC))
