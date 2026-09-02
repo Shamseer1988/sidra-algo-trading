@@ -16,6 +16,7 @@ import { PaperExecutionPanel } from "../features/paper/paper-execution-panel";
 import { OmsWorkspace } from "../features/oms/oms-workspace";
 import { ShadowWorkspace } from "../features/shadow/shadow-workspace";
 import { AssistedTradingWorkspace } from "../features/assisted/assisted-trading-workspace";
+import { LiveReadinessWorkspace } from "../features/live/live-readiness-workspace";
 import { RiskCenter } from "../features/risk/risk-center";
 import { BacktestingWorkspace } from "../features/backtesting/backtesting-workspace";
 import { ScannerPanel } from "../features/scanner/scanner-panel";
@@ -109,6 +110,7 @@ export function AppShell() {
     case "firstock": content = <BrokerSettingsCard isAdmin={Boolean(isAdmin)} onMessage={setMessage} focus="FIRSTOCK" />; break;
     case "system": content = <SystemHealthPanel overview={overview} scanner={scanner} />; break;
     case "audit": content = <SecurityPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} auditOnly />; break;
+    case "liveGates": content = <LiveReadinessWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
     case "settings": content = <SettingsPanel controls={controls} isAdmin={Boolean(isAdmin)} onSave={saveControls} onChange={updateControl} onMessage={setMessage} />; break;
     default: content = <UnavailableWorkspace workspace={active} />;
   }

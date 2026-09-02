@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     timezone: str = "Asia/Kolkata"
     application_mode: Literal["PAPER", "REPLAY", "LIVE"] = "PAPER"
     live_trading_enabled: bool = False
+    live_compliance_approved: bool = False
+    live_static_ip_verified: bool = False
     auto_create_schema: bool = False
     log_level: str = "INFO"
 

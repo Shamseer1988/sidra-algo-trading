@@ -133,9 +133,18 @@ Completed:
 - Added an explicit broker-submission boundary: approvals can only reach `APPROVED_PAPER_ONLY`, where the system records that live broker submission is unavailable.
 - Added the premium glassmorphism Assisted Trading workspace, service-level regression coverage, and an assisted-approval browser journey.
 
-## Phase 11 — Live architecture
+## Phase 11 — Live architecture (in progress)
 
-- Full automated lifecycle behind explicit compliance, broker, risk, health, reconciliation, static-IP, and administrator activation gates. No silent enablement.
+Completed foundation:
+
+- Added an immutable live-readiness review ledger through Alembic migration `0016_live_readiness`, with administrator-audited review history.
+- Added a protected readiness API and premium glassmorphism Live Gates workspace that evaluates runtime locking, compliance, static egress IP, service health, broker adapter, live risk, reconciliation, and administrator activation prerequisites.
+- The readiness service hard-codes `overall_ready=false` and `live_execution_available=false`; no review, setting, or web action can enable trading or submit a broker order.
+- Added regression and browser coverage proving the hard execution boundary is retained.
+
+Remaining before any live architecture can progress:
+
+- A broker-approved submission adapter, separate live risk engine, external broker reconciliation, compliance process, verified static egress IP, and a separately authorized activation design. No silent enablement.
 
 ## Phase 12 — Production hardening
 
@@ -151,7 +160,7 @@ Completed:
 
 ## Current validated checkpoint
 
-- Backend: 54 tests passed.
+- Backend: 55 tests passed.
 - Python: Ruff lint and format checks passed.
 - Frontend: ESLint and Next.js production build passed.
-- Browser: 14 Playwright journeys passed, including the assisted paper-only approval boundary.
+- Browser: 15 Playwright journeys passed, including the live-readiness hard-lock boundary.

@@ -15,6 +15,7 @@ from app.api.routes import (
     events,
     health,
     journal,
+    live,
     market_data,
     oms,
     paper,
@@ -105,3 +106,4 @@ app.include_router(backtesting.router, prefix="/api/v1")
 app.include_router(oms.router, prefix="/api/v1")
 app.include_router(shadow.router, prefix="/api/v1")
 app.include_router(assisted.router, prefix="/api/v1")
+app.include_router(live.router, prefix="/api/v1")

@@ -233,6 +233,16 @@ const MOCK_ASSISTED_APPROVALS = [{
   submission_block_reason: null,
   created_at: new Date().toISOString(),
 }];
+const MOCK_LIVE_READINESS = {
+  status: "HARD_LOCKED",
+  overall_ready: false,
+  live_execution_available: false,
+  checked_at: new Date().toISOString(),
+  gates: [
+    { key: "runtime_lock", label: "Runtime hard lock", passed: true, detail: "PAPER configuration is asserted." },
+    { key: "broker_adapter", label: "Broker execution adapter", passed: false, detail: "No broker submission adapter is implemented." },
+  ],
+};
 
 async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN") {
   const user = userRole === "ADMIN" ? MOCK_ADMIN_USER : MOCK_VIEWER_USER;
@@ -315,6 +325,13 @@ async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN
       await route.fulfill({ json: { ...MOCK_ASSISTED_APPROVALS[0], decision: "APPROVE", status: "APPROVED_PAPER_ONLY", risk_revalidated_at: new Date().toISOString(), submission_block_reason: "Live broker submission is unavailable in this release" } });
     } else {
       await route.fulfill({ json: MOCK_ASSISTED_APPROVALS });
+    }
+  });
+  await page.route(/\/api\/v1\/live\/readiness(?:\/.*)?$/, async (route: Route) => {
+    if (route.request().url().endsWith("/history")) {
+      await route.fulfill({ json: [] });
+    } else {
+      await route.fulfill({ json: MOCK_LIVE_READINESS });
     }
   });
 
@@ -558,6 +575,18 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await page.getByRole("button", { name: "Approve signal-assisted-001" }).click();
     await expect(page.getByText("No broker order was submitted.")).toBeVisible();
     await expect(page.getByText("Approved Paper Only")).toBeVisible();
+  });
+
+  test("5g. Live gates: readiness inspection preserves the hard execution lock", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Live Gates", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Live readiness gates", exact: true })).toBeVisible();
+    await expect(page.getByText("Live execution hard lock active.")).toBeVisible();
+    await expect(page.getByText("No broker submission adapter is implemented.")).toBeVisible();
+    await page.getByRole("button", { name: "Record review" }).click();
+    await expect(page.getByText("The live execution lock remains active.")).toBeVisible();
   });
 
   test("6. Security Panel: Active sessions list and session revocation", async ({ page }) => {

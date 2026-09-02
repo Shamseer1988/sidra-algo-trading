@@ -45,6 +45,7 @@ export type WorkspaceId =
   | "telegram"
   | "system"
   | "audit"
+  | "liveGates"
   | "users"
   | "settings";
 
@@ -96,6 +97,7 @@ export const navigationSections: NavigationSection[] = [
     items: [
       { id: "system", label: "System Health", icon: DatabaseZap, available: true },
       { id: "audit", label: "Audit Log", icon: ScrollText, available: true },
+      { id: "liveGates", label: "Live Gates", icon: ShieldAlert, available: true },
       { id: "users", label: "Users", icon: UsersRound, available: false },
       { id: "settings", label: "Settings", icon: Settings2, available: true },
     ],
@@ -124,6 +126,7 @@ export const workspaceMeta: Record<WorkspaceId, { eyebrow: string; title: string
   telegram: { eyebrow: "Notifications", title: "Telegram" },
   system: { eyebrow: "Infrastructure", title: "System health" },
   audit: { eyebrow: "Security & operations", title: "Audit log" },
+  liveGates: { eyebrow: "Future execution controls", title: "Live readiness gates" },
   users: { eyebrow: "Administration", title: "Users" },
   settings: { eyebrow: "Configuration", title: "Settings" },
 };

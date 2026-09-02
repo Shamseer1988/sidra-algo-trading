@@ -163,6 +163,20 @@ class TradeApprovalIntent(TimestampMixin, Base):
     submission_block_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
+class LiveReadinessCheck(Base):
+    """Immutable record of a live-readiness review; it cannot activate trading."""
+
+    __tablename__ = "live_readiness_checks"
+    __table_args__ = (Index("ix_live_readiness_checks_created_status", "created_at", "status"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    status: Mapped[str] = mapped_column(String(30), default="HARD_LOCKED", index=True)
+    overall_ready: Mapped[bool] = mapped_column(default=False)
+    gate_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    checked_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 class MarketCandle(Base):
     """An immutable, completed OHLCV candle; no partial candles are stored here."""
 
