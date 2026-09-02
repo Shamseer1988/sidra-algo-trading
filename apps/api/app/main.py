@@ -20,6 +20,7 @@ from app.api.routes import (
     risk,
     safety,
     scanner,
+    shadow,
     system,
     telegram,
 )
@@ -101,3 +102,4 @@ app.include_router(paper.router, prefix="/api/v1")
 app.include_router(risk.router, prefix="/api/v1")
 app.include_router(backtesting.router, prefix="/api/v1")
 app.include_router(oms.router, prefix="/api/v1")
+app.include_router(shadow.router, prefix="/api/v1")

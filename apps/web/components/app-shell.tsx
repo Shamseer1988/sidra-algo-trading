@@ -14,6 +14,7 @@ import { JournalPanel } from "../features/journal/journal-panel";
 import { MarketPanel } from "../features/market/market-panel";
 import { PaperExecutionPanel } from "../features/paper/paper-execution-panel";
 import { OmsWorkspace } from "../features/oms/oms-workspace";
+import { ShadowWorkspace } from "../features/shadow/shadow-workspace";
 import { RiskCenter } from "../features/risk/risk-center";
 import { BacktestingWorkspace } from "../features/backtesting/backtesting-workspace";
 import { ScannerPanel } from "../features/scanner/scanner-panel";
@@ -97,6 +98,7 @@ export function AppShell() {
     case "orders": content = <PaperExecutionPanel view="orders" />; break;
     case "positions": content = <PaperExecutionPanel view="positions" />; break;
     case "oms": content = <OmsWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
+    case "shadow": content = <ShadowWorkspace />; break;
     case "risk": content = <RiskCenter safety={safety} telegram={telegram} canOperate={Boolean(canOperate)} isAdmin={Boolean(isAdmin)} onEmergency={() => void emergencyAction()} onClear={() => void emergencyAction(true)} onPaper={() => void paperAction()} onTelegram={() => void telegramAction()} />; break;
     case "backtesting": content = <BacktestingWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
     case "telegram": content = controlsPanel; break;

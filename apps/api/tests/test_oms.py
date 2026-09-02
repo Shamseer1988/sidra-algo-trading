@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import delete, select
 
-from app.db.models import OmsOrder, OmsOrderEvent, OrderIntent, PaperSignal
+from app.db.models import OmsOrder, OmsOrderEvent, OrderIntent, PaperSignal, ShadowOrder
 from app.db.session import SessionLocal, engine
 from app.services.oms import OmsTransitionError, PaperOmsGateway, transition_order
 
@@ -36,6 +36,8 @@ async def test_paper_oms_intent_is_idempotent_and_lifecycle_is_explicit() -> Non
             first = await gateway.ensure_entry(session, signal)
             second = await gateway.ensure_entry(session, signal)
             assert first.id == second.id
+            shadow = await session.scalar(select(ShadowOrder).where(ShadowOrder.oms_order_id == first.id))
+            assert shadow is not None and shadow.intended_price == Decimal("100")
             await transition_order(session, first, "UNKNOWN", "transport_timeout")
             assert first.unknown_since is not None
             await transition_order(session, first, "ACKNOWLEDGED", "reconciled")

@@ -5,7 +5,15 @@ from datetime import UTC, datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ExecutionReconciliation, OmsOrder, OmsOrderEvent, OrderIntent, PaperOrder, PaperSignal
+from app.db.models import (
+    ExecutionReconciliation,
+    OmsOrder,
+    OmsOrderEvent,
+    OrderIntent,
+    PaperOrder,
+    PaperSignal,
+    ShadowOrder,
+)
 
 TERMINAL_STATES = {"FILLED", "CANCELLED", "REJECTED"}
 ALLOWED_TRANSITIONS = {
@@ -94,6 +102,15 @@ class PaperOmsGateway:
         order = OmsOrder(order_intent_id=intent.id, venue="PAPER_SIMULATOR", status="QUEUED")
         session.add(order)
         await session.flush()
+        session.add(
+            ShadowOrder(
+                oms_order_id=order.id,
+                instrument_token=signal.instrument_token,
+                side=intent.side,
+                intended_quantity=signal.quantity,
+                intended_price=signal.entry_price,
+            )
+        )
         await _append_event(session, order, None, "QUEUED", "intent_accepted", {"paper_only": True})
         return order
 
@@ -113,6 +130,12 @@ class PaperOmsGateway:
             "paper_fill_recorded",
             {"filled_quantity": paper_order.filled_quantity, "paper_order_id": str(paper_order.id)},
         )
+        shadow = await session.scalar(select(ShadowOrder).where(ShadowOrder.oms_order_id == order.id).with_for_update())
+        if shadow and paper_order.average_fill_price is not None:
+            shadow.paper_fill_price = paper_order.average_fill_price
+            shadow.price_delta = paper_order.average_fill_price - shadow.intended_price
+            shadow.comparison_status = "COMPARED" if paper_order.status == "FILLED" else "PARTIALLY_COMPARED"
+            shadow.compared_at = datetime.now(UTC)
 
 
 async def reconcile_paper_oms(session: AsyncSession) -> ExecutionReconciliation:

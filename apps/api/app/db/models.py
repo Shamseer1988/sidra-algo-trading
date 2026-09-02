@@ -545,3 +545,25 @@ class ExecutionReconciliation(Base):
     unknown_orders: Mapped[int] = mapped_column(Integer, default=0)
     detail: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class ShadowOrder(TimestampMixin, Base):
+    """A zero-submission intended order compared only with local paper execution."""
+
+    __tablename__ = "shadow_orders"
+    __table_args__ = (
+        UniqueConstraint("oms_order_id", name="uq_shadow_orders_oms_order_id"),
+        Index("ix_shadow_orders_status_updated", "comparison_status", "updated_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    oms_order_id: Mapped[UUID] = mapped_column(ForeignKey("oms_orders.id", ondelete="CASCADE"), unique=True, index=True)
+    instrument_token: Mapped[str] = mapped_column(String(64), index=True)
+    side: Mapped[str] = mapped_column(String(10))
+    intended_quantity: Mapped[int] = mapped_column(Integer)
+    intended_price: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    comparison_status: Mapped[str] = mapped_column(String(30), default="AWAITING_PAPER_FILL", index=True)
+    paper_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    price_delta: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    compared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

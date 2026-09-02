@@ -9,6 +9,7 @@ import {
   CandlestickChart,
   ClipboardList,
   DatabaseZap,
+  Ghost,
   Landmark,
   LineChart,
   RadioTower,
@@ -31,6 +32,7 @@ export type WorkspaceId =
   | "orders"
   | "positions"
   | "oms"
+  | "shadow"
   | "risk"
   | "performance"
   | "backtesting"
@@ -60,6 +62,7 @@ export const navigationSections: NavigationSection[] = [
       { id: "orders", label: "Orders", icon: ClipboardList, available: true },
       { id: "positions", label: "Positions", icon: BriefcaseBusiness, available: true },
       { id: "oms", label: "OMS", icon: ClipboardList, available: true },
+      { id: "shadow", label: "Shadow Mode", icon: Ghost, available: true },
     ],
   },
   {
@@ -106,6 +109,7 @@ export const workspaceMeta: Record<WorkspaceId, { eyebrow: string; title: string
   orders: { eyebrow: "Execution workspace", title: "Orders" },
   positions: { eyebrow: "Execution workspace", title: "Positions" },
   oms: { eyebrow: "Execution lifecycle", title: "OMS operations" },
+  shadow: { eyebrow: "Zero-submission comparison", title: "Shadow mode" },
   risk: { eyebrow: "Safety controls", title: "Risk center" },
   performance: { eyebrow: "Analytics workspace", title: "Performance" },
   backtesting: { eyebrow: "Research workspace", title: "Backtesting" },

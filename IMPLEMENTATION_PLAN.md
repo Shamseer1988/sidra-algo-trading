@@ -119,9 +119,11 @@ Completed:
 - Added bounded paper reconciliation checkpoints that flag unknown or unlinked OMS orders for review, together with protected OMS APIs and a premium glassmorphism operations workspace.
 - Added lifecycle/idempotency coverage and retained `LIVE_TRADING_ENABLED=false` throughout.
 
-## Phase 9 — Shadow mode
+## Phase 9 — Shadow mode (complete)
 
-- Real inputs and intended orders with zero broker submissions, plus paper/shadow comparison analytics.
+- Added a zero-submission shadow ledger through Alembic migration `0014_shadow_mode`, automatically capturing intended paper OMS entries from real scanner and market-data inputs.
+- Compared intended entry prices with completed paper fills, retaining per-order deltas and summary analytics while reporting an explicit zero broker-submission count.
+- Added protected Shadow Mode APIs and a premium glassmorphism comparison workspace; no shadow path imports or calls a broker SDK.
 
 ## Phase 10 — Assisted trading
 
