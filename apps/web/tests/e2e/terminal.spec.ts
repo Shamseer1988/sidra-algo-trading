@@ -222,6 +222,17 @@ const MOCK_SESSIONS = [
 const MOCK_AUDIT = [
   { id: "aud-1", event_type: "auth.login_success", created_at: new Date().toISOString(), user_id: "u-1", ip_address: "127.0.0.1", message: "Admin sign-in", metadata_json: {} },
 ];
+const MOCK_ASSISTED_APPROVALS = [{
+  reference_id: "signal-assisted-001",
+  decision: "PENDING",
+  source: "WEB",
+  status: "PENDING",
+  expires_at: new Date(Date.now() + 300000).toISOString(),
+  decided_at: null,
+  risk_revalidated_at: null,
+  submission_block_reason: null,
+  created_at: new Date().toISOString(),
+}];
 
 async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN") {
   const user = userRole === "ADMIN" ? MOCK_ADMIN_USER : MOCK_VIEWER_USER;
@@ -299,6 +310,13 @@ async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN
   await page.route("**/api/v1/paper/positions", async (route: Route) => { await route.fulfill({ json: MOCK_PAPER_POSITIONS }); });
   await page.route("**/api/v1/risk/summary", async (route: Route) => { await route.fulfill({ json: MOCK_RISK_SUMMARY }); });
   await page.route("**/api/v1/backtests", async (route: Route) => { await route.fulfill({ json: MOCK_BACKTESTS }); });
+  await page.route(/\/api\/v1\/assisted\/approvals(?:\/.*)?$/, async (route: Route) => {
+    if (route.request().method() === "POST") {
+      await route.fulfill({ json: { ...MOCK_ASSISTED_APPROVALS[0], decision: "APPROVE", status: "APPROVED_PAPER_ONLY", risk_revalidated_at: new Date().toISOString(), submission_block_reason: "Live broker submission is unavailable in this release" } });
+    } else {
+      await route.fulfill({ json: MOCK_ASSISTED_APPROVALS });
+    }
+  });
 
   await page.route("**/api/v1/market-data/brokers", async (route: Route) => {
     await route.fulfill({ json: { upstox_paper_enabled: true, firstock_feed_enabled: false } });
@@ -528,6 +546,18 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText("Historical replay uses only completed candles")).toBeVisible();
     await expect(page.getByText("₹1,250").first()).toBeVisible();
     await expect(page.getByText("ORB Retest — Default", { exact: true })).toBeVisible();
+  });
+
+  test("5f. Assisted trading: paper-only approval is visible and cannot imply broker submission", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Assisted Trading", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Assisted trading", exact: true })).toBeVisible();
+    await expect(page.getByText("Submission boundary active.")).toBeVisible();
+    await page.getByRole("button", { name: "Approve signal-assisted-001" }).click();
+    await expect(page.getByText("No broker order was submitted.")).toBeVisible();
+    await expect(page.getByText("Approved Paper Only")).toBeVisible();
   });
 
   test("6. Security Panel: Active sessions list and session revocation", async ({ page }) => {

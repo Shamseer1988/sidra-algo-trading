@@ -158,6 +158,9 @@ class TradeApprovalIntent(TimestampMixin, Base):
     requester_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="RECORDED", index=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    risk_revalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    submission_block_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class MarketCandle(Base):

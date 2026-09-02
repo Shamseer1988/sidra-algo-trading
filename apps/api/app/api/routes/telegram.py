@@ -1,5 +1,6 @@
 import contextlib
 import hmac
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -9,6 +10,7 @@ from sqlalchemy import select
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import AuditLog, TelegramAlert, TelegramInboundEvent, TradeApprovalIntent, User, UserRole
+from app.services.assisted_trading import decide_approval
 from app.services.safety import emergency_stop
 from app.services.telegram import TelegramError, TelegramNotificationService
 from app.services.telegram_config import save_telegram_config
@@ -200,15 +202,19 @@ async def inbound_webhook(
                 select(TradeApprovalIntent).where(TradeApprovalIntent.reference_id == reference_id)
             )
             if existing is None:
-                session.add(
-                    TradeApprovalIntent(
-                        reference_id=reference_id, decision=parts[1].upper(), source="TELEGRAM", requester_id=sender_id
-                    )
+                existing = TradeApprovalIntent(
+                    reference_id=reference_id,
+                    decision="PENDING",
+                    source="TELEGRAM",
+                    requester_id=sender_id,
+                    status="PENDING",
+                    expires_at=datetime.now(UTC) + timedelta(minutes=5),
                 )
+                session.add(existing)
+                await session.flush()
             else:
-                existing.decision = parts[1].upper()
                 existing.requester_id = sender_id
-                existing.status = "RECORDED"
+            await decide_approval(session, existing, "APPROVE" if parts[1] == "approve" else "REJECT")
             session.add(
                 AuditLog(
                     event_type="telegram.trade_approval_intent",

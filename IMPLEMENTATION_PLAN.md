@@ -125,9 +125,13 @@ Completed:
 - Compared intended entry prices with completed paper fills, retaining per-order deltas and summary analytics while reporting an explicit zero broker-submission count.
 - Added protected Shadow Mode APIs and a premium glassmorphism comparison workspace; no shadow path imports or calls a broker SDK.
 
-## Phase 10 — Assisted trading
+## Phase 10 — Assisted trading (complete)
 
-- Web/Telegram approval, callback authenticity and deduplication, expiry checks, and mandatory risk revalidation immediately before broker submission.
+- Added protected, administrator-only web decisions and authenticated Telegram approval callbacks, both written to a durable approval ledger.
+- Telegram webhook secret validation, sender/chat allow-list enforcement, unique inbound-event records, and terminal decision semantics prevent untrusted or replayed callback effects.
+- Approval decisions expire deterministically and every approval revalidates the paper risk ledger immediately before the paper-only decision is recorded.
+- Added an explicit broker-submission boundary: approvals can only reach `APPROVED_PAPER_ONLY`, where the system records that live broker submission is unavailable.
+- Added the premium glassmorphism Assisted Trading workspace, service-level regression coverage, and an assisted-approval browser journey.
 
 ## Phase 11 — Live architecture
 
@@ -147,7 +151,7 @@ Completed:
 
 ## Current validated checkpoint
 
-- Backend: 52 tests passed.
+- Backend: 54 tests passed.
 - Python: Ruff lint and format checks passed.
 - Frontend: ESLint and Next.js production build passed.
-- Browser: 13 Playwright journeys passed, including Risk Center and Backtesting Lab research workflows.
+- Browser: 14 Playwright journeys passed, including the assisted paper-only approval boundary.

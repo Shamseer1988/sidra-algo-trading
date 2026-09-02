@@ -33,6 +33,7 @@ export type WorkspaceId =
   | "positions"
   | "oms"
   | "shadow"
+  | "assisted"
   | "risk"
   | "performance"
   | "backtesting"
@@ -63,6 +64,7 @@ export const navigationSections: NavigationSection[] = [
       { id: "positions", label: "Positions", icon: BriefcaseBusiness, available: true },
       { id: "oms", label: "OMS", icon: ClipboardList, available: true },
       { id: "shadow", label: "Shadow Mode", icon: Ghost, available: true },
+      { id: "assisted", label: "Assisted Trading", icon: Bot, available: true },
     ],
   },
   {
@@ -110,6 +112,7 @@ export const workspaceMeta: Record<WorkspaceId, { eyebrow: string; title: string
   positions: { eyebrow: "Execution workspace", title: "Positions" },
   oms: { eyebrow: "Execution lifecycle", title: "OMS operations" },
   shadow: { eyebrow: "Zero-submission comparison", title: "Shadow mode" },
+  assisted: { eyebrow: "Controlled paper decisions", title: "Assisted trading" },
   risk: { eyebrow: "Safety controls", title: "Risk center" },
   performance: { eyebrow: "Analytics workspace", title: "Performance" },
   backtesting: { eyebrow: "Research workspace", title: "Backtesting" },
