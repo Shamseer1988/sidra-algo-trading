@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import ApplicationSetting, PaperFill, PaperOrder, PaperPosition, PaperSignal
 from app.db.session import SessionLocal
 from app.services.market_calculations import CompletedCandle
+from app.services.oms import PaperOmsGateway
 
 PAPER_EXECUTION_KEY = "paper_execution_controls"
 MONEY = Decimal("0.0001")
@@ -93,9 +94,11 @@ class PaperOrderManager:
             )
             if existing:
                 return
+            oms_order = await PaperOmsGateway().ensure_entry(session, signal)
             session.add(
                 PaperOrder(
                     paper_signal_id=signal.id,
+                    oms_order_id=oms_order.id,
                     client_order_id=f"paper:{signal.id}:entry",
                     instrument_token=signal.instrument_token,
                     session_date=signal.session_date,
@@ -204,6 +207,7 @@ class PaperOrderManager:
                 occurred_at=candle.closed_at,
             )
         )
+        await PaperOmsGateway().record_fill(session, order)
         position = await session.scalar(select(PaperPosition).where(PaperPosition.paper_signal_id == signal.id))
         position_closed = False
         if order.order_role == "ENTRY":

@@ -15,6 +15,7 @@ from app.api.routes import (
     health,
     journal,
     market_data,
+    oms,
     paper,
     risk,
     safety,
@@ -99,3 +100,4 @@ app.include_router(journal.router, prefix="/api/v1")
 app.include_router(paper.router, prefix="/api/v1")
 app.include_router(risk.router, prefix="/api/v1")
 app.include_router(backtesting.router, prefix="/api/v1")
+app.include_router(oms.router, prefix="/api/v1")

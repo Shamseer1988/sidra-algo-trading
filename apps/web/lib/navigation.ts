@@ -30,6 +30,7 @@ export type WorkspaceId =
   | "strategies"
   | "orders"
   | "positions"
+  | "oms"
   | "risk"
   | "performance"
   | "backtesting"
@@ -58,6 +59,7 @@ export const navigationSections: NavigationSection[] = [
       { id: "strategies", label: "Strategies", icon: SlidersHorizontal, available: true },
       { id: "orders", label: "Orders", icon: ClipboardList, available: true },
       { id: "positions", label: "Positions", icon: BriefcaseBusiness, available: true },
+      { id: "oms", label: "OMS", icon: ClipboardList, available: true },
     ],
   },
   {
@@ -103,6 +105,7 @@ export const workspaceMeta: Record<WorkspaceId, { eyebrow: string; title: string
   strategies: { eyebrow: "Paper scanner configuration", title: "Strategies" },
   orders: { eyebrow: "Execution workspace", title: "Orders" },
   positions: { eyebrow: "Execution workspace", title: "Positions" },
+  oms: { eyebrow: "Execution lifecycle", title: "OMS operations" },
   risk: { eyebrow: "Safety controls", title: "Risk center" },
   performance: { eyebrow: "Analytics workspace", title: "Performance" },
   backtesting: { eyebrow: "Research workspace", title: "Backtesting" },

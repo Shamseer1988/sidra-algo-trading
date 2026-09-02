@@ -299,6 +299,9 @@ class PaperOrder(TimestampMixin, Base):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     paper_signal_id: Mapped[UUID] = mapped_column(ForeignKey("paper_signals.id", ondelete="CASCADE"), index=True)
+    oms_order_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("oms_orders.id", ondelete="SET NULL"), unique=True, nullable=True
+    )
     client_order_id: Mapped[str] = mapped_column(String(180), unique=True, index=True)
     instrument_token: Mapped[str] = mapped_column(String(64), index=True)
     session_date: Mapped[date] = mapped_column(Date, index=True)
@@ -457,3 +460,88 @@ class BacktestTrade(Base):
     net_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 4))
     realized_r: Mapped[Decimal] = mapped_column(Numeric(12, 4))
     exit_reason: Mapped[str] = mapped_column(String(40))
+
+
+class OrderIntent(Base):
+    """Immutable request to execute within one mode; never a broker submission itself."""
+
+    __tablename__ = "order_intents"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_order_intents_idempotency_key"),
+        UniqueConstraint("source_paper_signal_id", name="uq_order_intents_source_paper_signal_id"),
+        Index("ix_order_intents_created_mode", "created_at", "mode"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    idempotency_key: Mapped[str] = mapped_column(String(220), unique=True, index=True)
+    source_paper_signal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("paper_signals.id", ondelete="SET NULL"), nullable=True
+    )
+    mode: Mapped[str] = mapped_column(String(20), default="PAPER", index=True)
+    instrument_token: Mapped[str] = mapped_column(String(64), index=True)
+    side: Mapped[str] = mapped_column(String(10))
+    quantity: Mapped[int] = mapped_column(Integer)
+    order_type: Mapped[str] = mapped_column(String(20))
+    intent_role: Mapped[str] = mapped_column(String(20), default="ENTRY")
+    limit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    stop_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    payload_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class OmsOrder(TimestampMixin, Base):
+    """Execution lifecycle record. Broker identifiers remain null in the paper-only release."""
+
+    __tablename__ = "oms_orders"
+    __table_args__ = (
+        UniqueConstraint("order_intent_id", name="uq_oms_orders_intent"),
+        Index("ix_oms_orders_status_updated", "status", "updated_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    order_intent_id: Mapped[UUID] = mapped_column(
+        ForeignKey("order_intents.id", ondelete="RESTRICT"), unique=True, index=True
+    )
+    venue: Mapped[str] = mapped_column(String(40), default="PAPER_SIMULATOR")
+    broker_order_id: Mapped[str | None] = mapped_column(String(120), unique=True, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="QUEUED", index=True)
+    filled_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    average_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    unknown_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_transition_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OmsOrderEvent(Base):
+    """Append-only lifecycle event; sequence is unique within an OMS order."""
+
+    __tablename__ = "oms_order_events"
+    __table_args__ = (
+        UniqueConstraint("oms_order_id", "sequence", name="uq_oms_order_events_sequence"),
+        Index("ix_oms_order_events_order_occurred", "oms_order_id", "occurred_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    oms_order_id: Mapped[UUID] = mapped_column(ForeignKey("oms_orders.id", ondelete="CASCADE"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    from_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(30))
+    event_type: Mapped[str] = mapped_column(String(60))
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class ExecutionReconciliation(Base):
+    """A bounded comparison checkpoint; paper mode has no external broker side."""
+
+    __tablename__ = "execution_reconciliations"
+    __table_args__ = (Index("ix_execution_reconciliations_created_status", "created_at", "status"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    mode: Mapped[str] = mapped_column(String(20), default="PAPER", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="CLEAN", index=True)
+    internal_orders: Mapped[int] = mapped_column(Integer, default=0)
+    external_orders: Mapped[int] = mapped_column(Integer, default=0)
+    unknown_orders: Mapped[int] = mapped_column(Integer, default=0)
+    detail: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

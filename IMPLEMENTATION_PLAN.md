@@ -112,9 +112,12 @@ Completed:
 - Added net P&L, win rate, profit factor, closed-trade equity, drawdown, and per-strategy comparison analytics with protected API access.
 - Added a premium glassmorphism Backtesting Lab and deterministic/look-ahead regression coverage.
 
-## Phase 8 — OMS and execution core
+## Phase 8 — OMS and execution core (complete)
 
-- Immutable OrderIntent, unique idempotency keys, explicit order state machine including UNKNOWN, execution gateway, broker adapters, fills, positions, and reconciliation. LIVE remains disabled.
+- Added immutable paper-only `OrderIntent` records with unique idempotency keys, linked OMS orders, append-only lifecycle events, and an explicit `UNKNOWN` state through Alembic migration `0013_oms_core`.
+- Linked scanner-queued paper entries and subsequent paper fills into the OMS gateway while preserving the existing simulation ledger; no OMS path calls a broker SDK or writes a broker order identifier.
+- Added bounded paper reconciliation checkpoints that flag unknown or unlinked OMS orders for review, together with protected OMS APIs and a premium glassmorphism operations workspace.
+- Added lifecycle/idempotency coverage and retained `LIVE_TRADING_ENABLED=false` throughout.
 
 ## Phase 9 — Shadow mode
 
@@ -142,7 +145,7 @@ Completed:
 
 ## Current validated checkpoint
 
-- Backend: 51 tests passed.
+- Backend: 52 tests passed.
 - Python: Ruff lint and format checks passed.
 - Frontend: ESLint and Next.js production build passed.
 - Browser: 13 Playwright journeys passed, including Risk Center and Backtesting Lab research workflows.
