@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 import app.db.models  # noqa: F401 - register declarative models
 from app.api.routes import (
     auth,
+    backtesting,
     broker,
     events,
     health,
@@ -97,3 +98,4 @@ app.include_router(market_data.router, prefix="/api/v1")
 app.include_router(journal.router, prefix="/api/v1")
 app.include_router(paper.router, prefix="/api/v1")
 app.include_router(risk.router, prefix="/api/v1")
+app.include_router(backtesting.router, prefix="/api/v1")

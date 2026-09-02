@@ -105,9 +105,12 @@ Completed:
 - Settled reservations when a paper position closes while retaining that allocation in the day’s risk budget, and exposed verified allocation, capacity, and exposure through the Risk API.
 - Added a premium glassmorphism Risk Center and browser coverage for its live reservation-capacity metrics.
 
-## Phase 7 — Backtesting
+## Phase 7 — Backtesting (complete)
 
-- Historical data, deterministic runs, cost/slippage models, equity and drawdown analytics, strategy comparison, and look-ahead-bias tests.
+- Added a durable historical-research ledger through Alembic migration `0012_backtesting`, preserving immutable run inputs, strategy/control/cost snapshots, a benchmark-inclusive data fingerprint, and trade-level results.
+- Added completed-candle-only replay: decisions only see bars that have closed, entries use the next candle, stop/target ties favor the protective stop, and the existing paper slippage and Indian-equity cost model is reused.
+- Added net P&L, win rate, profit factor, closed-trade equity, drawdown, and per-strategy comparison analytics with protected API access.
+- Added a premium glassmorphism Backtesting Lab and deterministic/look-ahead regression coverage.
 
 ## Phase 8 — OMS and execution core
 
@@ -139,8 +142,7 @@ Completed:
 
 ## Current validated checkpoint
 
-- Backend: 48 tests passed.
+- Backend: 51 tests passed.
 - Python: Ruff lint and format checks passed.
-- Frontend: ESLint passed.
-- Frontend: Next.js production build passed.
-- Browser: 11 Playwright journeys passed, including single-flight access-token refresh, rejected-setup inspection, strategy configuration, and paper-execution workspaces.
+- Frontend: ESLint and Next.js production build passed.
+- Browser: 13 Playwright journeys passed, including Risk Center and Backtesting Lab research workflows.

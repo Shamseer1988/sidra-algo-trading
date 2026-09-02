@@ -396,3 +396,64 @@ class RiskReservation(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", index=True)
     decision_reason: Mapped[str] = mapped_column(String(255), default="Paper risk reserved")
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class BacktestRun(TimestampMixin, Base):
+    """Immutable-input, paper-only historical research run; never an execution request."""
+
+    __tablename__ = "backtest_runs"
+    __table_args__ = (
+        Index("ix_backtest_runs_created_status", "created_at", "status"),
+        Index("ix_backtest_runs_dates", "start_date", "end_date"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    created_by_user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="COMPLETED", index=True)
+    start_date: Mapped[date] = mapped_column(Date, index=True)
+    end_date: Mapped[date] = mapped_column(Date, index=True)
+    timeframe_seconds: Mapped[int] = mapped_column(Integer)
+    instrument_tokens: Mapped[list] = mapped_column(JSON, default=list)
+    strategy_snapshot: Mapped[list] = mapped_column(JSON, default=list)
+    controls_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    execution_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    data_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    source_candle_count: Mapped[int] = mapped_column(Integer, default=0)
+    initial_capital: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    final_equity: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    net_pnl: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    max_drawdown: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    result_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    failure_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class BacktestTrade(Base):
+    """One completed simulated trade emitted by a durable backtest run."""
+
+    __tablename__ = "backtest_trades"
+    __table_args__ = (
+        UniqueConstraint("run_id", "trade_key", name="uq_backtest_trades_run_key"),
+        Index("ix_backtest_trades_run_exited", "run_id", "exited_at"),
+        Index("ix_backtest_trades_strategy", "strategy_id", "strategy_version"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("backtest_runs.id", ondelete="CASCADE"), index=True)
+    trade_key: Mapped[str] = mapped_column(String(220))
+    strategy_id: Mapped[str] = mapped_column(String(100), index=True)
+    strategy_name: Mapped[str] = mapped_column(String(120))
+    strategy_version: Mapped[int] = mapped_column(Integer)
+    instrument_token: Mapped[str] = mapped_column(String(64), index=True)
+    session_date: Mapped[date] = mapped_column(Date, index=True)
+    side: Mapped[str] = mapped_column(String(10))
+    quantity: Mapped[int] = mapped_column(Integer)
+    signal_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    entered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    exited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    exit_price: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    gross_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    fees_total: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    net_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    realized_r: Mapped[Decimal] = mapped_column(Numeric(12, 4))
+    exit_reason: Mapped[str] = mapped_column(String(40))

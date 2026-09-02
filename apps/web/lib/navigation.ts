@@ -65,7 +65,7 @@ export const navigationSections: NavigationSection[] = [
     items: [
       { id: "risk", label: "Risk Center", icon: ShieldAlert, available: true },
       { id: "performance", label: "Performance", icon: AreaChart, available: false },
-      { id: "backtesting", label: "Backtesting", icon: LineChart, available: false },
+      { id: "backtesting", label: "Backtesting", icon: LineChart, available: true },
       { id: "journal", label: "Journal", icon: BookOpenCheck, available: true },
     ],
   },
