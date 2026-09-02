@@ -151,6 +151,7 @@ Completed foundation:
 - Validated the Compose file and retained loopback-only web/database/Redis bindings; no public service port was introduced.
 - Added dependency-aware readiness probes, a safe startup paper-OMS reconciliation checkpoint, and backup/restore scripts that use the configured database identity and fail closed on restore errors.
 - Added a validated, opt-in Caddy HTTPS overlay with automatic HTTP-to-HTTPS redirects, WebSocket-compatible reverse proxying, durable certificate storage, and required DNS/ACME environment values; it is not part of the default local stack.
+- Added reconciliation observability to the glassmorphism System Health workspace, exposing the latest durable OMS checkpoint and its review state to operators.
 
 Remaining:
 
@@ -169,4 +170,4 @@ Remaining:
 - Backend: 57 tests passed.
 - Python: Ruff lint and format checks passed.
 - Frontend: ESLint and Next.js production build passed.
-- Browser: 15 Playwright journeys passed, including the live-readiness hard-lock boundary.
+- Browser: 16 Playwright journeys passed, including the restart-reconciliation monitoring journey.

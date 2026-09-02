@@ -243,6 +243,7 @@ const MOCK_LIVE_READINESS = {
     { key: "broker_adapter", label: "Broker execution adapter", passed: false, detail: "No broker submission adapter is implemented." },
   ],
 };
+const MOCK_OMS_RECONCILIATIONS = [{ id: "recon-001", mode: "PAPER", status: "CLEAN", internal_orders: 3, external_orders: 0, unknown_orders: 0, detail: "Paper OMS has no external broker side; internal links are consistent.", created_at: new Date().toISOString() }];
 
 async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN") {
   const user = userRole === "ADMIN" ? MOCK_ADMIN_USER : MOCK_VIEWER_USER;
@@ -320,6 +321,7 @@ async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN
   await page.route("**/api/v1/paper/positions", async (route: Route) => { await route.fulfill({ json: MOCK_PAPER_POSITIONS }); });
   await page.route("**/api/v1/risk/summary", async (route: Route) => { await route.fulfill({ json: MOCK_RISK_SUMMARY }); });
   await page.route("**/api/v1/backtests", async (route: Route) => { await route.fulfill({ json: MOCK_BACKTESTS }); });
+  await page.route("**/api/v1/oms/reconciliations", async (route: Route) => { await route.fulfill({ json: MOCK_OMS_RECONCILIATIONS }); });
   await page.route(/\/api\/v1\/assisted\/approvals(?:\/.*)?$/, async (route: Route) => {
     if (route.request().method() === "POST") {
       await route.fulfill({ json: { ...MOCK_ASSISTED_APPROVALS[0], decision: "APPROVE", status: "APPROVED_PAPER_ONLY", risk_revalidated_at: new Date().toISOString(), submission_block_reason: "Live broker submission is unavailable in this release" } });
@@ -587,6 +589,16 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText("No broker submission adapter is implemented.")).toBeVisible();
     await page.getByRole("button", { name: "Record review" }).click();
     await expect(page.getByText("The live execution lock remains active.")).toBeVisible();
+  });
+
+  test("5h. System health: durable startup reconciliation is observable", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "System Health", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "System health", exact: true })).toBeVisible();
+    await expect(page.getByText("Startup reconciliation")).toBeVisible();
+    await expect(page.getByText("internal links are consistent.")).toBeVisible();
   });
 
   test("6. Security Panel: Active sessions list and session revocation", async ({ page }) => {
