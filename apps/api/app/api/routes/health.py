@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response, status
 from pydantic import BaseModel
 from redis.asyncio import Redis
 from sqlalchemy import text
@@ -50,8 +50,7 @@ async def _redis_health() -> DependencyHealth:
         await redis.aclose()
 
 
-@router.get("", response_model=HealthResponse)
-async def health() -> HealthResponse:
+async def readiness_report() -> HealthResponse:
     settings = get_settings()
     database, redis = await _database_health(), await _redis_health()
     is_healthy = database.status == "healthy" and redis.status == "healthy"
@@ -63,6 +62,19 @@ async def health() -> HealthResponse:
         database=database,
         redis=redis,
     )
+
+
+@router.get("", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    return await readiness_report()
+
+
+@router.get("/ready", response_model=HealthResponse)
+async def readiness(response: Response) -> HealthResponse:
+    report = await readiness_report()
+    if report.status != "healthy":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return report
 
 
 @router.get("/live", response_model=LivenessResponse)

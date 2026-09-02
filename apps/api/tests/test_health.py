@@ -1,3 +1,6 @@
+import pytest
+
+from app.api.routes import health as health_routes
 from app.api.routes.health import DependencyHealth, HealthResponse
 from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TradingControls
 from app.main import security_header_values
@@ -39,3 +42,17 @@ def test_production_security_headers_are_strict_without_hsts_in_local_developmen
     assert development["X-Frame-Options"] == "DENY"
     assert "Strict-Transport-Security" not in development
     assert production["Strict-Transport-Security"].startswith("max-age=31536000")
+
+
+async def test_readiness_report_preserves_paper_mode_and_never_reports_live_trading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def healthy_dependency() -> DependencyHealth:
+        return DependencyHealth(status="healthy")
+
+    monkeypatch.setattr(health_routes, "_database_health", healthy_dependency)
+    monkeypatch.setattr(health_routes, "_redis_health", healthy_dependency)
+    report = await health_routes.readiness_report()
+
+    assert report.mode in {"PAPER", "REPLAY"}
+    assert report.live_trading_enabled is False

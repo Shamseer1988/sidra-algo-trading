@@ -30,7 +30,8 @@ from app.api.routes import settings as settings_routes
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.base import Base
-from app.db.session import engine
+from app.db.session import SessionLocal, engine
+from app.services.oms import reconcile_paper_oms
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -59,6 +60,17 @@ async def lifespan(_: FastAPI):
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
         logger.warning("database.schema_auto_created", message="Use Alembic outside local development")
+    try:
+        async with SessionLocal() as session:
+            reconciliation = await reconcile_paper_oms(session)
+            await session.commit()
+        logger.info(
+            "startup.paper_oms_reconciled",
+            status=reconciliation.status,
+            unknown_orders=reconciliation.unknown_orders,
+        )
+    except Exception as exc:
+        logger.warning("startup.paper_oms_reconciliation_failed", error=str(exc))
     yield
     await engine.dispose()
     logger.info("application.stopped")

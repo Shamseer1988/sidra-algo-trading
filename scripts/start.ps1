@@ -7,4 +7,4 @@ if (-not (Test-Path '.env')) {
 }
 docker compose up --build -d
 docker compose ps
-Write-Host 'Intraday Sentinel is starting. Web: http://localhost  API docs: http://localhost:8000/docs'
+Write-Host 'Intraday Sentinel is starting. Web: http://localhost:3001  API is internal-only behind the web proxy.'

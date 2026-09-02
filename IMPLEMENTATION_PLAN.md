@@ -149,6 +149,7 @@ Completed foundation:
 - Added process liveness probes, dependency-aware web startup, restart-safe init processes, graceful stop windows, and PID limits to the Compose topology.
 - Added strict API CSP, clickjacking, MIME-sniffing, referrer, permissions, cross-origin isolation, and production-only HSTS headers with regression coverage.
 - Validated the Compose file and retained loopback-only web/database/Redis bindings; no public service port was introduced.
+- Added dependency-aware readiness probes, a safe startup paper-OMS reconciliation checkpoint, and backup/restore scripts that use the configured database identity and fail closed on restore errors.
 
 Remaining:
 
@@ -164,7 +165,7 @@ Remaining:
 
 ## Current validated checkpoint
 
-- Backend: 56 tests passed.
+- Backend: 57 tests passed.
 - Python: Ruff lint and format checks passed.
 - Frontend: ESLint and Next.js production build passed.
 - Browser: 15 Playwright journeys passed, including the live-readiness hard-lock boundary.
