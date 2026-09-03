@@ -4,6 +4,7 @@ import { Plus, Save, SlidersHorizontal } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api, type PaperStrategy, type StrategyDefinition, type StrategyMetric } from "../../components/api";
+import { randomId } from "../../lib/formatting";
 
 const editable = [
   "minimum_score",
@@ -39,7 +40,7 @@ export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMe
       if (!current.length) return current;
       const type = definitions[0]?.identifier ?? current[0].strategy_type;
       const label = definitions[0]?.name ?? "Strategy";
-      return [...current, { ...current[0], id: crypto.randomUUID(), name: `${label} ${current.length + 1}`, strategy_type: type, enabled: false, version: 1 }];
+      return [...current, { ...current[0], id: randomId(), name: `${label} ${current.length + 1}`, strategy_type: type, enabled: false, version: 1 }];
     });
   };
   const save = async () => {
