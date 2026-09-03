@@ -21,7 +21,7 @@ from app.services.safety import emergency_stop_state, paper_tracking_enabled
 from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 from app.services.telegram import TelegramError, TelegramNotificationService
 from app.services.telegram_config import configured_settings
-from app.services.trading_symbols import resolve_script_name
+from app.services.trading_symbols import resolve_symbol
 
 STATE_TTL_SECONDS = 60 * 60 * 18
 
@@ -329,7 +329,9 @@ class PaperScannerOrchestrator:
 
         ist = ZoneInfo("Asia/Kolkata")
         now_ist = datetime.now(UTC).astimezone(ist).strftime("%d-%b-%Y %I:%M:%S %p")
-        script_name = resolve_script_name(signal.instrument_token)
+        controls = await self._controls()
+        async with SessionLocal() as session:
+            script_name = await resolve_symbol(session, signal.instrument_token)
 
         entry = float(signal.entry_price)
         stop = float(signal.stop_price)
@@ -342,7 +344,12 @@ class PaperScannerOrchestrator:
         target_pct = (reward_pts / entry * 100) if entry > 0 else 0.0
         rr_ratio = (reward_pts / risk_pts) if risk_pts > 0 else 0.0
         total_val = entry * qty
-        margin_5x = total_val / 5.0
+        leverage = (
+            float(controls.get("intraday_leverage_multiplier", 5.0))
+            if controls.get("intraday_leverage_enabled", True)
+            else 1.0
+        )
+        margin_required = total_val / leverage if leverage > 0 else total_val
         risk_amount = float(signal.risk_amount or 0.0)
 
         side_icon = "🟢" if signal.side == "LONG" else "🔴"
@@ -359,7 +366,7 @@ class PaperScannerOrchestrator:
             f"🎯 <b>Target:</b> ₹{target:,.2f} ({'+' if signal.side == 'LONG' else '-'}{reward_pts:.2f} pts | {target_pct:.2f}%)\n"
             f"⚖️ <b>Risk : Reward:</b> 1 : {rr_ratio:.2f}\n\n"
             f"📦 <b>Quantity:</b> {qty:,} shares\n"
-            f"💰 <b>Total Exposure:</b> ₹{total_val:,.2f} (<i>5x Intraday Margin:</i> ₹{margin_5x:,.2f})\n"
+            f"💰 <b>Total Exposure:</b> ₹{total_val:,.2f} (<i>{leverage:g}x intraday margin ≈ ₹{margin_required:,.2f}</i>)\n"
             f"🛡️ <b>Risk Allocated:</b> ₹{risk_amount:,.2f}\n\n"
             f"⏰ <b>Time:</b> {now_ist} IST\n"
             "⚠️ <i>Paper tracking simulation — ready for confirmation.</i>"

@@ -15,7 +15,7 @@ export function SignalsPanel({ signals }: { signals: PaperSignal[] }) {
   const filtered = useMemo(
     () =>
       signals.filter((signal) => {
-        const script = resolveScriptName(signal.instrument_token).toLowerCase();
+        const script = (signal.script_name || resolveScriptName(signal.instrument_token)).toLowerCase();
         const token = signal.instrument_token.toLowerCase();
         const matchesQuery =
           script.includes(query.toLowerCase()) || token.includes(query.toLowerCase());
@@ -126,7 +126,7 @@ function SignalsTable({
           </thead>
           <tbody>
             {signals.map((signal) => {
-              const script = resolveScriptName(signal.instrument_token);
+              const script = (signal.script_name || resolveScriptName(signal.instrument_token));
               return (
                 <tr
                   key={signal.id}
@@ -166,7 +166,7 @@ function SignalsTable({
 }
 
 function SignalDetail({ signal }: { signal: PaperSignal }) {
-  const script = resolveScriptName(signal.instrument_token);
+  const script = (signal.script_name || resolveScriptName(signal.instrument_token));
   const risk = Math.abs(signal.entry_price - signal.stop_price);
   const reward = Math.abs(signal.target_price - signal.entry_price);
 

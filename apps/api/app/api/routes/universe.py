@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import ScanUniverseEntry, User, UserRole
-from app.services.trading_symbols import resolve_script_name
+from app.services.trading_symbols import resolve_script_names
 from app.services.universe import refresh_universe
 
 router = APIRouter(prefix="/universe", tags=["Universe"])
@@ -41,10 +41,10 @@ class UniverseSummaryResponse(BaseModel):
     last_built_at: str | None
 
 
-def _entry(row: ScanUniverseEntry) -> UniverseEntryResponse:
+def _entry(row: ScanUniverseEntry, script_name: str) -> UniverseEntryResponse:
     return UniverseEntryResponse(
         instrument_token=row.instrument_token,
-        script_name=resolve_script_name(row.instrument_token),
+        script_name=script_name,
         session_date=row.session_date.isoformat(),
         rank=row.rank,
         score=float(row.score),
@@ -76,7 +76,9 @@ async def list_universe(
     _: CurrentUser, session: DbSession, session_date: date | None = None
 ) -> list[UniverseEntryResponse]:
     target = session_date or date.today()
-    return [_entry(row) for row in await _entries(session, target)]
+    rows = await _entries(session, target)
+    names = await resolve_script_names(session, {row.instrument_token for row in rows})
+    return [_entry(row, names.get(row.instrument_token, row.instrument_token)) for row in rows]
 
 
 @router.get("/summary", response_model=UniverseSummaryResponse)

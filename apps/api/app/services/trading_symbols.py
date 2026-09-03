@@ -6,6 +6,13 @@ and dynamic resolution from persisted InstrumentMasterRefresh records.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
+from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models import InstrumentMasterRefresh
+
 # Static mapping of confirmed Nifty 50 / Index ISINs and tokens to popular trading symbols
 KNOWN_SCRIPT_SYMBOLS: dict[str, str] = {
     # Indices
@@ -71,3 +78,35 @@ def resolve_script_name(instrument_token: str) -> str:
             return parts[1].upper()
 
     return instrument_token
+
+
+async def _instrument_master_symbols(session: AsyncSession) -> dict[str, str]:
+    """trading_symbol for every key in the most recent persisted Upstox instrument master."""
+    latest = await session.scalar(
+        select(InstrumentMasterRefresh)
+        .where(InstrumentMasterRefresh.provider == "UPSTOX")
+        .order_by(desc(InstrumentMasterRefresh.fetched_at))
+        .limit(1)
+    )
+    keys = latest.configured_keys if latest and isinstance(latest.configured_keys, dict) else {}
+    resolved: dict[str, str] = {}
+    for key, entry in keys.items():
+        if isinstance(entry, dict) and entry.get("trading_symbol"):
+            resolved[str(key)] = str(entry["trading_symbol"])
+    return resolved
+
+
+async def resolve_script_names(session: AsyncSession, tokens: Iterable[str]) -> dict[str, str]:
+    """Batch-resolve instrument tokens, falling back to the persisted instrument master."""
+    result = {token: resolve_script_name(token) for token in tokens}
+    unresolved = {token for token, name in result.items() if name == token}
+    if unresolved:
+        master = await _instrument_master_symbols(session)
+        for token in unresolved:
+            if token in master:
+                result[token] = master[token]
+    return result
+
+
+async def resolve_symbol(session: AsyncSession, instrument_token: str) -> str:
+    return (await resolve_script_names(session, [instrument_token]))[instrument_token]

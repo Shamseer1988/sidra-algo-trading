@@ -11,6 +11,7 @@ from app.db.models import AuditLog, PaperSignal, ScannerEvaluation, User, UserRo
 from app.db.session import SessionLocal
 from app.services.data_quality import DATA_QUALITY_PREFIX
 from app.services.safety import emergency_stop_state
+from app.services.trading_symbols import resolve_script_names, resolve_symbol
 from app.services.worker_supervision import WORKER_STATE_KEY
 
 router = APIRouter(prefix="/scanner", tags=["Scanner"])
@@ -48,6 +49,7 @@ class DataQualityResponse(BaseModel):
 class PaperSignalResponse(BaseModel):
     id: str
     instrument_token: str
+    script_name: str = ""
     session_date: str
     candle_opened_at: datetime
     side: str
@@ -65,6 +67,7 @@ class PaperSignalResponse(BaseModel):
 class ScannerEvaluationResponse(BaseModel):
     id: str
     instrument_token: str
+    script_name: str = ""
     session_date: str
     candle_opened_at: datetime
     strategy_id: str
@@ -140,10 +143,12 @@ async def get_current_status(settings: AppSettings, _: CurrentUser) -> ScannerSt
 @router.get("/signals", response_model=list[PaperSignalResponse])
 async def latest_paper_signals(_: CurrentUser, session: DbSession) -> list[PaperSignalResponse]:
     rows = list((await session.scalars(select(PaperSignal).order_by(PaperSignal.created_at.desc()).limit(100))).all())
+    names = await resolve_script_names(session, {row.instrument_token for row in rows})
     return [
         PaperSignalResponse(
             id=str(row.id),
             instrument_token=row.instrument_token,
+            script_name=names.get(row.instrument_token, row.instrument_token),
             session_date=row.session_date.isoformat(),
             candle_opened_at=row.candle_opened_at,
             side=row.side,
@@ -161,10 +166,11 @@ async def latest_paper_signals(_: CurrentUser, session: DbSession) -> list[Paper
     ]
 
 
-def _evaluation_response(row: ScannerEvaluation) -> ScannerEvaluationResponse:
+def _evaluation_response(row: ScannerEvaluation, script_name: str = "") -> ScannerEvaluationResponse:
     return ScannerEvaluationResponse(
         id=str(row.id),
         instrument_token=row.instrument_token,
+        script_name=script_name or row.instrument_token,
         session_date=row.session_date.isoformat(),
         candle_opened_at=row.candle_opened_at,
         strategy_id=row.strategy_id,
@@ -210,7 +216,8 @@ async def latest_scanner_evaluations(
             )
         ).all()
     )
-    return [_evaluation_response(row) for row in rows]
+    names = await resolve_script_names(session, {row.instrument_token for row in rows})
+    return [_evaluation_response(row, names.get(row.instrument_token, "")) for row in rows]
 
 
 @router.get("/evaluations/{evaluation_id}", response_model=ScannerEvaluationResponse)
@@ -223,7 +230,7 @@ async def scanner_evaluation_detail(
         row = None
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scanner evaluation was not found")
-    return _evaluation_response(row)
+    return _evaluation_response(row, await resolve_symbol(session, row.instrument_token))
 
 
 @router.get("/data-quality", response_model=list[DataQualityResponse])

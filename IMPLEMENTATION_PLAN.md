@@ -273,6 +273,14 @@ Coverage: `tests/test_market_data_subscriptions.py`, strategy-default assertions
   calm/stressed/extreme thresholds. Also fixed two pre-existing Ruff errors in
   `api/routes/market_data.py` while editing it.
 
+### P2 (in progress)
+
+- **Symbol resolution & alert accuracy (done).** `trading_symbols` gained `resolve_script_names` /
+  `resolve_symbol`, which fall back to the persisted Upstox instrument master when the static table
+  and key parsing cannot name an instrument. Scanner signal/evaluation and universe API responses now
+  carry a `script_name`; the frontend prefers it. The Telegram signal alert uses the configured
+  intraday leverage multiplier instead of a hard-coded 5x.
+
 ## Phase 13 — Final QA
 
 - Complete backend, integration, load, recovery, browser, migration, Docker, dependency, and security gates.
