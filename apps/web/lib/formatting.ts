@@ -16,7 +16,7 @@ export function formatIstTimestamp(value: string | null | undefined) {
 
 export function statusTone(status: string) {
   const value = status.toLowerCase();
-  if (["healthy", "running", "live", "configured", "good", "open"].includes(value)) return "status-good";
+  if (["healthy", "running", "live", "configured", "good", "open", "operational"].includes(value)) return "status-good";
   if (["connecting", "not_configured", "stopped", "disconnected", "degraded", "pre_open", "post_market"].includes(value)) return "status-watch";
   return "status-bad";
 }

@@ -14,19 +14,21 @@ from app.services.strategy_registry import (
 router = APIRouter(prefix="/settings", tags=["Settings"])
 TRADING_KEY = "trading_controls"
 DEFAULT_TRADING_CONTROLS = {
-    "account_capital": 100000.0,
-    "risk_per_trade_percent": 0.5,
-    "maximum_daily_risk_percent": 1.0,
-    "maximum_open_positions": 3,
+    "account_capital": 10000.0,
+    "risk_per_trade_percent": 1.0,
+    "maximum_daily_risk_percent": 2.0,
+    "maximum_open_positions": 4,
     "maximum_open_exposure_percent": 100.0,
-    "maximum_signals": 2,
-    "minimum_score": 90,
+    "maximum_signals": 4,
+    "minimum_score": 80,
     "minimum_rr": 1.5,
     "volume_multiplier": 1.3,
     "retest_tolerance_percent": 0.15,
     "minimum_ema_spread_percent": 0.05,
     "trade_start_time": "09:24",
     "trade_cutoff_time": "14:45",
+    "intraday_leverage_enabled": True,
+    "intraday_leverage_multiplier": 5.0,
 }
 
 
@@ -44,6 +46,8 @@ class TradingControls(BaseModel):
     minimum_ema_spread_percent: float = Field(default=0.05, ge=0, le=5)
     trade_start_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     trade_cutoff_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    intraday_leverage_enabled: bool = Field(default=True)
+    intraday_leverage_multiplier: float = Field(default=5.0, ge=1.0, le=10.0)
 
 
 class StrategyMetric(BaseModel):

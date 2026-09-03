@@ -32,6 +32,7 @@ from app.core.logging import configure_logging
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.services.oms import reconcile_paper_oms
+from app.services.scheduler import check_and_renew_on_startup, init_upstox_scheduler
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -71,7 +72,23 @@ async def lifespan(_: FastAPI):
         )
     except Exception as exc:
         logger.warning("startup.paper_oms_reconciliation_failed", error=str(exc))
+
+    # ── Upstox auto-auth scheduler ───────────────────────────────────
+    scheduler = init_upstox_scheduler(settings)
+    if scheduler:
+        scheduler.start()
+        logger.info("startup.scheduler_started", jobs=len(scheduler.get_jobs()))
+        # If token is expired/missing, renew immediately on startup
+        try:
+            await check_and_renew_on_startup(settings)
+        except Exception as exc:
+            logger.warning("startup.auto_renewal_check_failed", error=str(exc))
+
     yield
+
+    if scheduler:
+        scheduler.shutdown(wait=False)
+        logger.info("shutdown.scheduler_stopped")
     await engine.dispose()
     logger.info("application.stopped")
 

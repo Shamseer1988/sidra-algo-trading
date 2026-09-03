@@ -21,6 +21,7 @@ from app.services.safety import emergency_stop_state, paper_tracking_enabled
 from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 from app.services.telegram import TelegramError, TelegramNotificationService
 from app.services.telegram_config import configured_settings
+from app.services.trading_symbols import resolve_script_name
 
 STATE_TTL_SECONDS = 60 * 60 * 18
 
@@ -59,7 +60,10 @@ class PaperScannerOrchestrator:
             return False
         async with SessionLocal() as session:
             count = await session.scalar(
-                select(func.count(PaperSignal.id)).where(PaperSignal.session_date == candle.session_date)
+                select(func.count(PaperSignal.id)).where(
+                    PaperSignal.session_date == candle.session_date,
+                    PaperSignal.status.notin_(["PAPER_RISK_REJECTED"]),
+                )
             )
         return int(count or 0) < int(controls["maximum_signals"])
 
@@ -253,17 +257,48 @@ class PaperScannerOrchestrator:
         if not await self._redis.set(cooldown_key, "1", ex=telegram_settings.telegram_alert_cooldown_seconds, nx=True):
             self._logger.info("scanner.telegram_alert_suppressed", signal_id=str(signal.id))
             return
+
+        from zoneinfo import ZoneInfo
+        ist = ZoneInfo("Asia/Kolkata")
+        now_ist = datetime.now(UTC).astimezone(ist).strftime("%d-%b-%Y %I:%M:%S %p")
+        script_name = resolve_script_name(signal.instrument_token)
+
+        entry = float(signal.entry_price)
+        stop = float(signal.stop_price)
+        target = float(signal.target_price)
+        qty = int(signal.quantity)
+
+        risk_pts = abs(entry - stop)
+        reward_pts = abs(target - entry)
+        risk_pct = (risk_pts / entry * 100) if entry > 0 else 0.0
+        target_pct = (reward_pts / entry * 100) if entry > 0 else 0.0
+        rr_ratio = (reward_pts / risk_pts) if risk_pts > 0 else 0.0
+        total_val = entry * qty
+        margin_5x = total_val / 5.0
+        risk_amount = float(signal.risk_amount or 0.0)
+
+        side_icon = "🟢" if signal.side == "LONG" else "🔴"
+        side_text = "BUY / LONG" if signal.side == "LONG" else "SELL / SHORT"
+
         message = (
-            "📄 PAPER SIGNAL\n"
-            f"{signal.side} {signal.instrument_token}\n"
-            f"Entry: {signal.entry_price} | Stop: {signal.stop_price} | Target: {signal.target_price}\n"
-            f"Qty: {signal.quantity} | Score: {signal.score}/100\n"
-            "Paper tracking only — no broker order has been sent."
+            "🎯 <b>TRADING SIGNAL MATCHED</b>\n\n"
+            f"📊 <b>Stock:</b> <b>{script_name}</b> (<code>{signal.instrument_token}</code>)\n"
+            f"📈 <b>Direction:</b> {side_icon} <b>{side_text}</b>\n"
+            f"🧠 <b>Strategy:</b> {signal.strategy_version}\n"
+            f"⭐ <b>Score:</b> {signal.score} / 100\n\n"
+            f"💵 <b>Entry Price:</b> ₹{entry:,.2f}\n"
+            f"🛑 <b>Stop Loss:</b> ₹{stop:,.2f} ({'-' if signal.side == 'LONG' else '+'}{risk_pts:.2f} pts | {risk_pct:.2f}%)\n"
+            f"🎯 <b>Target:</b> ₹{target:,.2f} ({'+' if signal.side == 'LONG' else '-'}{reward_pts:.2f} pts | {target_pct:.2f}%)\n"
+            f"⚖️ <b>Risk : Reward:</b> 1 : {rr_ratio:.2f}\n\n"
+            f"📦 <b>Quantity:</b> {qty:,} shares\n"
+            f"💰 <b>Total Exposure:</b> ₹{total_val:,.2f} (<i>5x Intraday Margin:</i> ₹{margin_5x:,.2f})\n"
+            f"🛡️ <b>Risk Allocated:</b> ₹{risk_amount:,.2f}\n\n"
+            f"⏰ <b>Time:</b> {now_ist} IST\n"
+            "⚠️ <i>Paper tracking simulation — ready for confirmation.</i>"
         )
         try:
-            result = await TelegramNotificationService(telegram_settings).send_trade_approval_request(
-                str(signal.id), message
-            )
+            tg = TelegramNotificationService(telegram_settings)
+            result = await tg.send_trade_approval_request(str(signal.id), message)
             detail = "Telegram paper alert sent"
             status = "PAPER_ALERTED"
             message_id = str(result.get("result", {}).get("message_id", ""))

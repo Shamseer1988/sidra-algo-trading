@@ -5,7 +5,142 @@ import { useEffect, useState } from "react";
 
 import { api, type ShadowOrder, type ShadowSummary } from "../../components/api";
 import { formatIstTimestamp, formatPrice, titleCase } from "../../lib/formatting";
+import { resolveScriptName } from "../../lib/instruments";
 
-const empty: ShadowSummary = { intended_orders: 0, compared_orders: 0, awaiting_paper_fill: 0, average_price_delta: 0, broker_submissions: 0 };
-export function ShadowWorkspace() { const [summary, setSummary] = useState(empty); const [orders, setOrders] = useState<ShadowOrder[]>([]); const [loading, setLoading] = useState(true); const load = () => { setLoading(true); void Promise.all([api.shadowSummary(), api.shadowOrders()]).then(([next, rows]) => { setSummary(next); setOrders(rows); }).finally(() => setLoading(false)); }; useEffect(load, []); return <section><div className="page-toolbar"><div><p className="eyebrow">Real inputs · zero submission</p><h2 className="page-title">Shadow mode</h2><p className="page-copy">Intended orders are observed from the paper OMS and compared against local simulated fills. Broker submissions remain permanently zero.</p></div><button className="secondary-button" onClick={load}><RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />Refresh</button></div><div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Metric label="Intended orders" value={summary.intended_orders} /><Metric label="Compared" value={summary.compared_orders} /><Metric label="Awaiting fill" value={summary.awaiting_paper_fill} /><Metric label="Broker submissions" value={summary.broker_submissions} tone="text-emerald-300" /></div><article className="panel mt-6 overflow-hidden"><div className="flex items-center gap-3 border-b border-slate-800 px-5 py-4"><Ghost className="h-5 w-5 text-sky-300" /><div><p className="eyebrow">Observed execution delta</p><h3 className="font-semibold text-white">Shadow comparison ledger</h3></div></div>{orders.length ? <div className="table-scroll"><table className="terminal-table"><thead><tr><th>Instrument</th><th>Intended</th><th>Paper fill</th><th>Delta</th><th>Status</th><th>Observed</th></tr></thead><tbody>{orders.map((item) => <tr key={item.id}><td><strong>{item.instrument_token}</strong><span>{item.side} · {item.intended_quantity}</span></td><td className="numeric">₹{formatPrice(item.intended_price)}</td><td className="numeric">{item.paper_fill_price === null ? "—" : `₹${formatPrice(item.paper_fill_price)}`}</td><td className="numeric">{item.price_delta === null ? "—" : `₹${formatPrice(item.price_delta)}`}</td><td><span className="status-pill status-watch">{titleCase(item.comparison_status)}</span></td><td className="muted-cell">{formatIstTimestamp(item.observed_at)}</td></tr>)}</tbody></table></div> : <div className="empty-inset m-5 p-8 text-center text-sm text-slate-400">Shadow records appear automatically from real scanner inputs after the paper OMS queues an entry.</div>}</article></section>; }
-function Metric({ label, value, tone = "text-white" }: { label: string; value: number; tone?: string }) { return <article className="glass-inset rounded-md p-4"><p className="eyebrow">{label}</p><p className={`mt-2 numeric text-2xl font-semibold ${tone}`}>{value}</p></article>; }
+const empty: ShadowSummary = {
+  intended_orders: 0,
+  compared_orders: 0,
+  awaiting_paper_fill: 0,
+  average_price_delta: 0,
+  broker_submissions: 0,
+};
+
+export function ShadowWorkspace() {
+  const [summary, setSummary] = useState(empty);
+  const [orders, setOrders] = useState<ShadowOrder[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = () => {
+    setLoading(true);
+    void Promise.all([api.shadowSummary(), api.shadowOrders()])
+      .then(([next, rows]) => {
+        setSummary(next);
+        setOrders(rows);
+      })
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(load, []);
+
+  return (
+    <section>
+      <div className="page-toolbar">
+        <div>
+          <p className="eyebrow">Real inputs · zero submission</p>
+          <h2 className="page-title">Shadow mode</h2>
+          <p className="page-copy">
+            Intended orders are observed from the paper OMS and compared against local simulated fills. Broker submissions remain permanently zero.
+          </p>
+        </div>
+        <button className="secondary-button" onClick={load}>
+          <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
+      </div>
+
+      <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Metric label="Intended orders" value={summary.intended_orders} />
+        <Metric label="Compared" value={summary.compared_orders} />
+        <Metric label="Awaiting fill" value={summary.awaiting_paper_fill} />
+        <Metric
+          label="Broker submissions"
+          value={summary.broker_submissions}
+          tone="text-emerald-500 dark:text-emerald-300"
+        />
+      </div>
+
+      <article className="panel mt-6 overflow-hidden">
+        <div className="flex items-center gap-3 border-b border-slate-200 dark:border-slate-800 px-5 py-4">
+          <Ghost className="h-5 w-5 text-sky-500 dark:text-sky-300" />
+          <div>
+            <p className="eyebrow">Observed execution delta</p>
+            <h3 className="font-semibold text-slate-900 dark:text-white">Shadow comparison ledger</h3>
+          </div>
+        </div>
+        {orders.length ? (
+          <div className="table-scroll">
+            <table className="terminal-table">
+              <thead>
+                <tr>
+                  <th>Script</th>
+                  <th>Instrument</th>
+                  <th>Intended</th>
+                  <th>Paper fill</th>
+                  <th>Delta</th>
+                  <th>Status</th>
+                  <th>Observed</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orders.map((item) => {
+                  const script = resolveScriptName(item.instrument_token);
+                  return (
+                    <tr key={item.id}>
+                      <td>
+                        <span className="inline-block rounded bg-emerald-500/15 px-2.5 py-0.5 text-xs font-bold text-emerald-600 dark:text-emerald-300 border border-emerald-500/30">
+                          {script}
+                        </span>
+                      </td>
+                      <td>
+                        <strong className="block font-mono text-slate-900 dark:text-slate-100">
+                          {item.instrument_token}
+                        </strong>
+                        <span className="text-[11px] opacity-75">
+                          {item.side} · {item.intended_quantity}
+                        </span>
+                      </td>
+                      <td className="numeric">₹{formatPrice(item.intended_price)}</td>
+                      <td className="numeric">
+                        {item.paper_fill_price === null ? "—" : `₹${formatPrice(item.paper_fill_price)}`}
+                      </td>
+                      <td className="numeric">
+                        {item.price_delta === null ? "—" : `₹${formatPrice(item.price_delta)}`}
+                      </td>
+                      <td>
+                        <span className="status-pill status-watch">
+                          {titleCase(item.comparison_status)}
+                        </span>
+                      </td>
+                      <td className="muted-cell">{formatIstTimestamp(item.observed_at)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="empty-inset m-5 p-8 text-center text-sm text-slate-500 dark:text-slate-400">
+            Shadow records appear automatically from real scanner inputs after the paper OMS queues an entry.
+          </div>
+        )}
+      </article>
+    </section>
+  );
+}
+
+function Metric({
+  label,
+  value,
+  tone = "text-slate-900 dark:text-white",
+}: {
+  label: string;
+  value: number;
+  tone?: string;
+}) {
+  return (
+    <article className="glass-inset rounded-md p-4">
+      <p className="eyebrow">{label}</p>
+      <p className={`mt-2 numeric text-2xl font-semibold ${tone}`}>{value}</p>
+    </article>
+  );
+}

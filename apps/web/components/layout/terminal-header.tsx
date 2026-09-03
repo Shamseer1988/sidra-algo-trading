@@ -25,6 +25,7 @@ export function TerminalHeader({
   onOpenControls: () => void;
 }) {
   const broker = overview.market_data.detail.toLowerCase().includes("upstox") ? "Upstox" : overview.firstock.status === "configured" ? "Firstock" : "No feed";
+  const brokerTone = broker !== "No feed" && overview.market_data.status.toLowerCase() !== "disconnected" ? statusTone(overview.market_data.status) : "status-bad";
   const meta = workspaceMeta[active];
   return (
     <header className="sticky top-0 z-10 flex min-h-16 items-center justify-between gap-3 border-b border-slate-800 px-4 py-2 sm:px-6">
@@ -40,7 +41,7 @@ export function TerminalHeader({
       </div>
       <div className="flex items-center justify-end gap-2">
         <MarketClock />
-        <span className="status-pill hidden xl:inline-flex status-watch" title={`Selected market-data connector: ${broker}`}><Wifi className="h-3 w-3" />{broker}</span>
+        <span className={`status-pill hidden xl:inline-flex ${brokerTone}`} title={`Selected market-data connector: ${broker} (${titleCase(overview.market_data.status)})`}><Wifi className="h-3 w-3" />{broker}</span>
         <span className={`status-pill hidden md:inline-flex ${statusTone(overview.market_data.status)}`} title={overview.market_data.detail}><Wifi className="h-3 w-3" />{titleCase(overview.market_data.status)}</span>
         <span className={`status-pill hidden sm:inline-flex ${statusTone(scanner.status)}`} title={scanner.detail}><Radio className="h-3 w-3" />{titleCase(scanner.status)}</span>
         <span className="status-pill status-good" title="Live execution is locked"><ShieldCheck className="h-3.5 w-3.5" />PAPER</span>

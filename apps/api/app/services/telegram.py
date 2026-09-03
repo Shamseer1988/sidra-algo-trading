@@ -46,7 +46,9 @@ class TelegramNotificationService:
             raise TelegramError("Telegram returned an invalid bot identity")
         return TelegramBotIdentity(id=result["id"], username=result.get("username"))
 
-    async def send_message(self, text: str, reply_markup: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def send_message(
+        self, text: str, reply_markup: dict[str, Any] | None = None, parse_mode: str | None = None
+    ) -> dict[str, Any]:
         if not self._settings.telegram_chat_id:
             raise TelegramError("Telegram chat is not configured")
         body: dict[str, Any] = {
@@ -54,11 +56,15 @@ class TelegramNotificationService:
             "text": text,
             "disable_web_page_preview": True,
         }
+        if parse_mode:
+            body["parse_mode"] = parse_mode
         if reply_markup:
             body["reply_markup"] = reply_markup
         return await self._call("sendMessage", body)
 
-    async def send_trade_approval_request(self, reference_id: str, text: str) -> dict[str, Any]:
+    async def send_trade_approval_request(
+        self, reference_id: str, text: str, parse_mode: str | None = "HTML"
+    ) -> dict[str, Any]:
         """Send a future semi-automatic approval request; this never submits an order."""
         if len(reference_id) > 40:
             raise TelegramError("Approval reference is too long for Telegram callback data")
@@ -73,6 +79,7 @@ class TelegramNotificationService:
                     [{"text": "EMERGENCY STOP", "callback_data": "sentinel:emergency_stop"}],
                 ]
             },
+            parse_mode=parse_mode,
         )
 
     async def answer_callback(self, callback_query_id: str, text: str) -> None:

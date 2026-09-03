@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     upstox_api_secret: str | None = None
     upstox_redirect_uri: str | None = None
     upstox_token_encryption_key: str | None = None
+    upstox_mobile_number: str | None = None
+    upstox_pin: str | None = None
+    upstox_totp_secret: str | None = None
+    upstox_auto_auth_enabled: bool = False
     upstox_subscriptions: str = ""
     upstox_nifty_benchmark_key: str = "NSE_INDEX|Nifty 50"
     candle_timeframe_seconds: int = Field(default=60, ge=60, le=900)
@@ -85,6 +89,19 @@ class Settings(BaseSettings):
     def upstox_oauth_is_configured(self) -> bool:
         return bool(
             self.upstox_api_key
+            and self.upstox_api_secret
+            and self.upstox_redirect_uri
+            and self.upstox_token_encryption_key
+        )
+
+    @property
+    def upstox_auto_auth_is_configured(self) -> bool:
+        return bool(
+            self.upstox_auto_auth_enabled
+            and self.upstox_mobile_number
+            and self.upstox_pin
+            and self.upstox_totp_secret
+            and self.upstox_api_key
             and self.upstox_api_secret
             and self.upstox_redirect_uri
             and self.upstox_token_encryption_key

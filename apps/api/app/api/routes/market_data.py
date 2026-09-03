@@ -17,6 +17,8 @@ from app.db.session import SessionLocal
 from app.services.broker_controls import BrokerControls, load_broker_controls, save_broker_controls
 from app.services.upstox_instruments import InstrumentRefreshError, refresh_upstox_instruments
 from app.services.upstox_oauth import UpstoxOAuthError, exchange_authorization_code, store_access_token
+from app.services.upstox_auto_auth import UpstoxAutoAuthError, perform_auto_login
+from app.services.scheduler import AUTO_AUTH_STATUS_KEY, send_auto_auth_telegram_alert
 
 router = APIRouter(prefix="/market-data", tags=["Market data"])
 UPSTOX_AUTHORIZE_URL = "https://api-v2.upstox.com/login/authorization/dialog"
@@ -208,3 +210,132 @@ async def refresh_upstox_instrument_master(
         missing_keys=result.missing_keys,
         fetched_at=result.fetched_at,
     )
+
+
+# ── Auto-Auth endpoints ─────────────────────────────────────────────────
+
+
+class AutoAuthStatus(BaseModel):
+    enabled: bool
+    configured: bool
+    last_run_at: datetime | None = None
+    last_success: bool | None = None
+    expires_at: datetime | None = None
+    error: str | None = None
+    next_run: str | None = None
+
+
+class AutoAuthTriggerResponse(BaseModel):
+    status: str
+    expires_at: datetime | None = None
+    error: str | None = None
+
+
+@router.get("/upstox/auto-auth/status", response_model=AutoAuthStatus)
+async def upstox_auto_auth_status(settings: AppSettings, _: CurrentUser) -> AutoAuthStatus:
+    """Return the current state of the Upstox auto-auth scheduler."""
+    result = AutoAuthStatus(
+        enabled=settings.upstox_auto_auth_enabled,
+        configured=settings.upstox_auto_auth_is_configured,
+    )
+
+    # Read last result from Redis
+    redis = await _redis(settings)
+    try:
+        raw = await redis.get(AUTO_AUTH_STATUS_KEY)
+    finally:
+        await redis.aclose()
+
+    if raw:
+        import json as _json
+        try:
+            data = _json.loads(raw)
+            result.last_run_at = data.get("last_run_at")
+            result.last_success = data.get("success")
+            result.expires_at = data.get("expires_at")
+            result.error = data.get("error")
+        except (ValueError, TypeError):
+            pass
+
+    # Compute next run time from the scheduler if it's running
+    try:
+        from app.services.scheduler import init_upstox_scheduler
+        # We can't access the live scheduler instance easily,
+        # so we report the static schedule
+        if result.configured:
+            result.next_run = "08:30 IST, next business day (Mon–Fri, excluding NSE holidays)"
+    except ImportError:
+        pass
+
+    return result
+
+
+@router.post("/upstox/auto-auth/trigger", response_model=AutoAuthTriggerResponse)
+async def trigger_upstox_auto_auth(
+    settings: AppSettings,
+    user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> AutoAuthTriggerResponse:
+    """Manually trigger the headless Upstox auto-login (admin only)."""
+    if not settings.upstox_auto_auth_is_configured:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Upstox auto-auth is not configured. Set UPSTOX_MOBILE_NUMBER, UPSTOX_PIN, UPSTOX_TOTP_SECRET and UPSTOX_AUTO_AUTH_ENABLED in .env",
+        )
+
+    try:
+        result = await perform_auto_login(settings)
+    except UpstoxAutoAuthError as exc:
+        # Log the manual trigger attempt
+        async with SessionLocal() as session:
+            session.add(
+                AuditLog(
+                    user_id=user.id,
+                    event_type="market_data.upstox_auto_auth_manual_failed",
+                    metadata_json={"error": str(exc)},
+                )
+            )
+            await session.commit()
+        await send_auto_auth_telegram_alert(
+            settings=settings,
+            trigger="Manual (Settings / API)",
+            success=False,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    async with SessionLocal() as session:
+        session.add(
+            AuditLog(
+                user_id=user.id,
+                event_type="market_data.upstox_auto_auth_manual_success",
+                metadata_json={"expires_at": result["expires_at"]},
+            )
+        )
+        await session.commit()
+
+    await send_auto_auth_telegram_alert(
+        settings=settings,
+        trigger="Manual (Settings / API)",
+        success=True,
+        expires_at=result["expires_at"],
+    )
+
+    # Update Redis status
+    redis = await _redis(settings)
+    try:
+        import json as _json
+        await redis.set(AUTO_AUTH_STATUS_KEY, _json.dumps({
+            "last_run_at": result["renewed_at"],
+            "success": True,
+            "expires_at": result["expires_at"],
+            "error": None,
+            "trigger": "manual",
+        }), ex=86400)
+    finally:
+        await redis.aclose()
+
+    return AutoAuthTriggerResponse(
+        status="ok",
+        expires_at=result["expires_at"],
+    )
+

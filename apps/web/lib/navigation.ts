@@ -88,7 +88,7 @@ export const navigationSections: NavigationSection[] = [
     label: "Automation",
     items: [
       { id: "automation", label: "Automation Rules", icon: Bot, available: false },
-      { id: "scheduler", label: "Scheduler", icon: TimerReset, available: false },
+      { id: "scheduler", label: "Scheduler", icon: TimerReset, available: true },
       { id: "telegram", label: "Telegram", icon: BellRing, available: true },
     ],
   },
