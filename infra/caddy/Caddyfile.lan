@@ -5,6 +5,9 @@
 {
 	auto_https disable_redirects
 	admin off
+	# Browsers (and most clients) do not send SNI when connecting to a bare IP
+	# address, so tell Caddy which certificate to present when SNI is absent.
+	default_sni {$LAN_HTTPS_HOST}
 }
 
 https://{$LAN_HTTPS_HOST} {
