@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession
 from app.db.models import PaperSignal, PaperSignalOutcome
+from app.services.journal_analytics import ScoreRecord, analyse_score_components
 
 router = APIRouter(prefix="/journal", tags=["Paper journal"])
 
@@ -58,6 +59,26 @@ async def summary(session: DbSession, _: CurrentUser, session_date: date | None 
         average_mfe_r=_average([item.mfe_r for item in outcomes]),
         average_mae_r=_average([item.mae_r for item in outcomes]),
     )
+
+
+@router.get("/score-analysis")
+async def score_analysis(session: DbSession, _: CurrentUser, strategy_version: str | None = None) -> dict:
+    """Outcome lift of each score component across resolved paper signals."""
+    rows = await _outcomes(session, None)
+    records = [
+        ScoreRecord(
+            strategy_version=signal.strategy_version,
+            score_breakdown=signal.score_breakdown or {},
+            status=outcome.status,
+            realized_r=float(outcome.realized_r),
+        )
+        for signal, outcome in rows
+        if outcome
+        and outcome.status in {"TARGET", "STOP"}
+        and outcome.realized_r is not None
+        and (strategy_version is None or signal.strategy_version == strategy_version)
+    ]
+    return analyse_score_components(records)
 
 
 @router.get("/export.csv")

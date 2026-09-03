@@ -293,6 +293,11 @@ Coverage: `tests/test_market_data_subscriptions.py`, strategy-default assertions
   All are registered in `StrategyRegistry`, share the versioned `StrategyConfiguration`, and are
   selectable in the Strategies workspace (new `/settings/strategies/definitions` API, strategy-type
   dropdown). Deterministic coverage in `tests/test_extra_strategies.py`.
+- **Score-component feedback (done).** `journal_analytics.analyse_score_components` splits resolved
+  paper signals at each score component's median and reports the difference in average realised R
+  between the halves ("lift"). Exposed at `GET /journal/score-analysis` and rendered as a table on the
+  Journal workspace, so an operator can see which components actually predicted outcomes before
+  changing their weights. It never tunes anything automatically.
 
 ## Phase 13 — Final QA
 
