@@ -280,6 +280,16 @@ Coverage: `tests/test_market_data_subscriptions.py`, strategy-default assertions
   and key parsing cannot name an instrument. Scanner signal/evaluation and universe API responses now
   carry a `script_name`; the frontend prefers it. The Telegram signal alert uses the configured
   intraday leverage multiplier instead of a hard-coded 5x.
+- **Additional strategies (done).** `paper_strategy.plan_trade` is now the shared, volatility-aware
+  entry/stop/target/quantity helper (ORB delegates to it). Two new deterministic state machines in
+  `extra_strategies.py`:
+  - **VWAP Pullback** (`vwap-pullback-v1`) — a controlled pullback to session VWAP inside an
+    EMA-defined trend, entered on the reclaim candle.
+  - **EMA Momentum** (`ema-momentum-v1`) — a fresh push through the opening range with a stacked
+    EMA / VWAP trend, rejected when already extended from VWAP.
+  Both are registered in `StrategyRegistry`, share the versioned `StrategyConfiguration`, and are
+  selectable in the Strategies workspace (new `/settings/strategies/definitions` API, strategy-type
+  dropdown). Deterministic coverage in `tests/test_extra_strategies.py`.
 
 ## Phase 13 — Final QA
 

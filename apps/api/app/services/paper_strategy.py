@@ -174,26 +174,23 @@ def _score(
     }
 
 
-def _risk_plan(
+def plan_trade(
     side: Side,
-    candle: CompletedCandle,
-    breakout_level: Decimal,
+    entry: Decimal,
+    structural_stop: Decimal,
     indicators: dict,
     controls: dict,
 ) -> tuple[Decimal, Decimal, int, Decimal] | None:
     """Volatility-aware stop, RR target, and risk- **and** exposure-bounded quantity.
 
-    The stop distance is the widest of: the structural stop (candle extreme / retest
-    tolerance), an ATR multiple, and a minimum percent of price. Quantity is then bounded
-    both by the per-trade risk budget and by the account's simulated exposure ceiling, so a
-    signal is not created only to be discarded later by the risk engine.
+    The caller supplies a raw structural stop price; the stop distance is then the widest of
+    that structural distance, an ATR multiple, and a minimum percent of price. Quantity is
+    bounded by both the per-trade risk budget and the account's simulated exposure ceiling,
+    so a signal is not created only to be discarded later by the risk engine. Shared by every
+    strategy so entry/stop/target/quantity mechanics stay identical across them.
     """
-    tolerance = Decimal(str(controls["retest_tolerance_percent"])) / Decimal("100")
-    entry = candle.close
-    if side == "LONG":
-        structural_distance = entry - min(candle.low, breakout_level * (Decimal("1") - tolerance))
-    else:
-        structural_distance = max(candle.high, breakout_level * (Decimal("1") + tolerance)) - entry
+    entry = Decimal(str(entry))
+    structural_distance = (entry - structural_stop) if side == "LONG" else (structural_stop - entry)
 
     atr_value = _number(indicators, "atr")
     atr_floor = (
@@ -235,6 +232,22 @@ def _risk_plan(
     if quantity < 1:
         return None
     return stop, target, quantity, risk_amount
+
+
+def _risk_plan(
+    side: Side,
+    candle: CompletedCandle,
+    breakout_level: Decimal,
+    indicators: dict,
+    controls: dict,
+) -> tuple[Decimal, Decimal, int, Decimal] | None:
+    """ORB structural stop: the candle extreme, tightened toward the retest level."""
+    tolerance = Decimal(str(controls["retest_tolerance_percent"])) / Decimal("100")
+    if side == "LONG":
+        structural_stop = min(candle.low, breakout_level * (Decimal("1") - tolerance))
+    else:
+        structural_stop = max(candle.high, breakout_level * (Decimal("1") + tolerance))
+    return plan_trade(side, candle.close, structural_stop, indicators, controls)
 
 
 def evaluate_orb_retest(

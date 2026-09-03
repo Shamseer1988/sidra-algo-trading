@@ -101,6 +101,20 @@ async def update_trading_controls(
     return controls
 
 
+class StrategyDefinitionResponse(BaseModel):
+    identifier: str
+    name: str
+    prerequisites: list[str]
+
+
+@router.get("/strategies/definitions", response_model=list[StrategyDefinitionResponse])
+async def strategy_definitions(_: CurrentUser) -> list[StrategyDefinitionResponse]:
+    return [
+        StrategyDefinitionResponse(identifier=item.identifier, name=item.name, prerequisites=list(item.prerequisites))
+        for item in StrategyRegistry.metadata()
+    ]
+
+
 @router.get("/strategies", response_model=list[StrategyConfiguration])
 async def get_strategies(_: CurrentUser, session: DbSession) -> list[StrategyConfiguration]:
     setting = await session.get(ApplicationSetting, STRATEGIES_KEY)

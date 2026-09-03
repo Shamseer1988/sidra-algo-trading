@@ -8,6 +8,12 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ApplicationSetting
+from app.services.extra_strategies import (
+    EMA_MOMENTUM_VERSION,
+    VWAP_PULLBACK_VERSION,
+    evaluate_ema_momentum,
+    evaluate_vwap_pullback,
+)
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_strategy import AWAITING, STRATEGY_VERSION, StrategyDecision, evaluate_orb_retest
 
@@ -112,10 +118,43 @@ class OrbRetestDefinition:
     )
 
     def evaluate(self, candle, indicators, benchmark, controls, configuration, prior_state) -> StrategyDecision:
-        decision = evaluate_orb_retest(candle, indicators, benchmark, controls, prior_state)
-        if decision.side and decision.side not in configuration.allowed_sides:
-            return StrategyDecision(next_state=AWAITING, reason=f"{decision.side.title()} signals are disabled")
-        return decision
+        return _direction_gated(
+            evaluate_orb_retest(candle, indicators, benchmark, controls, prior_state), configuration
+        )
+
+
+class VwapPullbackDefinition:
+    metadata = StrategyMetadata(
+        identifier=VWAP_PULLBACK_VERSION,
+        name="VWAP Pullback",
+        implementation_version=VWAP_PULLBACK_VERSION,
+        prerequisites=("completed candle", "VWAP", "EMA", "ATR", "volume", "market regime"),
+    )
+
+    def evaluate(self, candle, indicators, benchmark, controls, configuration, prior_state) -> StrategyDecision:
+        return _direction_gated(
+            evaluate_vwap_pullback(candle, indicators, benchmark, controls, prior_state), configuration
+        )
+
+
+class EmaMomentumDefinition:
+    metadata = StrategyMetadata(
+        identifier=EMA_MOMENTUM_VERSION,
+        name="EMA Momentum",
+        implementation_version=EMA_MOMENTUM_VERSION,
+        prerequisites=("completed candle", "opening range", "VWAP", "EMA", "ATR", "volume"),
+    )
+
+    def evaluate(self, candle, indicators, benchmark, controls, configuration, prior_state) -> StrategyDecision:
+        return _direction_gated(
+            evaluate_ema_momentum(candle, indicators, benchmark, controls, prior_state), configuration
+        )
+
+
+def _direction_gated(decision: StrategyDecision, configuration: "StrategyConfiguration") -> StrategyDecision:
+    if decision.side and decision.side not in configuration.allowed_sides:
+        return StrategyDecision(next_state=AWAITING, reason=f"{decision.side.title()} signals are disabled")
+    return decision
 
 
 DEFAULT_STRATEGIES = [StrategyConfiguration(id="orb-retest-default", name="ORB Retest — Default").model_dump()]
@@ -124,7 +163,11 @@ DEFAULT_STRATEGIES = [StrategyConfiguration(id="orb-retest-default", name="ORB R
 class StrategyRegistry:
     """Maps persisted strategy types to deterministic implementations."""
 
-    _definitions: dict[str, StrategyDefinition] = {STRATEGY_VERSION: OrbRetestDefinition()}
+    _definitions: dict[str, StrategyDefinition] = {
+        STRATEGY_VERSION: OrbRetestDefinition(),
+        VWAP_PULLBACK_VERSION: VwapPullbackDefinition(),
+        EMA_MOMENTUM_VERSION: EmaMomentumDefinition(),
+    }
 
     @classmethod
     def definition(cls, strategy_type: str) -> StrategyDefinition:
