@@ -58,6 +58,26 @@ class Settings(BaseSettings):
     ema_fast_period: int = Field(default=9, ge=2, le=100)
     ema_slow_period: int = Field(default=21, ge=3, le=200)
     volume_lookback_candles: int = Field(default=20, ge=3, le=200)
+    atr_period: int = Field(default=14, ge=2, le=100)
+    daily_history_sessions: int = Field(default=40, ge=5, le=250)
+    rvol_baseline_sessions: int = Field(default=10, ge=1, le=60)
+
+    # Dynamic scan universe. Opt-in: while disabled the scanner evaluates every streamed instrument.
+    universe_enabled: bool = False
+    universe_size: int = Field(default=30, ge=1, le=200)
+    universe_refresh_time: str = Field(default="09:25", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    universe_min_avg_turnover: float = Field(default=250_000_000, ge=0)
+    universe_min_price: float = Field(default=40, ge=0)
+    universe_max_price: float = Field(default=15_000, ge=0)
+    universe_min_atr_percent: float = Field(default=0.8, ge=0, le=50)
+    universe_max_atr_percent: float = Field(default=8.0, ge=0, le=50)
+
+    # Market regime. Opt-in: while disabled the scanner uses only the intraday NIFTY EMA/VWAP regime.
+    market_regime_enabled: bool = False
+    upstox_india_vix_key: str = "NSE_INDEX|India VIX"
+    india_vix_calm_below: float = Field(default=13.0, ge=0, le=100)
+    india_vix_stressed_above: float = Field(default=18.0, ge=0, le=100)
+    india_vix_extreme_above: float = Field(default=25.0, ge=0, le=100)
     upstox_instrument_refresh_hours: int = Field(default=24, ge=1, le=168)
     nse_calendar_confirmed_years: str = "2026"
     nse_holiday_overrides: str = ""
@@ -123,6 +143,12 @@ class Settings(BaseSettings):
             raise ValueError("LIVE_TRADING_ENABLED must remain false until live activation gates exist")
         if not self.calendar_confirmed_years:
             raise ValueError("NSE_CALENDAR_CONFIRMED_YEARS must contain at least one year")
+        if self.universe_min_price >= self.universe_max_price:
+            raise ValueError("UNIVERSE_MIN_PRICE must be lower than UNIVERSE_MAX_PRICE")
+        if self.universe_min_atr_percent >= self.universe_max_atr_percent:
+            raise ValueError("UNIVERSE_MIN_ATR_PERCENT must be lower than UNIVERSE_MAX_ATR_PERCENT")
+        if not self.india_vix_calm_below < self.india_vix_stressed_above < self.india_vix_extreme_above:
+            raise ValueError("India VIX thresholds must satisfy calm < stressed < extreme")
         try:
             for value in self.nse_holiday_overrides.split(","):
                 if value.strip():

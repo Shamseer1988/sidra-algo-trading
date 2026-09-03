@@ -46,9 +46,12 @@ class StrategyConfiguration(BaseModel):
     allowed_sides: list[str] = Field(default_factory=lambda: ["LONG", "SHORT"])
     allowed_sessions: list[str] = Field(default_factory=lambda: ["REGULAR"])
     max_trades_per_day: int = Field(default=2, ge=1, le=20)
+    max_trades_per_side: int | None = Field(default=None, ge=1, le=20)
     cooldown_minutes: int = Field(default=0, ge=0, le=240)
     risk_per_trade_percent: float | None = Field(default=None, gt=0, le=5)
-    minimum_score: int = Field(default=90, ge=0, le=100)
+    # Keep this aligned with settings.DEFAULT_TRADING_CONTROLS["minimum_score"]; a strategy
+    # may still override it upward/downward through effective_controls().
+    minimum_score: int = Field(default=80, ge=0, le=100)
     minimum_rr: float = Field(default=1.5, ge=1, le=10)
     volume_multiplier: float = Field(default=1.3, ge=0.5, le=10)
     retest_tolerance_percent: float = Field(default=0.15, ge=0.05, le=1)

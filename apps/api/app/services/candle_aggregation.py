@@ -3,7 +3,7 @@
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from redis.asyncio import Redis
@@ -13,10 +13,18 @@ from app.core.config import Settings
 from app.db.models import MarketCandle, MarketIndicatorSnapshot
 from app.db.session import SessionLocal
 from app.services.data_quality import MarketDataQualityService
-from app.services.market_calculations import CompletedCandle, indicator_snapshot, is_regular_market_timestamp
+from app.services.market_calculations import (
+    MARKET_TIMEZONE,
+    CompletedCandle,
+    indicator_snapshot,
+    is_regular_market_timestamp,
+)
+from app.services.market_regime import compute_and_store_regime, update_breadth_marker
 from app.services.paper_execution import PaperOrderManager
 from app.services.paper_journal import update_outcomes
 from app.services.trading_calendar import DEFAULT_TRADING_CALENDAR, TradingCalendar
+
+DAILY_TIMEFRAME_SECONDS = 86_400
 
 
 def normalize_market_timestamp(value: object, fallback: datetime) -> datetime:
@@ -209,6 +217,86 @@ class MarketCalculationPersistenceService:
         self._on_snapshot = on_snapshot
         self._benchmark_token = benchmark_token or settings.nifty_benchmark_token
         self._data_quality = data_quality
+        # {(instrument_token, session_date): {"HH:MM": average_volume}} - one query per instrument/session.
+        self._tod_baseline: dict[tuple[str, date], dict[str, float]] = {}
+
+    async def persist_daily_candle(self, candle: CompletedCandle) -> bool:
+        """Idempotently store a daily candle. It never triggers intraday recomputation."""
+        async with SessionLocal() as session:
+            existing = await session.scalar(
+                select(MarketCandle).where(
+                    MarketCandle.instrument_token == candle.instrument_token,
+                    MarketCandle.timeframe_seconds == candle.timeframe_seconds,
+                    MarketCandle.opened_at == candle.opened_at,
+                )
+            )
+            if existing is not None:
+                return False
+            session.add(
+                MarketCandle(
+                    instrument_token=candle.instrument_token,
+                    timeframe_seconds=candle.timeframe_seconds,
+                    session_date=candle.session_date,
+                    opened_at=candle.opened_at,
+                    closed_at=candle.closed_at,
+                    open=candle.open,
+                    high=candle.high,
+                    low=candle.low,
+                    close=candle.close,
+                    volume=candle.volume,
+                    tick_count=candle.tick_count,
+                )
+            )
+            try:
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                return False
+        return True
+
+    async def _daily_candles(self, session, instrument_token: str) -> list[CompletedCandle]:
+        rows = await session.scalars(
+            select(MarketCandle)
+            .where(
+                MarketCandle.instrument_token == instrument_token,
+                MarketCandle.timeframe_seconds == DAILY_TIMEFRAME_SECONDS,
+            )
+            .order_by(MarketCandle.opened_at.desc())
+            .limit(self._settings.daily_history_sessions)
+        )
+        return [_as_completed(row) for row in rows.all()]
+
+    async def _time_of_day_baseline(self, session, instrument_token: str, session_date: date) -> dict[str, float]:
+        cache_key = (instrument_token, session_date)
+        cached = self._tod_baseline.get(cache_key)
+        if cached is not None:
+            return cached
+        rows = list(
+            (
+                await session.scalars(
+                    select(MarketCandle)
+                    .where(
+                        MarketCandle.instrument_token == instrument_token,
+                        MarketCandle.timeframe_seconds == 60,
+                        MarketCandle.session_date < session_date,
+                    )
+                    .order_by(MarketCandle.session_date.desc(), MarketCandle.opened_at.asc())
+                    .limit(self._settings.rvol_baseline_sessions * 500)
+                )
+            ).all()
+        )
+        buckets: dict[str, list[int]] = {}
+        distinct_sessions: list[date] = []
+        for row in rows:
+            if row.session_date not in distinct_sessions:
+                if len(distinct_sessions) >= self._settings.rvol_baseline_sessions:
+                    break
+                distinct_sessions.append(row.session_date)
+            minute_key = row.opened_at.astimezone(MARKET_TIMEZONE).strftime("%H:%M")
+            buckets.setdefault(minute_key, []).append(row.volume)
+        baseline = {key: round(sum(values) / len(values), 4) for key, values in buckets.items() if values}
+        self._tod_baseline[cache_key] = baseline
+        return baseline
 
     async def persist_completed(self, candle: CompletedCandle, *, notify_snapshot: bool = True) -> None:
         quality_snapshot = await self._data_quality.observe_completed(candle) if self._data_quality else None
@@ -268,6 +356,10 @@ class MarketCalculationPersistenceService:
                         )
                     ).all()
                 )
+            daily_candles = await self._daily_candles(session, candle.instrument_token)
+            time_of_day_baseline = await self._time_of_day_baseline(
+                session, candle.instrument_token, candle.session_date
+            )
             values = indicator_snapshot(
                 [_as_completed(item) for item in current_rows],
                 [_as_completed(item) for item in benchmark_rows],
@@ -276,6 +368,9 @@ class MarketCalculationPersistenceService:
                 slow_ema_period=self._settings.ema_slow_period,
                 volume_lookback=self._settings.volume_lookback_candles,
                 is_nifty=candle.instrument_token == self._benchmark_token,
+                atr_period=self._settings.atr_period,
+                daily_candles=daily_candles,
+                time_of_day_volume_baseline=time_of_day_baseline,
             )
             if quality_snapshot is not None:
                 values["data_quality"] = quality_snapshot.as_dict()
@@ -294,7 +389,33 @@ class MarketCalculationPersistenceService:
             json.dumps(values),
             ex=60 * 60 * 18,
         )
+        if self._settings.market_regime_enabled:
+            await self._update_market_regime(candle, values)
         await update_outcomes(candle)
         await PaperOrderManager().process_completed_candle(candle)
         if self._on_snapshot and notify_snapshot:
             await self._on_snapshot(candle, values)
+
+    async def _update_market_regime(self, candle: CompletedCandle, values: dict) -> None:
+        if candle.instrument_token != self._benchmark_token:
+            vwap = values.get("vwap")
+            last_close = values.get("last_close")
+            if isinstance(vwap, int | float) and isinstance(last_close, int | float):
+                await update_breadth_marker(
+                    self._redis, candle.session_date, candle.instrument_token, last_close > vwap
+                )
+            return
+        vix_prior_close: float | None = None
+        async with SessionLocal() as session:
+            row = await session.scalar(
+                select(MarketCandle)
+                .where(
+                    MarketCandle.instrument_token == self._settings.upstox_india_vix_key,
+                    MarketCandle.timeframe_seconds == DAILY_TIMEFRAME_SECONDS,
+                )
+                .order_by(MarketCandle.opened_at.desc())
+                .limit(1)
+            )
+            if row is not None:
+                vix_prior_close = float(row.close)
+        await compute_and_store_regime(self._redis, self._settings, candle.session_date, values, vix_prior_close)

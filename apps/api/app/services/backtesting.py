@@ -60,6 +60,26 @@ def _decimal(value: object) -> Decimal:
     return Decimal(str(value))
 
 
+DAILY_TIMEFRAME_SECONDS = 86_400
+
+
+def _session_daily_candle(session_rows: list[CompletedCandle]) -> CompletedCandle:
+    """Collapse one session's completed candles into a single daily OHLCV candle."""
+    ordered = sorted(session_rows, key=lambda candle: candle.opened_at)
+    return CompletedCandle(
+        instrument_token=ordered[0].instrument_token,
+        timeframe_seconds=DAILY_TIMEFRAME_SECONDS,
+        opened_at=ordered[0].opened_at,
+        closed_at=ordered[-1].closed_at,
+        open=ordered[0].open,
+        high=max(candle.high for candle in ordered),
+        low=min(candle.low for candle in ordered),
+        close=ordered[-1].close,
+        volume=sum(candle.volume for candle in ordered),
+        tick_count=sum(candle.tick_count for candle in ordered),
+    )
+
+
 def candle_fingerprint(
     candles_by_instrument: dict[str, list[CompletedCandle]],
     strategies: list[StrategyConfiguration],
@@ -193,10 +213,14 @@ def run_completed_candle_backtest(
         by_date: dict[object, list[CompletedCandle]] = defaultdict(list)
         for candle in rows:
             by_date[candle.session_date].append(candle)
+        daily_by_date = {day: _session_daily_candle(day_rows) for day, day_rows in by_date.items() if day_rows}
         for session_date, session_rows in sorted(by_date.items()):
             benchmark = benchmark_by_date.get(session_date, [])
             if len(session_rows) < 3 or not benchmark:
                 continue
+            prior_daily = [daily for day, daily in sorted(daily_by_date.items()) if day < session_date][
+                -settings.daily_history_sessions :
+            ]
             for strategy in sorted(strategies, key=lambda item: item.id):
                 state = AWAITING
                 effective_controls = strategy.effective_controls(controls)
@@ -214,6 +238,8 @@ def run_completed_candle_backtest(
                         slow_ema_period=settings.ema_slow_period,
                         volume_lookback=settings.volume_lookback_candles,
                         is_nifty=False,
+                        atr_period=settings.atr_period,
+                        daily_candles=prior_daily,
                     )
                     nifty = indicator_snapshot(
                         benchmark_history,
@@ -223,6 +249,7 @@ def run_completed_candle_backtest(
                         slow_ema_period=settings.ema_slow_period,
                         volume_lookback=settings.volume_lookback_candles,
                         is_nifty=True,
+                        atr_period=settings.atr_period,
                     )
                     decision = StrategyRegistry.evaluate(strategy, candle, indicators, nifty, effective_controls, state)
                     state = decision.next_state

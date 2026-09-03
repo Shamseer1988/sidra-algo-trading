@@ -24,6 +24,23 @@ def configured_subscriptions(settings: Settings) -> list[str]:
     return [value.strip() for value in settings.upstox_subscriptions.split(",") if value.strip()]
 
 
+def feed_subscriptions(settings: Settings) -> list[str]:
+    """Live-feed instrument keys, always including the NIFTY benchmark.
+
+    Relative strength and NIFTY regime scoring silently degrade to zero when the
+    benchmark index is not streamed, so it is force-included whenever there is at
+    least one configured equity subscription.
+    """
+    subscriptions = configured_subscriptions(settings)
+    if not subscriptions:
+        return subscriptions
+    forced = [settings.upstox_nifty_benchmark_key]
+    if settings.market_regime_enabled and settings.upstox_india_vix_key:
+        forced.append(settings.upstox_india_vix_key)
+    prefix = [key for key in forced if key and key not in subscriptions]
+    return [*prefix, *subscriptions]
+
+
 def _number(value: object) -> Decimal | None:
     try:
         return Decimal(str(value))
@@ -143,14 +160,12 @@ class UpstoxMarketDataService:
     def _on_open(self) -> None:
         if self._loop and not self._loop.is_closed():
             asyncio.run_coroutine_threadsafe(
-                self._state(
-                    "LIVE", f"Receiving Upstox data for {len(configured_subscriptions(self._settings))} instruments"
-                ),
+                self._state("LIVE", f"Receiving Upstox data for {len(feed_subscriptions(self._settings))} instruments"),
                 self._loop,
             )
 
     async def run_forever(self) -> None:
-        if not self._access_token or not configured_subscriptions(self._settings):
+        if not self._access_token or not feed_subscriptions(self._settings):
             await self._state("NOT_CONFIGURED", "Set Upstox access token and confirmed instrument keys")
             return
         try:
@@ -173,7 +188,7 @@ class UpstoxMarketDataService:
         configuration = upstox_client.Configuration()
         configuration.access_token = self._access_token
         self._streamer = upstox_client.MarketDataStreamerV3(
-            upstox_client.ApiClient(configuration), configured_subscriptions(self._settings), "full"
+            upstox_client.ApiClient(configuration), feed_subscriptions(self._settings), "full"
         )
         self._streamer.on("open", self._on_open)
         self._streamer.on("message", self._on_message)

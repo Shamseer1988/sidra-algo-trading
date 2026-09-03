@@ -21,8 +21,9 @@ from app.services.candle_aggregation import (
 from app.services.data_quality import MarketDataQualityService
 from app.services.firstock.market_data import FirstockMarketDataService
 from app.services.scanner_orchestration import PaperScannerOrchestrator
-from app.services.trading_calendar import TradingCalendar
-from app.services.upstox_backfill import backfill_today_candles
+from app.services.trading_calendar import MARKET_TIMEZONE, TradingCalendar
+from app.services.universe import refresh_universe
+from app.services.upstox_backfill import backfill_daily_history, backfill_today_candles
 from app.services.upstox_instruments import InstrumentRefreshError, refresh_is_due, refresh_upstox_instruments
 from app.services.upstox_market_data import UpstoxMarketDataService
 from app.services.upstox_oauth import UpstoxOAuthError, load_access_token
@@ -54,6 +55,7 @@ async def run() -> None:
     last_heartbeat = 0.0
     last_heartbeat_log = 0.0
     last_instrument_check = 0.0
+    last_universe_refresh: object = None
     market_data_backoff = RestartBackoff()
     loop_backoff = RestartBackoff(maximum_seconds=30)
     calendar = TradingCalendar.from_settings(settings)
@@ -180,17 +182,34 @@ async def run() -> None:
                         except Exception as exc:
                             logger.warning("scanner.upstox_backfill_failed", error=str(exc))
 
+                        try:
+                            await backfill_daily_history(
+                                settings, persistence, access_token=current_token, benchmark_key=benchmark
+                            )
+                        except Exception as exc:
+                            logger.warning("scanner.upstox_daily_backfill_failed", error=str(exc))
+
                         service = UpstoxMarketDataService(settings, redis, aggregation.consume, current_token)
                         active_token = current_token
                     else:
                         service = FirstockMarketDataService(settings, redis, aggregation.consume)
+                        logger.warning(
+                            "scanner.no_intraday_backfill",
+                            provider=selected_broker,
+                            detail=(
+                                "This provider has no historical intraday backfill; the opening "
+                                "range and session indicators only become trustworthy once the live "
+                                "feed has covered the whole session. Until then the data-quality "
+                                "gate suppresses signals for instruments with missing candle buckets."
+                            ),
+                        )
 
                     market_data_task = asyncio.create_task(
                         service.run_forever(), name=f"{selected_broker.lower()}-feed"
                     )
                     market_data_started_at = now
                     active_broker = selected_broker
-                    logger.info("scanner.market_data_started", provider=selected_broker)
+                    logger.info("scanner.market_data_started", provider=selected_broker, benchmark=benchmark)
                 elif requested_state != "RUNNING" and market_data_task and not market_data_task.done():
                     market_data_task.cancel()
                     await asyncio.gather(market_data_task, return_exceptions=True)
@@ -207,6 +226,23 @@ async def run() -> None:
 
                 if aggregation is not None:
                     await aggregation.flush_expired()
+
+                if settings.universe_enabled and requested_state == "RUNNING" and selected_broker == "UPSTOX":
+                    market_now = datetime.now(UTC)
+                    market_status = calendar.status_at(market_now)
+                    local_hhmm = market_now.astimezone(MARKET_TIMEZONE).strftime("%H:%M")
+                    today = market_now.astimezone(MARKET_TIMEZONE).date()
+                    if (
+                        market_status.trading_day
+                        and local_hhmm >= settings.universe_refresh_time
+                        and last_universe_refresh != today
+                    ):
+                        try:
+                            summary = await refresh_universe(settings, today)
+                            last_universe_refresh = today
+                            logger.info("scanner.universe_refreshed", **summary)
+                        except Exception as exc:
+                            logger.warning("scanner.universe_refresh_failed", error=str(exc))
 
                 if now - last_heartbeat_log >= 30:
                     logger.info("scanner.worker_heartbeat", status=requested_state, provider=active_broker)

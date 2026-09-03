@@ -15,10 +15,10 @@ from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import AuditLog, MarketCandle, User, UserRole
 from app.db.session import SessionLocal
 from app.services.broker_controls import BrokerControls, load_broker_controls, save_broker_controls
+from app.services.scheduler import AUTO_AUTH_STATUS_KEY, send_auto_auth_telegram_alert
+from app.services.upstox_auto_auth import UpstoxAutoAuthError, perform_auto_login
 from app.services.upstox_instruments import InstrumentRefreshError, refresh_upstox_instruments
 from app.services.upstox_oauth import UpstoxOAuthError, exchange_authorization_code, store_access_token
-from app.services.upstox_auto_auth import UpstoxAutoAuthError, perform_auto_login
-from app.services.scheduler import AUTO_AUTH_STATUS_KEY, send_auto_auth_telegram_alert
 
 router = APIRouter(prefix="/market-data", tags=["Market data"])
 UPSTOX_AUTHORIZE_URL = "https://api-v2.upstox.com/login/authorization/dialog"
@@ -84,6 +84,52 @@ async def update_broker_controls(
         )
         await session.commit()
     return controls
+
+
+class MarketRegimeResponse(BaseModel):
+    enabled: bool
+    available: bool
+    regime: str | None = None
+    score: float | None = None
+    allow_long: bool | None = None
+    allow_short: bool | None = None
+    size_multiplier: float | None = None
+    reason: str | None = None
+    components: dict = {}
+    vix: dict | None = None
+    breadth: dict | None = None
+    session_date: str | None = None
+    computed_at: str | None = None
+
+
+@router.get("/regime", response_model=MarketRegimeResponse)
+async def market_regime(settings: AppSettings, _: CurrentUser) -> MarketRegimeResponse:
+    redis = await _redis(settings)
+    try:
+        raw = await redis.get("market:regime")
+    finally:
+        await redis.aclose()
+    if not raw:
+        return MarketRegimeResponse(enabled=settings.market_regime_enabled, available=False)
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return MarketRegimeResponse(enabled=settings.market_regime_enabled, available=False)
+    return MarketRegimeResponse(
+        enabled=settings.market_regime_enabled,
+        available=True,
+        regime=data.get("regime"),
+        score=data.get("score"),
+        allow_long=data.get("allow_long"),
+        allow_short=data.get("allow_short"),
+        size_multiplier=data.get("size_multiplier"),
+        reason=data.get("reason"),
+        components=data.get("components", {}),
+        vix=data.get("vix"),
+        breadth=data.get("breadth"),
+        session_date=data.get("session_date"),
+        computed_at=data.get("computed_at"),
+    )
 
 
 @router.get("/candles/{instrument_token}", response_model=list[MarketCandleResponse])
@@ -248,6 +294,7 @@ async def upstox_auto_auth_status(settings: AppSettings, _: CurrentUser) -> Auto
 
     if raw:
         import json as _json
+
         try:
             data = _json.loads(raw)
             result.last_run_at = data.get("last_run_at")
@@ -257,15 +304,9 @@ async def upstox_auto_auth_status(settings: AppSettings, _: CurrentUser) -> Auto
         except (ValueError, TypeError):
             pass
 
-    # Compute next run time from the scheduler if it's running
-    try:
-        from app.services.scheduler import init_upstox_scheduler
-        # We can't access the live scheduler instance easily,
-        # so we report the static schedule
-        if result.configured:
-            result.next_run = "08:30 IST, next business day (Mon–Fri, excluding NSE holidays)"
-    except ImportError:
-        pass
+    # The live scheduler instance is not reachable from here, so report the static schedule.
+    if result.configured:
+        result.next_run = "08:30 IST, next business day (Mon–Fri, excluding NSE holidays)"
 
     return result
 
@@ -324,13 +365,20 @@ async def trigger_upstox_auto_auth(
     redis = await _redis(settings)
     try:
         import json as _json
-        await redis.set(AUTO_AUTH_STATUS_KEY, _json.dumps({
-            "last_run_at": result["renewed_at"],
-            "success": True,
-            "expires_at": result["expires_at"],
-            "error": None,
-            "trigger": "manual",
-        }), ex=86400)
+
+        await redis.set(
+            AUTO_AUTH_STATUS_KEY,
+            _json.dumps(
+                {
+                    "last_run_at": result["renewed_at"],
+                    "success": True,
+                    "expires_at": result["expires_at"],
+                    "error": None,
+                    "trigger": "manual",
+                }
+            ),
+            ex=86400,
+        )
     finally:
         await redis.aclose()
 
@@ -338,4 +386,3 @@ async def trigger_upstox_auto_auth(
         status="ok",
         expires_at=result["expires_at"],
     )
-

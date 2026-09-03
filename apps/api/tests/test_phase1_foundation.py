@@ -147,6 +147,111 @@ async def test_scanner_fails_closed_without_a_valid_data_quality_snapshot() -> N
     )
 
 
+async def test_signal_block_reason_handles_zero_cooldown_per_side_and_daily_ceiling() -> None:
+    """P0 regression: a zero cooldown must not raise, and per-side / ceiling caps must apply."""
+    from types import SimpleNamespace
+
+    from sqlalchemy import delete
+
+    from app.db.models import PaperSignal, ScannerEvaluation
+    from app.db.session import SessionLocal, engine
+    from app.services.strategy_registry import StrategyConfiguration
+
+    await engine.dispose()
+    session_date = date(2031, 3, 4)
+    strategy = StrategyConfiguration(
+        id="p0-block-test",
+        name="P0 Block Test",
+        max_trades_per_day=5,
+        max_trades_per_side=1,
+        cooldown_minutes=0,
+    )
+    controls = {"maximum_signals": 2}
+    orchestrator = PaperScannerOrchestrator(settings(), MemoryRedis())  # type: ignore[arg-type]
+
+    def _candle(minute: int) -> CompletedCandle:
+        opened_at = datetime(2031, 3, 4, 4, minute, tzinfo=UTC)
+        return CompletedCandle(
+            instrument_token="NSE_EQ|BLOCK",
+            timeframe_seconds=60,
+            opened_at=opened_at,
+            closed_at=opened_at + timedelta(minutes=1),
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100"),
+            volume=100,
+            tick_count=2,
+        )
+
+    long_decision = SimpleNamespace(side="LONG")
+    short_decision = SimpleNamespace(side="SHORT")
+    try:
+        # Zero cooldown + empty ledger: no UnboundLocalError, nothing blocks the signal.
+        assert await orchestrator._signal_block_reason(_candle(0), strategy, long_decision, controls) is None
+
+        async with SessionLocal() as session:
+            session.add(
+                ScannerEvaluation(
+                    evaluation_key="p0-block-accepted-long",
+                    instrument_token="NSE_EQ|BLOCK",
+                    session_date=session_date,
+                    candle_opened_at=datetime(2031, 3, 4, 4, 0, tzinfo=UTC),
+                    strategy_id=strategy.id,
+                    strategy_name=strategy.name,
+                    strategy_version=strategy.version,
+                    status="ACCEPTED",
+                    decision_state="SIGNALLED",
+                    side="LONG",
+                    reason="Paper signal confirmed",
+                    failed_conditions=[],
+                    data_quality_state="GOOD",
+                    candle_close=Decimal("100"),
+                    candle_volume=100,
+                    score=100,
+                )
+            )
+            await session.commit()
+
+        # One accepted LONG already: the per-side cap blocks another LONG but not a SHORT.
+        assert (
+            await orchestrator._signal_block_reason(_candle(1), strategy, long_decision, controls)
+            == "Strategy maximum long paper trades reached"
+        )
+        assert await orchestrator._signal_block_reason(_candle(1), strategy, short_decision, controls) is None
+
+        # Two live paper signals recorded: the account-wide daily ceiling blocks every side.
+        async with SessionLocal() as session:
+            for index in range(2):
+                session.add(
+                    PaperSignal(
+                        signal_key=f"p0-block-signal-{index}",
+                        instrument_token="NSE_EQ|BLOCK",
+                        session_date=session_date,
+                        candle_opened_at=datetime(2031, 3, 4, 4, index, tzinfo=UTC),
+                        strategy_version="orb-retest-v1@1",
+                        side="SHORT",
+                        entry_price=Decimal("100"),
+                        stop_price=Decimal("101"),
+                        target_price=Decimal("98"),
+                        quantity=1,
+                        risk_amount=Decimal("1"),
+                        score=100,
+                    )
+                )
+            await session.commit()
+        assert (
+            await orchestrator._signal_block_reason(_candle(2), strategy, short_decision, controls)
+            == "Daily paper-signal ceiling reached"
+        )
+    finally:
+        async with SessionLocal() as session:
+            await session.execute(delete(PaperSignal).where(PaperSignal.session_date == session_date))
+            await session.execute(delete(ScannerEvaluation).where(ScannerEvaluation.session_date == session_date))
+            await session.commit()
+        await engine.dispose()
+
+
 def test_worker_restart_backoff_is_bounded_and_resettable() -> None:
     backoff = RestartBackoff(initial_seconds=2, maximum_seconds=8)
     assert backoff.record_failure(now=10) == 2

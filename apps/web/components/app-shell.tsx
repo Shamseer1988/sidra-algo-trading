@@ -4,7 +4,7 @@ import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useSta
 import { useRouter } from "next/navigation";
 import { Activity, BellRing, Database, Radio, RefreshCw, Wifi } from "lucide-react";
 
-import { api, ApiError, type DataQuality, type MarketSession, type Overview, type PaperSignal, type SafetyStatus, type ScannerStatus, type TelegramStatus, type TradingControls, type User } from "./api";
+import { api, ApiError, type DataQuality, type MarketRegime, type MarketSession, type Overview, type PaperSignal, type SafetyStatus, type ScannerStatus, type TelegramStatus, type TradingControls, type User } from "./api";
 import { TerminalHeader } from "./layout/terminal-header";
 import { TerminalSidebar } from "./layout/terminal-sidebar";
 import { UnavailableWorkspace } from "../features/common/unavailable-workspace";
@@ -20,6 +20,7 @@ import { LiveReadinessWorkspace } from "../features/live/live-readiness-workspac
 import { RiskCenter } from "../features/risk/risk-center";
 import { BacktestingWorkspace } from "../features/backtesting/backtesting-workspace";
 import { ScannerPanel } from "../features/scanner/scanner-panel";
+import { UniverseWorkspace } from "../features/universe/universe-workspace";
 import { SecurityPanel, SettingsPanel } from "../features/settings/settings-panel";
 import { UpstoxConsole } from "../features/brokers/upstox-console";
 import { FirstockConsole } from "../features/brokers/firstock-console";
@@ -45,6 +46,7 @@ export function AppShell() {
   const [signals, setSignals] = useState<PaperSignal[]>([]);
   const [marketSession, setMarketSession] = useState<MarketSession | null>(null);
   const [dataQuality, setDataQuality] = useState<DataQuality[]>([]);
+  const [regime, setRegime] = useState<MarketRegime | null>(null);
   const [scannerRevision, setScannerRevision] = useState(0);
 
   const load = useCallback(async () => {
@@ -58,9 +60,10 @@ export function AppShell() {
   }, [router]);
 
   const loadMarketState = useCallback(async () => {
-    const [sessionResult, qualityResult] = await Promise.allSettled([api.marketSession(), api.dataQuality()]);
+    const [sessionResult, qualityResult, regimeResult] = await Promise.allSettled([api.marketSession(), api.dataQuality(), api.marketRegime()]);
     if (sessionResult.status === "fulfilled") setMarketSession(sessionResult.value);
     if (qualityResult.status === "fulfilled") setDataQuality(qualityResult.value);
+    if (regimeResult.status === "fulfilled") setRegime(regimeResult.value);
   }, []);
 
   useEffect(() => { void load(); const interval = window.setInterval(() => void load(), 15000); return () => window.clearInterval(interval); }, [load]);
@@ -91,7 +94,7 @@ export function AppShell() {
       setControls({ ...controls, intraday_leverage_enabled: value === "true" });
       return;
     }
-    const numeric = ["account_capital", "risk_per_trade_percent", "maximum_daily_risk_percent", "maximum_open_positions", "maximum_open_exposure_percent", "maximum_signals", "minimum_score", "minimum_rr", "volume_multiplier", "retest_tolerance_percent", "minimum_ema_spread_percent", "intraday_leverage_multiplier"].includes(key);
+    const numeric = ["account_capital", "risk_per_trade_percent", "maximum_daily_risk_percent", "maximum_open_positions", "maximum_open_exposure_percent", "maximum_signals", "minimum_score", "minimum_rr", "volume_multiplier", "retest_tolerance_percent", "minimum_ema_spread_percent", "stop_atr_multiple", "min_stop_distance_percent", "intraday_leverage_multiplier"].includes(key);
     setControls({ ...controls, [key]: numeric ? Number(value) : value });
   }
   async function signOut() { await api.logout(); router.replace("/login"); router.refresh(); }
@@ -104,8 +107,9 @@ export function AppShell() {
   let content: ReactNode;
   switch (active) {
     case "overview": content = <Dashboard services={services} scanner={scanner} safety={safety} signals={signals} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />; break;
-    case "market": content = <MarketPanel session={marketSession} quality={dataQuality} overview={overview} scanner={scanner} onRefresh={refreshAll} />; break;
+    case "market": content = <MarketPanel session={marketSession} quality={dataQuality} overview={overview} scanner={scanner} regime={regime} onRefresh={refreshAll} />; break;
     case "scanner": content = <ScannerPanel scanner={scanner} safety={safety} dataQuality={dataQuality} refreshKey={scannerRevision} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />; break;
+    case "universe": content = <UniverseWorkspace canOperate={Boolean(canOperate)} onMessage={setMessage} />; break;
     case "signals": content = <SignalsPanel signals={signals} />; break;
     case "strategies": content = <StrategiesPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
     case "orders": content = <PaperExecutionPanel view="orders" />; break;

@@ -4,7 +4,7 @@ Fetches today's completed 1-minute candles from market open (09:15 IST) up to cu
 to establish the 15-minute Opening Range (ORB) and session indicators immediately.
 """
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -19,7 +19,9 @@ from app.services.upstox_market_data import configured_subscriptions
 
 logger = structlog.get_logger("upstox.backfill")
 UPSTOX_HISTORICAL_URL = "https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
+UPSTOX_DAILY_HISTORICAL_URL = "https://api.upstox.com/v2/historical-candle/{instrument_key}/day/{to_date}/{from_date}"
 MARKET_TIMEZONE = ZoneInfo("Asia/Kolkata")
+DAILY_TIMEFRAME_SECONDS = 86_400
 
 
 async def backfill_today_candles(
@@ -108,3 +110,79 @@ async def backfill_today_candles(
 
     logger.info("upstox.backfill_completed", total_candles=total_backfilled)
     return total_backfilled
+
+
+async def backfill_daily_history(
+    settings: Settings,
+    persistence: MarketCalculationPersistenceService,
+    access_token: str | None = None,
+    benchmark_key: str | None = None,
+) -> int:
+    """Fetch recent completed daily candles so prior-day levels, gaps and daily ATR are available.
+
+    Stored in ``market_candles`` with ``timeframe_seconds = 86400``; the live 1-minute pipeline
+    never reads that timeframe, so the two histories stay isolated.
+    """
+    token = access_token or settings.upstox_access_token
+    if not token:
+        logger.warning("upstox.daily_backfill_skipped_no_token")
+        return 0
+
+    benchmark = benchmark_key or settings.upstox_nifty_benchmark_key
+    instruments = [benchmark] + [k for k in configured_subscriptions(settings) if k != benchmark]
+    today_ist = datetime.now(MARKET_TIMEZONE).date()
+    to_date = today_ist - timedelta(days=1)
+    from_date = today_ist - timedelta(days=max(settings.daily_history_sessions, 5) * 2 + 10)
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    }
+
+    total = 0
+    async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
+        for instrument_key in instruments:
+            url = UPSTOX_DAILY_HISTORICAL_URL.format(
+                instrument_key=instrument_key,
+                to_date=to_date.isoformat(),
+                from_date=from_date.isoformat(),
+            )
+            try:
+                response = await client.get(url)
+                if response.status_code != 200:
+                    logger.warning(
+                        "upstox.daily_backfill_failed_status", instrument=instrument_key, status=response.status_code
+                    )
+                    continue
+                raw_candles = response.json().get("data", {}).get("candles", [])
+                sorted_candles = sorted(raw_candles, key=lambda item: item[0])[-settings.daily_history_sessions :]
+                stored = 0
+                for item in sorted_candles:
+                    if len(item) < 6:
+                        continue
+                    try:
+                        session_date = date.fromisoformat(str(item[0])[:10])
+                    except ValueError:
+                        continue
+                    opened_at = datetime.combine(session_date, time(9, 15), tzinfo=MARKET_TIMEZONE)
+                    candle = CompletedCandle(
+                        instrument_token=instrument_key,
+                        timeframe_seconds=DAILY_TIMEFRAME_SECONDS,
+                        opened_at=opened_at,
+                        closed_at=datetime.combine(session_date, time(15, 30), tzinfo=MARKET_TIMEZONE),
+                        open=Decimal(str(item[1])),
+                        high=Decimal(str(item[2])),
+                        low=Decimal(str(item[3])),
+                        close=Decimal(str(item[4])),
+                        volume=int(item[5] or 0),
+                        tick_count=1,
+                    )
+                    if await persistence.persist_daily_candle(candle):
+                        stored += 1
+                total += stored
+                logger.info("upstox.daily_instrument_backfilled", instrument=instrument_key, sessions=stored)
+            except Exception as exc:
+                logger.warning("upstox.daily_backfill_instrument_error", instrument=instrument_key, error=str(exc))
+
+    logger.info("upstox.daily_backfill_completed", total_sessions=total)
+    return total

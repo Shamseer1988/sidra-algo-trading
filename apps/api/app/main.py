@@ -25,6 +25,7 @@ from app.api.routes import (
     shadow,
     system,
     telegram,
+    universe,
 )
 from app.api.routes import settings as settings_routes
 from app.core.config import get_settings
@@ -149,3 +150,4 @@ app.include_router(oms.router, prefix="/api/v1")
 app.include_router(shadow.router, prefix="/api/v1")
 app.include_router(assisted.router, prefix="/api/v1")
 app.include_router(live.router, prefix="/api/v1")
+app.include_router(universe.router, prefix="/api/v1")

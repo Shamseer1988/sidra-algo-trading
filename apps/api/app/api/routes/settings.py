@@ -25,6 +25,8 @@ DEFAULT_TRADING_CONTROLS = {
     "volume_multiplier": 1.3,
     "retest_tolerance_percent": 0.15,
     "minimum_ema_spread_percent": 0.05,
+    "stop_atr_multiple": 1.1,
+    "min_stop_distance_percent": 0.35,
     "trade_start_time": "09:24",
     "trade_cutoff_time": "14:45",
     "intraday_leverage_enabled": True,
@@ -44,6 +46,10 @@ class TradingControls(BaseModel):
     volume_multiplier: float = Field(ge=0.5, le=10)
     retest_tolerance_percent: float = Field(ge=0.05, le=1)
     minimum_ema_spread_percent: float = Field(default=0.05, ge=0, le=5)
+    # Volatility-aware stop floors. 0 disables that floor; the widest of the structural,
+    # ATR, and percent distances is used as the stop.
+    stop_atr_multiple: float = Field(default=1.1, ge=0, le=10)
+    min_stop_distance_percent: float = Field(default=0.35, ge=0, le=5)
     trade_start_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     trade_cutoff_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     intraday_leverage_enabled: bool = Field(default=True)
