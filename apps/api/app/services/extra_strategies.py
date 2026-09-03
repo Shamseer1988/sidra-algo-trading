@@ -23,9 +23,13 @@ from app.services.paper_strategy import (
 
 VWAP_PULLBACK_VERSION = "vwap-pullback-v1"
 EMA_MOMENTUM_VERSION = "ema-momentum-v1"
+RS_PULLBACK_VERSION = "rs-pullback-v1"
 
 LONG_PULLBACK = "LONG_PULLBACK"
 SHORT_PULLBACK = "SHORT_PULLBACK"
+LONG_RS_PULLBACK = "LONG_RS_PULLBACK"
+SHORT_RS_PULLBACK = "SHORT_RS_PULLBACK"
+DEFAULT_RS_THRESHOLD_PERCENT = Decimal("0.3")
 
 
 def _regime_name(benchmark: dict) -> str | None:
@@ -279,4 +283,120 @@ def _score_ema_momentum(
         "breakout": _round_points(breakout, Decimal("20")),
         "volume_confirmation": _round_points(_volume_points(indicators, controls, Decimal("15")), Decimal("15")),
         "market_confirmation": _round_points(_market_points(side, indicators, benchmark, Decimal("15")), Decimal("15")),
+    }
+
+
+# --------------------------------------------------------------------------------------
+# Relative-strength pullback: a leader that is outperforming NIFTY, pulling back to its
+# fast EMA and resuming in the direction of its relative strength.
+# --------------------------------------------------------------------------------------
+
+
+def _rs_threshold(controls: dict) -> Decimal:
+    raw = controls.get("rs_threshold_percent")
+    return Decimal(str(raw)) if raw is not None else DEFAULT_RS_THRESHOLD_PERCENT
+
+
+def evaluate_rs_pullback(
+    candle: CompletedCandle,
+    indicators: dict,
+    benchmark: dict,
+    controls: dict,
+    prior_state: str = AWAITING,
+) -> StrategyDecision:
+    if not _inside_trade_window(candle, controls):
+        return StrategyDecision(next_state=AWAITING, reason="Outside configured trade window")
+
+    fast = _number(indicators, "ema_fast")
+    slow = _number(indicators, "ema_slow")
+    atr = _number(indicators, "atr")
+    rs = _relative_strength(indicators)
+    if fast is None or slow is None or atr is None or atr <= 0:
+        return StrategyDecision(next_state=AWAITING, reason="Trend indicators are not ready")
+    if rs is None:
+        return StrategyDecision(next_state=AWAITING, reason="Relative strength is not available")
+    if prior_state == SIGNALLED:
+        return StrategyDecision(next_state=SIGNALLED, reason="Instrument already signalled this session")
+    if prior_state not in {AWAITING, LONG_RS_PULLBACK, SHORT_RS_PULLBACK}:
+        return StrategyDecision(next_state=AWAITING, reason="Unknown strategy state was reset")
+
+    threshold = _rs_threshold(controls)
+    tolerance = Decimal(str(controls["retest_tolerance_percent"])) / Decimal("100")
+    long_leader = fast > slow and candle.close > slow and rs >= threshold
+    short_laggard = fast < slow and candle.close < slow and rs <= -threshold
+
+    if prior_state == AWAITING:
+        if long_leader and candle.low <= fast * (Decimal("1") + tolerance):
+            return StrategyDecision(next_state=LONG_RS_PULLBACK, reason="Leader pulling back to its fast EMA")
+        if short_laggard and candle.high >= fast * (Decimal("1") - tolerance):
+            return StrategyDecision(next_state=SHORT_RS_PULLBACK, reason="Laggard rallying to its fast EMA")
+        return StrategyDecision(next_state=AWAITING, reason="Awaiting a relative-strength pullback")
+
+    side: Side = "LONG" if prior_state == LONG_RS_PULLBACK else "SHORT"
+    still_leading = (rs >= threshold / 2) if side == "LONG" else (rs <= -threshold / 2)
+    aligned = (fast > slow and candle.close >= slow) if side == "LONG" else (fast < slow and candle.close <= slow)
+    if not (still_leading and aligned):
+        return StrategyDecision(next_state=AWAITING, reason="Trend or relative-strength lead was lost")
+    reclaimed = (
+        candle.close > fast and candle.close > candle.open
+        if side == "LONG"
+        else candle.close < fast and candle.close < candle.open
+    )
+    if not reclaimed:
+        return StrategyDecision(next_state=prior_state, reason="Awaiting the fast-EMA reclaim candle")
+
+    breakdown = _score_rs_pullback(side, candle, indicators, benchmark, rs, threshold, fast, atr)
+    score = sum(breakdown.values())
+    if score < int(controls["minimum_score"]):
+        return StrategyDecision(
+            next_state=AWAITING, score=score, score_breakdown=breakdown, reason="Reclaim failed score threshold"
+        )
+    structural_stop = (
+        min(candle.low, fast - atr * Decimal("0.25"))
+        if side == "LONG"
+        else max(candle.high, fast + atr * Decimal("0.25"))
+    )
+    plan = plan_trade(side, candle.close, structural_stop, indicators, controls)
+    if plan is None:
+        return StrategyDecision(
+            next_state=AWAITING, score=score, score_breakdown=breakdown, reason="Risk plan is invalid"
+        )
+    stop, target, quantity, risk_amount = plan
+    return StrategyDecision(
+        next_state=SIGNALLED,
+        side=side,
+        entry_price=candle.close,
+        stop_price=stop,
+        target_price=target,
+        quantity=quantity,
+        risk_amount=risk_amount,
+        score=score,
+        score_breakdown=breakdown,
+        reason="Paper signal confirmed",
+    )
+
+
+def _score_rs_pullback(
+    side: Side,
+    candle: CompletedCandle,
+    indicators: dict,
+    benchmark: dict,
+    rs: Decimal,
+    threshold: Decimal,
+    fast: Decimal,
+    atr: Decimal,
+) -> dict[str, int]:
+    is_long = side == "LONG"
+    span = threshold * Decimal("2") if threshold > 0 else Decimal("0.6")
+    rs_points = Decimal("30") * _clamp((abs(rs) - threshold) / span, Decimal("0"), Decimal("1"))
+    reclaim_distance = (candle.close - fast) / atr if is_long else (fast - candle.close) / atr
+    reclaim = Decimal("25") * _clamp(reclaim_distance / Decimal("0.3"), Decimal("0"), Decimal("1"))
+    regime = _regime_name(benchmark)
+    wanted = "BULLISH" if is_long else "BEARISH"
+    regime_points = Decimal("20") if regime in (None, "INSUFFICIENT_DATA", wanted) else Decimal("0")
+    return {
+        "relative_strength": _round_points(Decimal("15") + rs_points / Decimal("2"), Decimal("30")),
+        "trend_alignment": _round_points(_trend_points(candle, indicators, Decimal("25")), Decimal("25")),
+        "pullback_reclaim": _round_points(reclaim, Decimal("25")),
+        "market_confirmation": _round_points(regime_points, Decimal("20")),
     }

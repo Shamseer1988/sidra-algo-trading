@@ -10,8 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import ApplicationSetting
 from app.services.extra_strategies import (
     EMA_MOMENTUM_VERSION,
+    RS_PULLBACK_VERSION,
     VWAP_PULLBACK_VERSION,
     evaluate_ema_momentum,
+    evaluate_rs_pullback,
     evaluate_vwap_pullback,
 )
 from app.services.market_calculations import CompletedCandle
@@ -62,6 +64,8 @@ class StrategyConfiguration(BaseModel):
     volume_multiplier: float = Field(default=1.3, ge=0.5, le=10)
     retest_tolerance_percent: float = Field(default=0.15, ge=0.05, le=1)
     minimum_ema_spread_percent: float = Field(default=0.05, ge=0, le=5)
+    # Minimum |relative strength vs NIFTY| for the RS Pullback strategy; blank uses its built-in default.
+    rs_threshold_percent: float | None = Field(default=None, ge=0, le=10)
 
     @field_validator("universe")
     @classmethod
@@ -97,6 +101,8 @@ class StrategyConfiguration(BaseModel):
         }
         if self.risk_per_trade_percent is not None:
             values["risk_per_trade_percent"] = self.risk_per_trade_percent
+        if self.rs_threshold_percent is not None:
+            values["rs_threshold_percent"] = self.rs_threshold_percent
         return values
 
     def snapshot(self, base_controls: dict) -> dict:
@@ -151,6 +157,20 @@ class EmaMomentumDefinition:
         )
 
 
+class RsPullbackDefinition:
+    metadata = StrategyMetadata(
+        identifier=RS_PULLBACK_VERSION,
+        name="Relative-Strength Pullback",
+        implementation_version=RS_PULLBACK_VERSION,
+        prerequisites=("completed candle", "EMA", "ATR", "relative strength", "market regime"),
+    )
+
+    def evaluate(self, candle, indicators, benchmark, controls, configuration, prior_state) -> StrategyDecision:
+        return _direction_gated(
+            evaluate_rs_pullback(candle, indicators, benchmark, controls, prior_state), configuration
+        )
+
+
 def _direction_gated(decision: StrategyDecision, configuration: "StrategyConfiguration") -> StrategyDecision:
     if decision.side and decision.side not in configuration.allowed_sides:
         return StrategyDecision(next_state=AWAITING, reason=f"{decision.side.title()} signals are disabled")
@@ -167,6 +187,7 @@ class StrategyRegistry:
         STRATEGY_VERSION: OrbRetestDefinition(),
         VWAP_PULLBACK_VERSION: VwapPullbackDefinition(),
         EMA_MOMENTUM_VERSION: EmaMomentumDefinition(),
+        RS_PULLBACK_VERSION: RsPullbackDefinition(),
     }
 
     @classmethod

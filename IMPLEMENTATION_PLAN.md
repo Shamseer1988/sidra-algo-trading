@@ -287,7 +287,10 @@ Coverage: `tests/test_market_data_subscriptions.py`, strategy-default assertions
     EMA-defined trend, entered on the reclaim candle.
   - **EMA Momentum** (`ema-momentum-v1`) — a fresh push through the opening range with a stacked
     EMA / VWAP trend, rejected when already extended from VWAP.
-  Both are registered in `StrategyRegistry`, share the versioned `StrategyConfiguration`, and are
+  - **Relative-Strength Pullback** (`rs-pullback-v1`) — a name outperforming NIFTY by at least
+    `rs_threshold_percent` (new optional `StrategyConfiguration` field, built-in default 0.3%), pulling
+    back to its fast EMA and reclaiming it.
+  All are registered in `StrategyRegistry`, share the versioned `StrategyConfiguration`, and are
   selectable in the Strategies workspace (new `/settings/strategies/definitions` API, strategy-type
   dropdown). Deterministic coverage in `tests/test_extra_strategies.py`.
 

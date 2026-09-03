@@ -4,8 +4,10 @@ from decimal import Decimal
 from app.services.extra_strategies import (
     AWAITING,
     LONG_PULLBACK,
+    LONG_RS_PULLBACK,
     SIGNALLED,
     evaluate_ema_momentum,
+    evaluate_rs_pullback,
     evaluate_vwap_pullback,
 )
 from app.services.market_calculations import CompletedCandle
@@ -113,11 +115,51 @@ def test_ema_momentum_is_idempotent_once_signalled() -> None:
     assert decision.side is None
 
 
-def test_registry_exposes_all_three_strategies_and_routes_by_type() -> None:
+RS_INDICATORS = {
+    "ema_fast": 101.0,
+    "ema_slow": 99.0,
+    "atr": 2.0,
+    "relative_strength": {"relative_strength_percent": 0.6},
+}
+
+
+def test_rs_pullback_needs_a_leader_pullback_then_a_reclaim() -> None:
+    pull = evaluate_rs_pullback(_candle("101", "102", "100.9", "101.5"), RS_INDICATORS, NIFTY, CONTROLS, AWAITING)
+    assert pull.next_state == LONG_RS_PULLBACK and pull.side is None
+
+    signal = evaluate_rs_pullback(
+        _candle("101.1", "102.5", "100.8", "102"), RS_INDICATORS, NIFTY, CONTROLS, LONG_RS_PULLBACK
+    )
+    assert signal.next_state == SIGNALLED
+    assert signal.side == "LONG"
+    assert signal.quantity > 0
+    assert signal.stop_price < signal.entry_price < signal.target_price
+
+
+def test_rs_pullback_waits_when_relative_strength_is_below_threshold() -> None:
+    weak = {**RS_INDICATORS, "relative_strength": {"relative_strength_percent": 0.1}}
+    decision = evaluate_rs_pullback(_candle("101", "102", "100.9", "101.5"), weak, NIFTY, CONTROLS, AWAITING)
+    assert decision.next_state == AWAITING
+    assert decision.reason == "Awaiting a relative-strength pullback"
+
+
+def test_rs_pullback_needs_relative_strength_data() -> None:
+    decision = evaluate_rs_pullback(
+        _candle("101", "102", "100.9", "101.5"),
+        {"ema_fast": 101.0, "ema_slow": 99.0, "atr": 2.0},
+        NIFTY,
+        CONTROLS,
+        AWAITING,
+    )
+    assert decision.next_state == AWAITING
+    assert decision.reason == "Relative strength is not available"
+
+
+def test_registry_exposes_all_strategies_and_routes_by_type() -> None:
     from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 
     identifiers = {item.identifier for item in StrategyRegistry.metadata()}
-    assert identifiers == {"orb-retest-v1", "vwap-pullback-v1", "ema-momentum-v1"}
+    assert identifiers == {"orb-retest-v1", "vwap-pullback-v1", "ema-momentum-v1", "rs-pullback-v1"}
 
     strategy = StrategyConfiguration(name="VWAP Pullback A", strategy_type="vwap-pullback-v1")
     replayed = StrategyRegistry.evaluate(
