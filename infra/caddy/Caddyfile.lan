@@ -24,7 +24,3 @@ https://{$LAN_HTTPS_HOST} {
 		header_up X-Forwarded-Proto https
 	}
 }
-
-http://{$LAN_HTTPS_HOST} {
-	redir https://{host}{uri} permanent
-}
