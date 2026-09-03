@@ -1,9 +1,10 @@
 "use client";
 
-import { RefreshCw, SlidersHorizontal, TimerReset } from "lucide-react";
+import { SlidersHorizontal } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 
 import { api, type AuditLog, type BrokerControls, type TradingControls, type UserSession } from "../../components/api";
+import type { WorkspaceId } from "../../lib/navigation";
 import { formatIstTimestamp } from "../../lib/formatting";
 
 export function SettingsPanel({
@@ -19,10 +20,9 @@ export function SettingsPanel({
   onSave: (event: FormEvent<HTMLFormElement>) => void;
   onChange: (key: keyof TradingControls, value: string) => void;
   onMessage: (message: string) => void;
-  onNavigate?: (id: any) => void;
+  onNavigate?: (id: WorkspaceId) => void;
 }) {
   const isLeverageEnabled = Boolean(controls.intraday_leverage_enabled ?? true);
-  const leverageMult = Number(controls.intraday_leverage_multiplier ?? 5.0);
 
   return (
     <section>
@@ -107,7 +107,7 @@ export function MarketDataFeedSelector({
 }: {
   isAdmin: boolean;
   onMessage: (message: string) => void;
-  onNavigate?: (id: any) => void;
+  onNavigate?: (id: WorkspaceId) => void;
 }) {
   const [controls, setControls] = useState<BrokerControls | null>(null);
 

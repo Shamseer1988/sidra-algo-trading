@@ -5,8 +5,9 @@ Revises: 0012_backtesting
 """
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0013_oms_core"
 down_revision = "0012_backtesting"
@@ -19,7 +20,11 @@ def upgrade() -> None:
         "order_intents",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("idempotency_key", sa.String(length=220), nullable=False),
-        sa.Column("source_paper_signal_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("paper_signals.id", ondelete="SET NULL")),
+        sa.Column(
+            "source_paper_signal_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("paper_signals.id", ondelete="SET NULL"),
+        ),
         sa.Column("mode", sa.String(length=20), nullable=False, server_default="PAPER"),
         sa.Column("instrument_token", sa.String(length=64), nullable=False),
         sa.Column("side", sa.String(length=10), nullable=False),
@@ -41,7 +46,12 @@ def upgrade() -> None:
     op.create_table(
         "oms_orders",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("order_intent_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("order_intents.id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "order_intent_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("order_intents.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
         sa.Column("venue", sa.String(length=40), nullable=False, server_default="PAPER_SIMULATOR"),
         sa.Column("broker_order_id", sa.String(length=120)),
         sa.Column("status", sa.String(length=30), nullable=False, server_default="QUEUED"),
@@ -61,7 +71,12 @@ def upgrade() -> None:
     op.create_table(
         "oms_order_events",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("oms_order_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("oms_orders.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "oms_order_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("oms_orders.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("sequence", sa.Integer(), nullable=False),
         sa.Column("from_status", sa.String(length=30)),
         sa.Column("to_status", sa.String(length=30), nullable=False),
@@ -87,9 +102,13 @@ def upgrade() -> None:
     op.create_index("ix_execution_reconciliations_mode", "execution_reconciliations", ["mode"])
     op.create_index("ix_execution_reconciliations_status", "execution_reconciliations", ["status"])
     op.create_index("ix_execution_reconciliations_created_at", "execution_reconciliations", ["created_at"])
-    op.create_index("ix_execution_reconciliations_created_status", "execution_reconciliations", ["created_at", "status"])
+    op.create_index(
+        "ix_execution_reconciliations_created_status", "execution_reconciliations", ["created_at", "status"]
+    )
     op.add_column("paper_orders", sa.Column("oms_order_id", postgresql.UUID(as_uuid=True), nullable=True))
-    op.create_foreign_key("fk_paper_orders_oms_order_id", "paper_orders", "oms_orders", ["oms_order_id"], ["id"], ondelete="SET NULL")
+    op.create_foreign_key(
+        "fk_paper_orders_oms_order_id", "paper_orders", "oms_orders", ["oms_order_id"], ["id"], ondelete="SET NULL"
+    )
     op.create_unique_constraint("uq_paper_orders_oms_order_id", "paper_orders", ["oms_order_id"])
 
 

@@ -5,8 +5,9 @@ Revises: 0013_oms_core
 """
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0014_shadow_mode"
 down_revision = "0013_oms_core"
@@ -18,7 +19,12 @@ def upgrade() -> None:
     op.create_table(
         "shadow_orders",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("oms_order_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("oms_orders.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "oms_order_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("oms_orders.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("instrument_token", sa.String(length=64), nullable=False),
         sa.Column("side", sa.String(length=10), nullable=False),
         sa.Column("intended_quantity", sa.Integer(), nullable=False),

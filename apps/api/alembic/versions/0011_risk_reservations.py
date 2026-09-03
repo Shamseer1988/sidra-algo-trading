@@ -5,8 +5,9 @@ Revises: 0010_paper_execution
 """
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0011_risk_reservations"
 down_revision = "0010_paper_execution"
@@ -18,7 +19,12 @@ def upgrade() -> None:
     op.create_table(
         "risk_reservations",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("paper_signal_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("paper_signals.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "paper_signal_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("paper_signals.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("session_date", sa.Date(), nullable=False),
         sa.Column("instrument_token", sa.String(length=64), nullable=False),
         sa.Column("risk_amount", sa.Numeric(precision=18, scale=4), nullable=False),

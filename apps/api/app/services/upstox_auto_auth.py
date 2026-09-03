@@ -104,9 +104,7 @@ async def perform_auto_login(settings: Settings) -> dict:
         actual_client_id = query_params.get("client_id", [client_id])[0]
 
         if not user_id:
-            raise UpstoxAutoAuthError(
-                f"Step 1 dialog request did not return a user_id in redirect: {res_dialog.url}"
-            )
+            raise UpstoxAutoAuthError(f"Step 1 dialog request did not return a user_id in redirect: {res_dialog.url}")
         logger.info("upstox.auto_auth.user_id_obtained", user_id_prefix=user_id[:6] + "…")
 
         # ── Step 2: Generate OTP ───────────────────────────────────────────

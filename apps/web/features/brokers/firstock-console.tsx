@@ -2,14 +2,12 @@
 
 import {
   CheckCircle2,
-  KeyRound,
   Play,
   RefreshCw,
   ShieldCheck,
   Terminal,
   WalletCards,
   Wifi,
-  WifiOff,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 

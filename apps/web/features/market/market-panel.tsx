@@ -8,7 +8,6 @@ import {
   Search,
   ShieldAlert,
   ShieldCheck,
-  TriangleAlert,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 

@@ -5,6 +5,7 @@ Revises: 0015_assisted_approvals
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0016_live_readiness"

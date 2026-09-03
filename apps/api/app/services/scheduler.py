@@ -12,7 +12,6 @@ API container and shuts down cleanly.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 
 import structlog
@@ -57,6 +56,7 @@ async def send_auto_auth_telegram_alert(
     """Send a rich Telegram alert with detailed status of Upstox session renewal."""
     try:
         from zoneinfo import ZoneInfo
+
         from app.services.telegram import TelegramNotificationService
         from app.services.telegram_config import configured_settings
 
@@ -130,11 +130,14 @@ async def run_upstox_auto_renewal(
 
     try:
         result = await perform_auto_login(settings)
-        await _persist_audit("scheduler.upstox_auto_auth_success", {
-            "expires_at": result["expires_at"],
-            "renewed_at": result["renewed_at"],
-            "trigger": trigger,
-        })
+        await _persist_audit(
+            "scheduler.upstox_auto_auth_success",
+            {
+                "expires_at": result["expires_at"],
+                "renewed_at": result["renewed_at"],
+                "trigger": trigger,
+            },
+        )
         await send_auto_auth_telegram_alert(
             settings=settings,
             trigger=trigger,
@@ -171,9 +174,11 @@ async def _publish_status_to_redis(settings: Settings, status_data: dict) -> Non
     """Store last auto-auth result in Redis for the status API."""
     try:
         from redis.asyncio import Redis
+
         redis = Redis.from_url(str(settings.redis_url), decode_responses=True)
         try:
             import json
+
             await redis.set(AUTO_AUTH_STATUS_KEY, json.dumps(status_data), ex=86400)
         finally:
             await redis.aclose()
@@ -183,6 +188,7 @@ async def _publish_status_to_redis(settings: Settings, status_data: dict) -> Non
 
 def _make_job_func(settings: Settings, calendar: TradingCalendar):
     """Return the coroutine that APScheduler will call on each trigger."""
+
     async def _job() -> None:
         result = await run_upstox_auto_renewal(settings, calendar)
         status_data = {
@@ -192,6 +198,7 @@ def _make_job_func(settings: Settings, calendar: TradingCalendar):
             "error": None if result else "See audit logs for details",
         }
         await _publish_status_to_redis(settings, status_data)
+
     return _job
 
 
@@ -243,6 +250,7 @@ async def check_and_renew_on_startup(settings: Settings) -> None:
 
     try:
         from app.services.upstox_oauth import load_access_token
+
         token = await load_access_token(settings)
         if token:
             logger.info("scheduler.startup_token_valid")
@@ -254,10 +262,13 @@ async def check_and_renew_on_startup(settings: Settings) -> None:
     calendar = TradingCalendar.from_settings(settings)
     result = await run_upstox_auto_renewal(settings, calendar, trigger="Server Startup")
     if result:
-        await _publish_status_to_redis(settings, {
-            "last_run_at": datetime.now(UTC).isoformat(),
-            "success": True,
-            "expires_at": result["expires_at"],
-            "error": None,
-            "trigger": "startup",
-        })
+        await _publish_status_to_redis(
+            settings,
+            {
+                "last_run_at": datetime.now(UTC).isoformat(),
+                "success": True,
+                "expires_at": result["expires_at"],
+                "error": None,
+                "trigger": "startup",
+            },
+        )

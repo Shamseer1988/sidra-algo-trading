@@ -3,12 +3,10 @@
 import {
   CalendarClock,
   Clock,
-  ExternalLink,
   Play,
   RefreshCw,
   ShieldCheck,
   TimerReset,
-  Zap,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 

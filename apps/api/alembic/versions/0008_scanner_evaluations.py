@@ -5,8 +5,9 @@ Revises: 0007_paper_signal_outcomes
 """
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0008_scanner_evaluations"
 down_revision = "0007_paper_signal_outcomes"
@@ -52,7 +53,9 @@ def upgrade() -> None:
     op.create_index("ix_scanner_evaluations_strategy_id", "scanner_evaluations", ["strategy_id"])
     op.create_index("ix_scanner_evaluations_status", "scanner_evaluations", ["status"])
     op.create_index("ix_scanner_evaluations_session_status", "scanner_evaluations", ["session_date", "status"])
-    op.create_index("ix_scanner_evaluations_instrument_created", "scanner_evaluations", ["instrument_token", "created_at"])
+    op.create_index(
+        "ix_scanner_evaluations_instrument_created", "scanner_evaluations", ["instrument_token", "created_at"]
+    )
 
 
 def downgrade() -> None:
