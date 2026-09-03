@@ -29,6 +29,17 @@ import { SignalsPanel } from "../features/signals/signals-panel";
 import { StrategiesPanel } from "../features/strategies/strategies-panel";
 import { SystemHealthPanel } from "../features/system/system-health-panel";
 import type { WorkspaceId } from "../lib/navigation";
+import { CheckCircle2, XCircle, Info, X } from "lucide-react";
+
+type ToastKind = "success" | "error" | "info";
+type Toast = { id: number; text: string; kind: ToastKind };
+
+const ERROR_PATTERN =
+  /\b(fail(?:ed|ure)?|error|could ?n[o']t|cannot|can[o']t|unable|unavailable|invalid|denied|rejected|not found|temporarily|no .{1,30} available)\b/i;
+
+function classifyToast(text: string): ToastKind {
+  return ERROR_PATTERN.test(text) ? "error" : "success";
+}
 
 export function AppShell() {
   const router = useRouter();
@@ -36,7 +47,18 @@ export function AppShell() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [message, setMessage] = useState("");
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const dismissToast = useCallback((id: number) => setToasts((current) => current.filter((item) => item.id !== id)), []);
+  const setMessage = useCallback(
+    (text: string, kind?: ToastKind) => {
+      if (!text) return;
+      const id = Date.now() + Math.random();
+      setToasts((current) => [...current.slice(-3), { id, text, kind: kind ?? classifyToast(text) }]);
+      window.setTimeout(() => dismissToast(id), 5000);
+    },
+    [dismissToast],
+  );
   const [user, setUser] = useState<User | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [scanner, setScanner] = useState<ScannerStatus | null>(null);
@@ -57,7 +79,7 @@ export function AppShell() {
       if (error instanceof ApiError && error.status === 401) router.replace("/login");
       else setMessage(error instanceof Error ? error.message : "Terminal data is temporarily unavailable");
     } finally { setLoading(false); }
-  }, [router]);
+  }, [router, setMessage]);
 
   const loadMarketState = useCallback(async () => {
     const [sessionResult, qualityResult, regimeResult] = await Promise.allSettled([api.marketSession(), api.dataQuality(), api.marketRegime()]);
@@ -84,7 +106,7 @@ export function AppShell() {
 
   const selectWorkspace = (workspace: WorkspaceId) => { setActive(workspace); setMenuOpen(false); if (workspace === "market") void loadMarketState(); };
   async function scannerAction(action: "start" | "stop") { try { setScanner(action === "start" ? await api.startScanner() : await api.stopScanner()); setMessage(`Scanner ${action === "start" ? "start requested" : "stopped"}.`); void load(); } catch (error) { setMessage(error instanceof Error ? error.message : "Scanner control failed"); } }
-  async function emergencyAction(clear = false) { try { setSafety(clear ? await api.clearEmergencyStop() : await api.emergencyStop("Emergency stop engaged from trading terminal")); setMessage(clear ? "Emergency stop cleared." : "Emergency stop engaged; scanner stopped."); void load(); } catch (error) { setMessage(error instanceof Error ? error.message : "Safety action failed"); } }
+  async function emergencyAction(clear = false) { try { setSafety(clear ? await api.clearEmergencyStop() : await api.emergencyStop("Emergency stop engaged from trading terminal")); setMessage(clear ? "Emergency stop cleared." : "Emergency stop engaged; scanner stopped.", clear ? "success" : "info"); void load(); } catch (error) { setMessage(error instanceof Error ? error.message : "Safety action failed"); } }
   async function paperAction() { try { if (safety) setSafety(safety.paper_tracking_enabled ? await api.disablePaper() : await api.enablePaper()); setMessage("Paper-tracking setting updated."); } catch (error) { setMessage(error instanceof Error ? error.message : "Paper setting failed"); } }
   async function telegramAction() { try { setTelegram(await api.testTelegram()); setMessage("Telegram test alert sent."); } catch (error) { setMessage(error instanceof Error ? error.message : "Telegram test failed"); } }
   async function saveControls(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (!controls) return; try { setControls(await api.updateControls(controls)); setMessage("Trading controls saved."); } catch (error) { setMessage(error instanceof Error ? error.message : "Settings save failed"); } }
@@ -131,5 +153,25 @@ export function AppShell() {
     default: content = <UnavailableWorkspace workspace={active} />;
   }
 
-  return <main className="min-h-screen bg-terminal-950 text-slate-200"><TerminalSidebar active={active} collapsed={collapsed} menuOpen={menuOpen} user={user} onSelect={selectWorkspace} onToggle={() => setCollapsed((value) => !value)} onSignOut={() => void signOut()} /><div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}><TerminalHeader active={active} overview={overview} scanner={scanner} safety={safety} user={user} onOpenNavigation={() => setMenuOpen((value) => !value)} onOpenControls={() => selectWorkspace("risk")} /><div className="mx-auto max-w-[1600px] p-4 sm:p-6">{message && <div className="glass-notice mb-5 flex items-center justify-between rounded-md px-4 py-3 text-sm text-slate-300"><span>{message}</span><button aria-label="Dismiss message" onClick={() => setMessage("")} className="text-slate-500">×</button></div>}{content}</div></div></main>;
+  return <main className="min-h-screen bg-terminal-950 text-slate-200"><TerminalSidebar active={active} collapsed={collapsed} menuOpen={menuOpen} user={user} onSelect={selectWorkspace} onToggle={() => setCollapsed((value) => !value)} onSignOut={() => void signOut()} /><div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}><TerminalHeader active={active} overview={overview} scanner={scanner} safety={safety} user={user} onOpenNavigation={() => setMenuOpen((value) => !value)} onOpenControls={() => selectWorkspace("risk")} /><div className="mx-auto max-w-[1600px] p-4 sm:p-6">{content}</div></div><Toaster toasts={toasts} onDismiss={dismissToast} /></main>;
+}
+
+function Toaster({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {
+  const icons = { success: CheckCircle2, error: XCircle, info: Info } as const;
+  return (
+    <div className="toast-stack" role="status" aria-live="polite">
+      {toasts.map((toast) => {
+        const Icon = icons[toast.kind];
+        return (
+          <div key={toast.id} className={`toast toast--${toast.kind}`}>
+            <Icon className="h-4 w-4 shrink-0" />
+            <span className="flex-1">{toast.text}</span>
+            <button aria-label="Dismiss" onClick={() => onDismiss(toast.id)} className="shrink-0 opacity-70 hover:opacity-100">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
