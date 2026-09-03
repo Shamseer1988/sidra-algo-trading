@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     atr_period: int = Field(default=14, ge=2, le=100)
     daily_history_sessions: int = Field(default=40, ge=5, le=250)
     rvol_baseline_sessions: int = Field(default=10, ge=1, le=60)
+    backtest_sweep_max_combinations: int = Field(default=40, ge=2, le=200)
 
     # Dynamic scan universe. Opt-in: while disabled the scanner evaluates every streamed instrument.
     universe_enabled: bool = False

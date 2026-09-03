@@ -10,7 +10,17 @@ from sqlalchemy import select
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
-from app.db.models import ApplicationSetting, AuditLog, BacktestRun, BacktestTrade, MarketCandle, User, UserRole
+from app.db.models import (
+    ApplicationSetting,
+    AuditLog,
+    BacktestRun,
+    BacktestSweep,
+    BacktestTrade,
+    MarketCandle,
+    User,
+    UserRole,
+)
+from app.services.backtest_sweep import SWEEPABLE, run_parameter_sweep
 from app.services.backtesting import run_completed_candle_backtest
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_execution import DEFAULT_PAPER_EXECUTION_CONTROLS, PAPER_EXECUTION_KEY, PaperExecutionControls
@@ -144,6 +154,48 @@ def _completed(row: MarketCandle) -> CompletedCandle:
     )
 
 
+async def _load_history(
+    session: DbSession,
+    app_settings: AppSettings,
+    instrument_tokens: list[str],
+    timeframe_seconds: int,
+    start_date: date,
+    end_date: date,
+) -> tuple[dict[str, list[CompletedCandle]], list[CompletedCandle]]:
+    all_tokens = list(dict.fromkeys([*instrument_tokens, app_settings.nifty_benchmark_token]))
+    rows = list(
+        (
+            await session.scalars(
+                select(MarketCandle)
+                .where(
+                    MarketCandle.instrument_token.in_(all_tokens),
+                    MarketCandle.timeframe_seconds == timeframe_seconds,
+                    MarketCandle.session_date >= start_date,
+                    MarketCandle.session_date <= end_date,
+                )
+                .order_by(MarketCandle.instrument_token, MarketCandle.opened_at)
+            )
+        ).all()
+    )
+    by_instrument: dict[str, list[CompletedCandle]] = {item: [] for item in instrument_tokens}
+    benchmark: list[CompletedCandle] = []
+    for row in rows:
+        candle = _completed(row)
+        if row.instrument_token == app_settings.nifty_benchmark_token:
+            benchmark.append(candle)
+        elif row.instrument_token in by_instrument:
+            by_instrument[row.instrument_token].append(candle)
+    if not benchmark:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Benchmark candles are unavailable for this range"
+        )
+    if not any(by_instrument.values()):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="No requested historical candles are available"
+        )
+    return by_instrument, benchmark
+
+
 @router.get("", response_model=list[BacktestRunResponse])
 async def list_backtests(
     _: CurrentUser, session: DbSession, limit: int = Query(default=20, ge=1, le=100)
@@ -186,37 +238,14 @@ async def create_backtest(
             StrategyRegistry.definition(item.strategy_type)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    all_tokens = list(dict.fromkeys([*request.instrument_tokens, app_settings.nifty_benchmark_token]))
-    rows = list(
-        (
-            await session.scalars(
-                select(MarketCandle)
-                .where(
-                    MarketCandle.instrument_token.in_(all_tokens),
-                    MarketCandle.timeframe_seconds == request.timeframe_seconds,
-                    MarketCandle.session_date >= request.start_date,
-                    MarketCandle.session_date <= request.end_date,
-                )
-                .order_by(MarketCandle.instrument_token, MarketCandle.opened_at)
-            )
-        ).all()
+    by_instrument, benchmark = await _load_history(
+        session,
+        app_settings,
+        request.instrument_tokens,
+        request.timeframe_seconds,
+        request.start_date,
+        request.end_date,
     )
-    by_instrument: dict[str, list[CompletedCandle]] = {item: [] for item in request.instrument_tokens}
-    benchmark: list[CompletedCandle] = []
-    for row in rows:
-        candle = _completed(row)
-        if row.instrument_token == app_settings.nifty_benchmark_token:
-            benchmark.append(candle)
-        elif row.instrument_token in by_instrument:
-            by_instrument[row.instrument_token].append(candle)
-    if not benchmark:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Benchmark candles are unavailable for this range"
-        )
-    if not any(by_instrument.values()):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="No requested historical candles are available"
-        )
     result = run_completed_candle_backtest(
         by_instrument, benchmark, selected, controls, execution_controls, app_settings
     )
@@ -285,6 +314,242 @@ async def create_backtest(
         ).all()
     )
     return BacktestRunDetail(**_run_response(run).model_dump(), trades=[_trade_response(item) for item in trades])
+
+
+class SweepRequest(BaseModel):
+    strategy_id: str
+    start_date: date
+    end_date: date
+    instrument_tokens: list[str] = Field(min_length=1, max_length=5)
+    timeframe_seconds: int = Field(default=60, ge=60, le=900)
+    validation_fraction: float = Field(default=0.35, ge=0.1, le=0.6)
+    parameter_grid: dict[str, list[float]] = Field(min_length=1)
+
+    @field_validator("instrument_tokens")
+    @classmethod
+    def normalize_tokens(cls, values: list[str]) -> list[str]:
+        normalized = list(dict.fromkeys(item.strip() for item in values if item.strip()))
+        if not normalized:
+            raise ValueError("At least one instrument token is required")
+        return normalized
+
+    @field_validator("parameter_grid")
+    @classmethod
+    def validate_grid(cls, grid: dict[str, list[float]]) -> dict[str, list[float]]:
+        unknown = sorted(set(grid) - SWEEPABLE)
+        if unknown:
+            raise ValueError(f"Unsupported sweep parameter(s): {', '.join(unknown)}")
+        cleaned = {key: list(dict.fromkeys(values)) for key, values in grid.items() if values}
+        if not cleaned:
+            raise ValueError("Every grid entry is empty")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "SweepRequest":
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must not precede start_date")
+        if (self.end_date - self.start_date).days > 60:
+            raise ValueError("Sweeps are limited to 61 calendar days")
+        return self
+
+
+class SweepCombinationResponse(BaseModel):
+    index: int
+    parameters: dict
+    in_sample: dict
+    validation: dict
+    proven: bool
+
+
+class SweepResponse(BaseModel):
+    id: str
+    status: str
+    strategy_id: str
+    start_date: date
+    end_date: date
+    validation_fraction: float
+    instrument_tokens: list[str]
+    parameter_grid: dict
+    combination_count: int
+    best_index: int | None
+    promoted_index: int | None
+    combinations: list[SweepCombinationResponse]
+    failure_detail: str | None
+    created_at: datetime
+
+
+def _sweep_response(row: BacktestSweep) -> SweepResponse:
+    return SweepResponse(
+        id=str(row.id),
+        status=row.status,
+        strategy_id=row.strategy_id,
+        start_date=row.start_date,
+        end_date=row.end_date,
+        validation_fraction=float(row.validation_fraction),
+        instrument_tokens=row.instrument_tokens,
+        parameter_grid=row.parameter_grid,
+        combination_count=row.combination_count,
+        best_index=row.best_index,
+        promoted_index=row.promoted_index,
+        combinations=[SweepCombinationResponse(**item) for item in row.combinations],
+        failure_detail=row.failure_detail,
+        created_at=row.created_at,
+    )
+
+
+async def _load_strategies(session: DbSession) -> list[StrategyConfiguration]:
+    strategies_setting = await session.get(ApplicationSetting, STRATEGIES_KEY)
+    return [
+        StrategyConfiguration.model_validate(item)
+        for item in (strategies_setting.value if strategies_setting else DEFAULT_STRATEGIES)
+    ]
+
+
+@router.get("/sweeps", response_model=list[SweepResponse])
+async def list_sweeps(
+    _: CurrentUser, session: DbSession, limit: int = Query(default=20, ge=1, le=100)
+) -> list[SweepResponse]:
+    rows = list(
+        (await session.scalars(select(BacktestSweep).order_by(BacktestSweep.created_at.desc()).limit(limit))).all()
+    )
+    return [_sweep_response(row) for row in rows]
+
+
+@router.get("/sweeps/{sweep_id}", response_model=SweepResponse)
+async def get_sweep(sweep_id: UUID, _: CurrentUser, session: DbSession) -> SweepResponse:
+    row = await session.get(BacktestSweep, sweep_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backtest sweep not found")
+    return _sweep_response(row)
+
+
+@router.post("/sweeps", response_model=SweepResponse, status_code=status.HTTP_201_CREATED)
+async def create_sweep(
+    request: SweepRequest,
+    app_settings: AppSettings,
+    session: DbSession,
+    user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> SweepResponse:
+    strategies = await _load_strategies(session)
+    base_strategy = next((item for item in strategies if item.id == request.strategy_id), None)
+    if base_strategy is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Base strategy was not found")
+    trading_setting = await session.get(ApplicationSetting, TRADING_KEY)
+    controls = TradingControls.model_validate(
+        trading_setting.value if trading_setting else DEFAULT_TRADING_CONTROLS
+    ).model_dump()
+    execution_setting = await session.get(ApplicationSetting, PAPER_EXECUTION_KEY)
+    execution_controls = PaperExecutionControls.model_validate(
+        execution_setting.value if execution_setting else DEFAULT_PAPER_EXECUTION_CONTROLS
+    )
+    by_instrument, benchmark = await _load_history(
+        session,
+        app_settings,
+        request.instrument_tokens,
+        request.timeframe_seconds,
+        request.start_date,
+        request.end_date,
+    )
+    try:
+        sweep_result = run_parameter_sweep(
+            base_strategy,
+            controls,
+            execution_controls,
+            app_settings,
+            by_instrument,
+            benchmark,
+            request.parameter_grid,
+            validation_fraction=request.validation_fraction,
+            maximum_combinations=app_settings.backtest_sweep_max_combinations,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    combinations = [item.as_dict() for item in sweep_result.combinations]
+    sweep = BacktestSweep(
+        created_by_user_id=user.id,
+        status="COMPLETED",
+        strategy_id=base_strategy.id,
+        strategy_snapshot=base_strategy.model_dump(mode="json"),
+        start_date=request.start_date,
+        end_date=request.end_date,
+        timeframe_seconds=request.timeframe_seconds,
+        validation_fraction=Decimal(str(request.validation_fraction)),
+        instrument_tokens=request.instrument_tokens,
+        parameter_grid=request.parameter_grid,
+        combination_count=len(combinations),
+        combinations=combinations,
+        best_index=sweep_result.best_index,
+    )
+    session.add(sweep)
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            event_type="backtest.sweep_completed",
+            metadata_json={"strategy_id": base_strategy.id, "combinations": len(combinations)},
+        )
+    )
+    await session.commit()
+    await session.refresh(sweep)
+    return _sweep_response(sweep)
+
+
+@router.post("/sweeps/{sweep_id}/promote", response_model=list[StrategyConfiguration])
+async def promote_sweep_combination(
+    sweep_id: UUID,
+    session: DbSession,
+    combination_index: int = Query(ge=0),
+    user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> list[StrategyConfiguration]:
+    sweep = await session.get(BacktestSweep, sweep_id)
+    if sweep is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backtest sweep not found")
+    combination = next((item for item in sweep.combinations if item["index"] == combination_index), None)
+    if combination is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Combination index is out of range")
+
+    strategy_fields = set(StrategyConfiguration.model_fields)
+    overrides = {key: value for key, value in combination["parameters"].items() if key in strategy_fields}
+    if not overrides:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="This combination only varies trading-control or indicator parameters, which are not "
+            "part of a strategy configuration and cannot be promoted here.",
+        )
+
+    strategies = await _load_strategies(session)
+    updated: list[StrategyConfiguration] = []
+    changed = False
+    for item in strategies:
+        if item.id != sweep.strategy_id:
+            updated.append(item)
+            continue
+        candidate = item.model_copy(update=overrides)
+        if candidate.model_dump(exclude={"version"}) != item.model_dump(exclude={"version"}):
+            candidate = candidate.model_copy(update={"version": item.version + 1})
+            changed = True
+        updated.append(candidate)
+
+    if not changed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="This combination matches the strategy's current parameters"
+        )
+    value = [item.model_dump() for item in updated]
+    setting = await session.get(ApplicationSetting, STRATEGIES_KEY)
+    if setting is None:
+        session.add(ApplicationSetting(key=STRATEGIES_KEY, value=value, updated_by_user_id=user.id))
+    else:
+        setting.value, setting.updated_by_user_id = value, user.id
+    sweep.promoted_index = combination_index
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            event_type="backtest.sweep_promoted",
+            metadata_json={"sweep_id": str(sweep.id), "combination_index": combination_index},
+        )
+    )
+    await session.commit()
+    return updated
 
 
 @router.get("/{run_id}", response_model=BacktestRunDetail)

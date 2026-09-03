@@ -298,6 +298,16 @@ Coverage: `tests/test_market_data_subscriptions.py`, strategy-default assertions
   between the halves ("lift"). Exposed at `GET /journal/score-analysis` and rendered as a table on the
   Journal workspace, so an operator can see which components actually predicted outcomes before
   changing their weights. It never tunes anything automatically.
+- **Backtest parameter sweep (done).** New `backtest_sweeps` table (Alembic `0018`).
+  `backtest_sweep.run_parameter_sweep` expands a parameter grid (strategy / trading-control / indicator
+  fields, capped at `BACKTEST_SWEEP_MAX_COMBINATIONS`), backtests each combination once, and splits the
+  trades by session date into an earlier in-sample block and a later validation block. Combinations are
+  ranked by validation return, so an in-sample-only fit ranks low; `best_index` is the top *proven*
+  combination (≥ 3 validation trades and positive validation return). `POST /backtests/sweeps`,
+  `GET /backtests/sweeps[/{id}]`, and admin `POST /backtests/sweeps/{id}/promote` which writes a
+  combination's strategy-level parameters into the `StrategyConfiguration` (bumping its version).
+  Sweep form + ranked results table with a promote action on the Backtesting workspace. Coverage in
+  `tests/test_backtest_sweep.py`.
 
 ## Phase 13 — Final QA
 
