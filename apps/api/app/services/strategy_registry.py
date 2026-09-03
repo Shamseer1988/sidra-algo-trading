@@ -8,6 +8,14 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ApplicationSetting
+from app.services.extra_strategies import (
+    EMA_MOMENTUM_VERSION,
+    RS_PULLBACK_VERSION,
+    VWAP_PULLBACK_VERSION,
+    evaluate_ema_momentum,
+    evaluate_rs_pullback,
+    evaluate_vwap_pullback,
+)
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_strategy import AWAITING, STRATEGY_VERSION, StrategyDecision, evaluate_orb_retest
 
@@ -46,13 +54,18 @@ class StrategyConfiguration(BaseModel):
     allowed_sides: list[str] = Field(default_factory=lambda: ["LONG", "SHORT"])
     allowed_sessions: list[str] = Field(default_factory=lambda: ["REGULAR"])
     max_trades_per_day: int = Field(default=2, ge=1, le=20)
+    max_trades_per_side: int | None = Field(default=None, ge=1, le=20)
     cooldown_minutes: int = Field(default=0, ge=0, le=240)
     risk_per_trade_percent: float | None = Field(default=None, gt=0, le=5)
-    minimum_score: int = Field(default=90, ge=0, le=100)
+    # Keep this aligned with settings.DEFAULT_TRADING_CONTROLS["minimum_score"]; a strategy
+    # may still override it upward/downward through effective_controls().
+    minimum_score: int = Field(default=80, ge=0, le=100)
     minimum_rr: float = Field(default=1.5, ge=1, le=10)
     volume_multiplier: float = Field(default=1.3, ge=0.5, le=10)
     retest_tolerance_percent: float = Field(default=0.15, ge=0.05, le=1)
     minimum_ema_spread_percent: float = Field(default=0.05, ge=0, le=5)
+    # Minimum |relative strength vs NIFTY| for the RS Pullback strategy; blank uses its built-in default.
+    rs_threshold_percent: float | None = Field(default=None, ge=0, le=10)
 
     @field_validator("universe")
     @classmethod
@@ -88,6 +101,8 @@ class StrategyConfiguration(BaseModel):
         }
         if self.risk_per_trade_percent is not None:
             values["risk_per_trade_percent"] = self.risk_per_trade_percent
+        if self.rs_threshold_percent is not None:
+            values["rs_threshold_percent"] = self.rs_threshold_percent
         return values
 
     def snapshot(self, base_controls: dict) -> dict:
@@ -109,10 +124,57 @@ class OrbRetestDefinition:
     )
 
     def evaluate(self, candle, indicators, benchmark, controls, configuration, prior_state) -> StrategyDecision:
-        decision = evaluate_orb_retest(candle, indicators, benchmark, controls, prior_state)
-        if decision.side and decision.side not in configuration.allowed_sides:
-            return StrategyDecision(next_state=AWAITING, reason=f"{decision.side.title()} signals are disabled")
-        return decision
+        return _direction_gated(
+            evaluate_orb_retest(candle, indicators, benchmark, controls, prior_state), configuration
+        )
+
+
+class VwapPullbackDefinition:
+    metadata = StrategyMetadata(
+        identifier=VWAP_PULLBACK_VERSION,
+        name="VWAP Pullback",
+        implementation_version=VWAP_PULLBACK_VERSION,
+        prerequisites=("completed candle", "VWAP", "EMA", "ATR", "volume", "market regime"),
+    )
+
+    def evaluate(self, candle, indicators, benchmark, controls, configuration, prior_state) -> StrategyDecision:
+        return _direction_gated(
+            evaluate_vwap_pullback(candle, indicators, benchmark, controls, prior_state), configuration
+        )
+
+
+class EmaMomentumDefinition:
+    metadata = StrategyMetadata(
+        identifier=EMA_MOMENTUM_VERSION,
+        name="EMA Momentum",
+        implementation_version=EMA_MOMENTUM_VERSION,
+        prerequisites=("completed candle", "opening range", "VWAP", "EMA", "ATR", "volume"),
+    )
+
+    def evaluate(self, candle, indicators, benchmark, controls, configuration, prior_state) -> StrategyDecision:
+        return _direction_gated(
+            evaluate_ema_momentum(candle, indicators, benchmark, controls, prior_state), configuration
+        )
+
+
+class RsPullbackDefinition:
+    metadata = StrategyMetadata(
+        identifier=RS_PULLBACK_VERSION,
+        name="Relative-Strength Pullback",
+        implementation_version=RS_PULLBACK_VERSION,
+        prerequisites=("completed candle", "EMA", "ATR", "relative strength", "market regime"),
+    )
+
+    def evaluate(self, candle, indicators, benchmark, controls, configuration, prior_state) -> StrategyDecision:
+        return _direction_gated(
+            evaluate_rs_pullback(candle, indicators, benchmark, controls, prior_state), configuration
+        )
+
+
+def _direction_gated(decision: StrategyDecision, configuration: "StrategyConfiguration") -> StrategyDecision:
+    if decision.side and decision.side not in configuration.allowed_sides:
+        return StrategyDecision(next_state=AWAITING, reason=f"{decision.side.title()} signals are disabled")
+    return decision
 
 
 DEFAULT_STRATEGIES = [StrategyConfiguration(id="orb-retest-default", name="ORB Retest — Default").model_dump()]
@@ -121,7 +183,12 @@ DEFAULT_STRATEGIES = [StrategyConfiguration(id="orb-retest-default", name="ORB R
 class StrategyRegistry:
     """Maps persisted strategy types to deterministic implementations."""
 
-    _definitions: dict[str, StrategyDefinition] = {STRATEGY_VERSION: OrbRetestDefinition()}
+    _definitions: dict[str, StrategyDefinition] = {
+        STRATEGY_VERSION: OrbRetestDefinition(),
+        VWAP_PULLBACK_VERSION: VwapPullbackDefinition(),
+        EMA_MOMENTUM_VERSION: EmaMomentumDefinition(),
+        RS_PULLBACK_VERSION: RsPullbackDefinition(),
+    }
 
     @classmethod
     def definition(cls, strategy_type: str) -> StrategyDefinition:

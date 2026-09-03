@@ -5,6 +5,7 @@ Revises: 0008_scanner_evaluations
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0009_strategy_snapshots"
@@ -14,8 +15,13 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("paper_signals", sa.Column("strategy_snapshot", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")))
-    op.add_column("scanner_evaluations", sa.Column("strategy_snapshot", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")))
+    op.add_column(
+        "paper_signals", sa.Column("strategy_snapshot", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json"))
+    )
+    op.add_column(
+        "scanner_evaluations",
+        sa.Column("strategy_snapshot", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")),
+    )
 
 
 def downgrade() -> None:

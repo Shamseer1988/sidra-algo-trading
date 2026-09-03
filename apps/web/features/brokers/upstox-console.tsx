@@ -2,14 +2,12 @@
 
 import {
   CheckCircle2,
-  Database,
   ExternalLink,
   KeyRound,
   Landmark,
   RefreshCw,
   ShieldCheck,
   TimerReset,
-  Wifi,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 

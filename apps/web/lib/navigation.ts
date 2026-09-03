@@ -27,6 +27,7 @@ export type WorkspaceId =
   | "overview"
   | "market"
   | "scanner"
+  | "universe"
   | "signals"
   | "strategies"
   | "orders"
@@ -59,6 +60,7 @@ export const navigationSections: NavigationSection[] = [
       { id: "overview", label: "Overview", icon: Activity, available: true },
       { id: "market", label: "Market", icon: CandlestickChart, available: true },
       { id: "scanner", label: "Scanner", icon: RadioTower, available: true },
+      { id: "universe", label: "Universe", icon: DatabaseZap, available: true },
       { id: "signals", label: "Signals", icon: BarChart3, available: true },
       { id: "strategies", label: "Strategies", icon: SlidersHorizontal, available: true },
       { id: "orders", label: "Orders", icon: ClipboardList, available: true },
@@ -108,6 +110,7 @@ export const workspaceMeta: Record<WorkspaceId, { eyebrow: string; title: string
   overview: { eyebrow: "Operations overview", title: "Paper command center" },
   market: { eyebrow: "Market intelligence", title: "Market state" },
   scanner: { eyebrow: "Scanner operations", title: "Scanner workspace" },
+  universe: { eyebrow: "Daily stock selection", title: "Scan universe" },
   signals: { eyebrow: "Paper scanner output", title: "Signals" },
   strategies: { eyebrow: "Paper scanner configuration", title: "Strategies" },
   orders: { eyebrow: "Execution workspace", title: "Orders" },

@@ -127,7 +127,7 @@ export function ScannerPanel({
     () =>
       items
         .filter((item) => {
-          const script = resolveScriptName(item.instrument_token).toLowerCase();
+          const script = (item.script_name || resolveScriptName(item.instrument_token)).toLowerCase();
           const token = item.instrument_token.toLowerCase();
           const strat = item.strategy_name.toLowerCase();
           const q = query.toLowerCase();
@@ -568,7 +568,7 @@ function ScannerRow({
   onSelect: (id: string) => void;
   onWatchlist: (instrument: string) => void;
 }) {
-  const script = resolveScriptName(item.instrument_token);
+  const script = (item.script_name || resolveScriptName(item.instrument_token));
   const snapshot = item.indicator_snapshot;
   const volume = valueAt(snapshot, "volume.relative_volume");
   const relative = valueAt(snapshot, "relative_strength.relative_strength_percent");
@@ -655,7 +655,7 @@ function ScannerRow({
 }
 
 function SetupInspector({ evaluation }: { evaluation: ScannerEvaluation }) {
-  const script = resolveScriptName(evaluation.instrument_token);
+  const script = (evaluation.script_name || resolveScriptName(evaluation.instrument_token));
   const [candles, setCandles] = useState<MarketCandle[]>([]);
 
   useEffect(() => {

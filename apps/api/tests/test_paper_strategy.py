@@ -10,7 +10,7 @@ CONTROLS = {
     "risk_per_trade_percent": 0.5,
     "maximum_daily_risk_percent": 1.0,
     "maximum_signals": 2,
-    "minimum_score": 90,
+    "minimum_score": 80,
     "minimum_rr": 1.5,
     "volume_multiplier": 1.3,
     "retest_tolerance_percent": 0.15,
@@ -23,7 +23,7 @@ INDICATORS = {
     "vwap": 105.0,
     "ema_fast": 111.0,
     "ema_slow": 106.0,
-    "volume": {"relative_volume": 1.5},
+    "volume": {"relative_volume": 3.0},
     "relative_strength": {"relative_strength_percent": 0.4},
 }
 NIFTY = {"nifty_regime": {"regime": "BULLISH"}}
@@ -61,14 +61,36 @@ def test_long_strategy_requires_breakout_then_retest_before_paper_signal() -> No
     assert confirmed.target_price > confirmed.entry_price
 
 
-def test_strategy_rejects_retest_when_market_confirmation_fails() -> None:
-    bearish_nifty = {"nifty_regime": {"regime": "BEARISH"}}
+def test_strategy_rejects_retest_when_market_conditions_fail() -> None:
+    hostile_regime = {"nifty_regime": {"regime": "BEARISH"}}
+    weak_stock = {**INDICATORS, "relative_strength": {"relative_strength_percent": -0.6}}
+    controls = {**CONTROLS, "minimum_score": 90}
     decision = evaluate_orb_retest(
-        candle(close="112", low="110.1", high="112.5"), INDICATORS, bearish_nifty, CONTROLS, LONG_BREAKOUT
+        candle(close="112", low="110.1", high="112.5"), weak_stock, hostile_regime, controls, LONG_BREAKOUT
     )
     assert decision.next_state == AWAITING
-    assert decision.score == 80
+    assert decision.reason == "Retest failed score threshold"
     assert decision.side is None
+    assert decision.score == 80
+    assert decision.score_breakdown["market_confirmation"] == 0
+
+
+def test_score_awards_partial_credit_for_marginal_confirmation() -> None:
+    controls = {**CONTROLS, "minimum_score": 0}
+    marginal = {
+        **INDICATORS,
+        "atr": 4.0,
+        "opening_range_atr": 1.0,
+        "volume": {"relative_volume": 1.35},  # barely over the 1.3 multiple
+        "relative_strength": {"relative_strength_percent": 0.1},  # weakly positive
+    }
+    decision = evaluate_orb_retest(
+        candle(close="112", low="110.1", high="112.5"), marginal, NIFTY, controls, LONG_BREAKOUT
+    )
+    breakdown = decision.score_breakdown
+    assert 0 < breakdown["volume_confirmation"] < 20  # partial, not all-or-nothing
+    assert 10 <= breakdown["market_confirmation"] < 20  # regime aligned, relative strength weak
+    assert breakdown["breakout_retest"] <= 20
 
 
 def test_strategy_rejects_choppy_ema_retest_and_candles_past_cutoff() -> None:
@@ -93,6 +115,49 @@ def test_strategy_rejects_choppy_ema_retest_and_candles_past_cutoff() -> None:
     )
 
 
+def test_risk_plan_widens_a_tight_stop_to_the_atr_floor() -> None:
+    controls = {
+        **CONTROLS,
+        "account_capital": 20_000.0,
+        "risk_per_trade_percent": 1.0,
+        "minimum_rr": 2.0,
+        "stop_atr_multiple": 1.5,
+        "min_stop_distance_percent": 0.5,
+        "maximum_open_exposure_percent": 100.0,
+        "intraday_leverage_enabled": True,
+        "intraday_leverage_multiplier": 5.0,
+    }
+    indicators = {**INDICATORS, "atr": 3.0}
+    decision = evaluate_orb_retest(
+        candle(close="112", low="110.1", high="112.5"), indicators, NIFTY, controls, LONG_BREAKOUT
+    )
+    assert decision.next_state == SIGNALLED
+    # Structural distance is ~2.165; the 1.5 x ATR (4.5) floor dominates.
+    assert decision.entry_price is not None and decision.stop_price is not None
+    assert decision.entry_price - decision.stop_price == Decimal("4.5")
+    assert decision.target_price == decision.entry_price + Decimal("9.0")  # RR 2.0
+    # Risk-budget quantity: floor((20000 * 1%) / 4.5) = 44; exposure cap is far higher.
+    assert decision.quantity == 44
+
+
+def test_risk_plan_exposure_cap_binds_before_the_risk_budget() -> None:
+    controls = {
+        **CONTROLS,
+        "account_capital": 5_000.0,
+        "risk_per_trade_percent": 5.0,
+        "maximum_open_exposure_percent": 100.0,
+        "intraday_leverage_enabled": False,
+        "stop_atr_multiple": 0.0,
+        "min_stop_distance_percent": 0.0,
+    }
+    decision = evaluate_orb_retest(
+        candle(close="112", low="110.1", high="112.5"), INDICATORS, NIFTY, controls, LONG_BREAKOUT
+    )
+    assert decision.next_state == SIGNALLED
+    # Risk budget allows ~115 shares, but 1x cash exposure of 5000 / 112 caps it at 44.
+    assert decision.quantity == 44
+
+
 def test_strategy_resets_unknown_state_and_handles_invalid_risk_plan() -> None:
     reset = evaluate_orb_retest(candle(close="111", low="110.8", high="112"), INDICATORS, NIFTY, CONTROLS, "CORRUPTED")
     assert reset.next_state == AWAITING
@@ -108,6 +173,18 @@ def test_strategy_resets_unknown_state_and_handles_invalid_risk_plan() -> None:
     assert no_risk.next_state == AWAITING
 
 
+def test_strategy_configuration_defaults_align_with_trading_controls() -> None:
+    from app.api.routes.settings import DEFAULT_TRADING_CONTROLS
+
+    default = StrategyConfiguration(name="Default ORB")
+    assert default.minimum_score == DEFAULT_TRADING_CONTROLS["minimum_score"]
+    # Per-side cap is opt-in; when unset the per-day cap is the only trade limit.
+    assert default.max_trades_per_side is None
+
+    capped = StrategyConfiguration(name="Long-limited ORB", max_trades_per_side=1)
+    assert capped.max_trades_per_side == 1
+
+
 def test_registry_configuration_overrides_global_strategy_parameters() -> None:
     strategy = StrategyConfiguration(
         name="Conservative ORB",
@@ -120,7 +197,7 @@ def test_registry_configuration_overrides_global_strategy_parameters() -> None:
     assert effective["minimum_score"] == 100
     assert effective["minimum_rr"] == 2.25
     assert effective["volume_multiplier"] == 1.8
-    assert CONTROLS["minimum_score"] == 90
+    assert CONTROLS["minimum_score"] == 80
 
 
 def test_versioned_registry_replays_orb_deterministically_with_an_immutable_snapshot() -> None:

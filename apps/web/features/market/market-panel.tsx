@@ -8,11 +8,10 @@ import {
   Search,
   ShieldAlert,
   ShieldCheck,
-  TriangleAlert,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 
-import type { DataQuality, MarketSession, Overview, ScannerStatus } from "../../components/api";
+import type { DataQuality, MarketRegime, MarketSession, Overview, ScannerStatus } from "../../components/api";
 import { formatIstTimestamp, statusTone, titleCase } from "../../lib/formatting";
 import { resolveScriptName } from "../../lib/instruments";
 
@@ -21,12 +20,14 @@ export function MarketPanel({
   quality,
   overview,
   scanner,
+  regime,
   onRefresh,
 }: {
   session: MarketSession | null;
   quality: DataQuality[];
   overview: Overview;
   scanner: ScannerStatus;
+  regime?: MarketRegime | null;
   onRefresh: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -74,6 +75,8 @@ export function MarketPanel({
           Refresh market state
         </button>
       </div>
+
+      {regime?.available && <MarketRegimeCard regime={regime} />}
 
       <div className="grid gap-4 lg:grid-cols-[.85fr_1.15fr]">
         <article className="panel p-5 sm:p-6">
@@ -333,5 +336,55 @@ function Metric({ label, value }: { label: string; value: string }) {
       <p className="text-[10px] font-bold uppercase tracking-[.14em] text-slate-500 dark:text-slate-400">{label}</p>
       <p className="mt-2 text-base font-semibold">{value}</p>
     </div>
+  );
+}
+
+function MarketRegimeCard({ regime }: { regime: MarketRegime }) {
+  const tone =
+    regime.regime === "RISK_ON" ? "status-good" : regime.regime === "RISK_OFF" ? "status-bad" : "status-watch";
+  const vix = regime.vix as { level?: number; state?: string } | null;
+  const breadth = regime.breadth as { ratio?: number; state?: string } | null;
+  return (
+    <article className="panel p-5 sm:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="eyebrow">Market regime</p>
+          <div className="mt-1 flex items-center gap-2">
+            <span className={`status-pill ${tone}`}>{(regime.regime ?? "NEUTRAL").replace("_", " ")}</span>
+            <span className="text-sm text-slate-500 dark:text-slate-400">{regime.reason}</span>
+          </div>
+        </div>
+        {!regime.enabled && (
+          <span className="text-[11px] font-semibold uppercase tracking-[.14em] text-slate-500">Advisory only</span>
+        )}
+      </div>
+      <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Metric label="Risk score" value={`${regime.score?.toFixed(0) ?? "—"} / 100`} />
+        <Metric
+          label="Allowed sides"
+          value={
+            regime.allow_long && regime.allow_short
+              ? "Long + Short"
+              : regime.allow_long
+                ? "Long only"
+                : regime.allow_short
+                  ? "Short only"
+                  : "Stand aside"
+          }
+        />
+        <Metric
+          label="Size multiplier"
+          value={regime.size_multiplier != null ? `${regime.size_multiplier.toFixed(2)}x` : "—"}
+        />
+        <Metric
+          label="India VIX"
+          value={vix?.level != null ? `${vix.level.toFixed(2)} · ${vix.state ?? ""}` : "Not streamed"}
+        />
+        <Metric
+          label="Breadth (above VWAP)"
+          value={breadth?.ratio != null ? `${(breadth.ratio * 100).toFixed(0)}% · ${breadth.state ?? ""}` : "—"}
+        />
+      </div>
+    </article>
   );
 }

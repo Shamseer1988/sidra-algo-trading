@@ -5,6 +5,7 @@ Revises: 0014_shadow_mode
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0015_assisted_approvals"

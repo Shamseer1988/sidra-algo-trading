@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from app.api.routes.events import SCANNER_EVENTS_CHANNEL
 from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
 from app.core.config import Settings
-from app.db.models import ApplicationSetting, PaperSignal, ScannerEvaluation, TelegramAlert
+from app.db.models import ApplicationSetting, PaperSignal, ScannerEvaluation, ScanUniverseEntry, TelegramAlert
 from app.db.session import SessionLocal
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_execution import PaperOrderManager
@@ -21,7 +21,7 @@ from app.services.safety import emergency_stop_state, paper_tracking_enabled
 from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 from app.services.telegram import TelegramError, TelegramNotificationService
 from app.services.telegram_config import configured_settings
-from app.services.trading_symbols import resolve_script_name
+from app.services.trading_symbols import resolve_symbol
 
 STATE_TTL_SECONDS = 60 * 60 * 18
 
@@ -34,6 +34,8 @@ class PaperScannerOrchestrator:
         self._redis = redis
         self._logger = structlog.get_logger("scanner.paper")
         self._benchmark_token = benchmark_token or settings.nifty_benchmark_token
+        self._benchmark_warned = False
+        self._universe: dict[str, object] = {"date": None, "tokens": frozenset()}
 
     def _state_key(self, candle: CompletedCandle, strategy: StrategyConfiguration) -> str:
         return (
@@ -53,23 +55,77 @@ class PaperScannerOrchestrator:
         except json.JSONDecodeError:
             return {}
 
-    async def _can_signal(self, candle: CompletedCandle, controls: dict) -> bool:
+    async def _market_regime(self) -> dict:
+        if not self._settings.market_regime_enabled:
+            return {}
+        raw = await self._redis.get("market:regime")
+        try:
+            return json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @staticmethod
+    def _regime_block_reason(regime: dict, side: str) -> str | None:
+        if not regime:
+            return None
+        if side == "LONG" and regime.get("allow_long") is False:
+            return f"Market regime blocks long entries ({regime.get('reason', 'risk-off')})"
+        if side == "SHORT" and regime.get("allow_short") is False:
+            return f"Market regime blocks short entries ({regime.get('reason', 'risk-on')})"
+        return None
+
+    async def _in_active_universe(self, candle: CompletedCandle) -> bool:
+        """When the dynamic universe is enabled, only score its selected instruments.
+
+        Fails open: an empty universe (not built yet today) scans everything, matching
+        the behaviour before the pre-open refresh runs.
+        """
+        if not self._settings.universe_enabled:
+            return True
+        if self._universe.get("date") != candle.session_date:
+            async with SessionLocal() as session:
+                rows = await session.scalars(
+                    select(ScanUniverseEntry.instrument_token).where(
+                        ScanUniverseEntry.session_date == candle.session_date,
+                        ScanUniverseEntry.selected.is_(True),
+                    )
+                )
+                self._universe = {"date": candle.session_date, "tokens": frozenset(rows.all())}
+        tokens = self._universe["tokens"]
+        return not tokens or candle.instrument_token in tokens
+
+    async def _tracking_active(self) -> bool:
+        """Function-level gates: paper tracking is on and no emergency stop is active.
+
+        These stop the scanner entirely. Per-signal quota limits live in
+        ``_signal_block_reason`` so evaluations are still recorded for the audit tape.
+        """
         if not await paper_tracking_enabled(self._redis):
             return False
-        if (await emergency_stop_state(self._redis)).get("active") == "true":
-            return False
+        return (await emergency_stop_state(self._redis)).get("active") != "true"
+
+    async def _signal_block_reason(
+        self,
+        candle: CompletedCandle,
+        strategy: StrategyConfiguration,
+        decision,
+        controls: dict,
+    ) -> str | None:
+        """Paper-only quota limits that block a *new signal* while still recording the evaluation.
+
+        Ordering: an account-wide daily ceiling, then the per-strategy daily cap, then the
+        optional per-strategy per-side cap, then the per-strategy cooldown.
+        """
+        latest = None
         async with SessionLocal() as session:
-            count = await session.scalar(
+            daily_signals = await session.scalar(
                 select(func.count(PaperSignal.id)).where(
                     PaperSignal.session_date == candle.session_date,
                     PaperSignal.status.notin_(["PAPER_RISK_REJECTED"]),
                 )
             )
-        return int(count or 0) < int(controls["maximum_signals"])
-
-    async def _strategy_limit_reason(self, candle: CompletedCandle, strategy: StrategyConfiguration) -> str | None:
-        """Return a paper-only configuration limit violation before recording a signal."""
-        async with SessionLocal() as session:
+            if int(daily_signals or 0) >= int(controls["maximum_signals"]):
+                return "Daily paper-signal ceiling reached"
             accepted = await session.scalar(
                 select(func.count(ScannerEvaluation.id)).where(
                     ScannerEvaluation.session_date == candle.session_date,
@@ -79,6 +135,17 @@ class PaperScannerOrchestrator:
             )
             if int(accepted or 0) >= strategy.max_trades_per_day:
                 return "Strategy maximum paper trades reached"
+            if strategy.max_trades_per_side and decision.side:
+                side_accepted = await session.scalar(
+                    select(func.count(ScannerEvaluation.id)).where(
+                        ScannerEvaluation.session_date == candle.session_date,
+                        ScannerEvaluation.strategy_id == strategy.id,
+                        ScannerEvaluation.status == "ACCEPTED",
+                        ScannerEvaluation.side == decision.side,
+                    )
+                )
+                if int(side_accepted or 0) >= strategy.max_trades_per_side:
+                    return f"Strategy maximum {decision.side.lower()} paper trades reached"
             if strategy.cooldown_minutes:
                 latest = await session.scalar(
                     select(func.max(ScannerEvaluation.candle_opened_at)).where(
@@ -259,9 +326,12 @@ class PaperScannerOrchestrator:
             return
 
         from zoneinfo import ZoneInfo
+
         ist = ZoneInfo("Asia/Kolkata")
         now_ist = datetime.now(UTC).astimezone(ist).strftime("%d-%b-%Y %I:%M:%S %p")
-        script_name = resolve_script_name(signal.instrument_token)
+        controls = await self._controls()
+        async with SessionLocal() as session:
+            script_name = await resolve_symbol(session, signal.instrument_token)
 
         entry = float(signal.entry_price)
         stop = float(signal.stop_price)
@@ -274,7 +344,12 @@ class PaperScannerOrchestrator:
         target_pct = (reward_pts / entry * 100) if entry > 0 else 0.0
         rr_ratio = (reward_pts / risk_pts) if risk_pts > 0 else 0.0
         total_val = entry * qty
-        margin_5x = total_val / 5.0
+        leverage = (
+            float(controls.get("intraday_leverage_multiplier", 5.0))
+            if controls.get("intraday_leverage_enabled", True)
+            else 1.0
+        )
+        margin_required = total_val / leverage if leverage > 0 else total_val
         risk_amount = float(signal.risk_amount or 0.0)
 
         side_icon = "🟢" if signal.side == "LONG" else "🔴"
@@ -291,7 +366,7 @@ class PaperScannerOrchestrator:
             f"🎯 <b>Target:</b> ₹{target:,.2f} ({'+' if signal.side == 'LONG' else '-'}{reward_pts:.2f} pts | {target_pct:.2f}%)\n"
             f"⚖️ <b>Risk : Reward:</b> 1 : {rr_ratio:.2f}\n\n"
             f"📦 <b>Quantity:</b> {qty:,} shares\n"
-            f"💰 <b>Total Exposure:</b> ₹{total_val:,.2f} (<i>5x Intraday Margin:</i> ₹{margin_5x:,.2f})\n"
+            f"💰 <b>Total Exposure:</b> ₹{total_val:,.2f} (<i>{leverage:g}x intraday margin ≈ ₹{margin_required:,.2f}</i>)\n"
             f"🛡️ <b>Risk Allocated:</b> ₹{risk_amount:,.2f}\n\n"
             f"⏰ <b>Time:</b> {now_ist} IST\n"
             "⚠️ <i>Paper tracking simulation — ready for confirmation.</i>"
@@ -340,69 +415,108 @@ class PaperScannerOrchestrator:
                 reason=quality.get("reason") if isinstance(quality, dict) else "Quality snapshot unavailable",
             )
             return
-        controls = await self._controls()
-        if not await self._can_signal(candle, controls):
+        if not await self._in_active_universe(candle):
             return
+        if not await self._tracking_active():
+            return
+        controls = await self._controls()
         nifty = await self._nifty_snapshot()
+        if not nifty and not self._benchmark_warned:
+            self._benchmark_warned = True
+            self._logger.warning(
+                "scanner.benchmark_snapshot_missing",
+                benchmark_token=self._benchmark_token,
+                detail=(
+                    "No NIFTY benchmark indicator snapshot is available; market-confirmation "
+                    "and relative-strength scoring will be degraded until the benchmark feeds."
+                ),
+            )
+        regime = await self._market_regime()
         async with SessionLocal() as session:
             strategies = await StrategyRegistry.enabled(session)
         for strategy in strategies:
-            effective_controls = strategy.effective_controls(controls)
-            strategy_snapshot = strategy.snapshot(controls)
-            state_key = self._state_key(candle, strategy)
-            prior_state = await self._redis.get(state_key) or AWAITING
-            decision = StrategyRegistry.evaluate(strategy, candle, indicators, nifty, effective_controls, prior_state)
-            if decision.next_state == SIGNALLED:
-                limit_reason = await self._strategy_limit_reason(candle, strategy)
-                if limit_reason:
-                    decision = decision.__class__(next_state=AWAITING, reason=limit_reason)
-            await self._redis.set(state_key, decision.next_state, ex=STATE_TTL_SECONDS)
-            evaluation = await self._record_evaluation(candle, indicators, strategy, decision, strategy_snapshot)
-            if evaluation:
-                await self._publish_evaluation(evaluation)
-            if decision.next_state != SIGNALLED or decision.side is None:
-                continue
-            signal = await self._record(candle, decision, indicators, strategy, strategy_snapshot)
-            if signal is None:
-                continue
             try:
-                risk = await PaperRiskEngine().reserve_signal(signal)
-                if not risk.allowed:
-                    await self._mark_signal_risk_block(signal, risk.reason)
-                    self._logger.info(
-                        "scanner.paper_signal_risk_rejected", signal_id=str(signal.id), reason=risk.reason
-                    )
-                    continue
-                await PaperOrderManager().queue_signal(signal)
+                await self._evaluate_strategy(candle, indicators, nifty, controls, strategy, regime)
             except Exception:
-                await self._mark_signal_risk_block(signal, "Paper risk reservation unavailable")
-                self._logger.exception("scanner.paper_order_queue_failed", signal_id=str(signal.id))
-                continue
-            await self._redis.set(
-                f"scanner:last_signal:{candle.instrument_token}",
-                json.dumps({"signal_id": str(signal.id), "at": datetime.now(UTC).isoformat()}),
-                ex=STATE_TTL_SECONDS,
+                self._logger.exception(
+                    "scanner.strategy_evaluation_failed",
+                    strategy_id=strategy.id,
+                    strategy_version=strategy.version,
+                    instrument_token=candle.instrument_token,
+                )
+
+    async def _evaluate_strategy(
+        self,
+        candle: CompletedCandle,
+        indicators: dict,
+        nifty: dict,
+        controls: dict,
+        strategy: StrategyConfiguration,
+        regime: dict | None = None,
+    ) -> None:
+        regime = regime or {}
+        effective_controls = strategy.effective_controls(controls)
+        multiplier = float(regime.get("size_multiplier", 1.0)) if regime else 1.0
+        if 0.0 < multiplier < 1.0:
+            effective_controls = {
+                **effective_controls,
+                "risk_per_trade_percent": effective_controls["risk_per_trade_percent"] * multiplier,
+            }
+        strategy_snapshot = strategy.snapshot(controls)
+        state_key = self._state_key(candle, strategy)
+        prior_state = await self._redis.get(state_key) or AWAITING
+        decision = StrategyRegistry.evaluate(strategy, candle, indicators, nifty, effective_controls, prior_state)
+        if decision.next_state == SIGNALLED:
+            block_reason = self._regime_block_reason(regime, decision.side or "") or await self._signal_block_reason(
+                candle, strategy, decision, controls
             )
-            await self._alert(signal)
-            await self._redis.publish(
-                SCANNER_EVENTS_CHANNEL,
-                json.dumps(
-                    {
-                        "type": "paper_signal",
-                        "signal_id": str(signal.id),
-                        "instrument_token": signal.instrument_token,
-                        "side": signal.side,
-                        "status": signal.status,
-                        "score": signal.score,
-                    }
-                ),
-            )
-            self._logger.info(
-                "scanner.paper_signal_recorded",
-                strategy_id=strategy.id,
-                strategy_version=strategy.version,
-                instrument_token=candle.instrument_token,
-                side=signal.side,
-                score=signal.score,
-                live_trading_enabled=False,
-            )
+            if block_reason:
+                decision = decision.__class__(next_state=AWAITING, reason=block_reason)
+        await self._redis.set(state_key, decision.next_state, ex=STATE_TTL_SECONDS)
+        evaluation = await self._record_evaluation(candle, indicators, strategy, decision, strategy_snapshot)
+        if evaluation:
+            await self._publish_evaluation(evaluation)
+        if decision.next_state != SIGNALLED or decision.side is None:
+            return
+        signal = await self._record(candle, decision, indicators, strategy, strategy_snapshot)
+        if signal is None:
+            return
+        try:
+            risk = await PaperRiskEngine().reserve_signal(signal)
+            if not risk.allowed:
+                await self._mark_signal_risk_block(signal, risk.reason)
+                self._logger.info("scanner.paper_signal_risk_rejected", signal_id=str(signal.id), reason=risk.reason)
+                return
+            await PaperOrderManager().queue_signal(signal)
+        except Exception:
+            await self._mark_signal_risk_block(signal, "Paper risk reservation unavailable")
+            self._logger.exception("scanner.paper_order_queue_failed", signal_id=str(signal.id))
+            return
+        await self._redis.set(
+            f"scanner:last_signal:{candle.instrument_token}",
+            json.dumps({"signal_id": str(signal.id), "at": datetime.now(UTC).isoformat()}),
+            ex=STATE_TTL_SECONDS,
+        )
+        await self._alert(signal)
+        await self._redis.publish(
+            SCANNER_EVENTS_CHANNEL,
+            json.dumps(
+                {
+                    "type": "paper_signal",
+                    "signal_id": str(signal.id),
+                    "instrument_token": signal.instrument_token,
+                    "side": signal.side,
+                    "status": signal.status,
+                    "score": signal.score,
+                }
+            ),
+        )
+        self._logger.info(
+            "scanner.paper_signal_recorded",
+            strategy_id=strategy.id,
+            strategy_version=strategy.version,
+            instrument_token=candle.instrument_token,
+            side=signal.side,
+            score=signal.score,
+            live_trading_enabled=False,
+        )

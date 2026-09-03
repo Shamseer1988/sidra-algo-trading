@@ -5,8 +5,9 @@ Revises: 0009_strategy_snapshots
 """
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0010_paper_execution"
 down_revision = "0009_strategy_snapshots"
@@ -25,7 +26,12 @@ def upgrade() -> None:
     op.create_table(
         "paper_orders",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("paper_signal_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("paper_signals.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "paper_signal_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("paper_signals.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("client_order_id", sa.String(length=180), nullable=False),
         sa.Column("instrument_token", sa.String(length=64), nullable=False),
         sa.Column("session_date", sa.Date(), nullable=False),
@@ -59,7 +65,12 @@ def upgrade() -> None:
     op.create_table(
         "paper_fills",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("paper_order_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("paper_orders.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "paper_order_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("paper_orders.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("fill_key", sa.String(length=220), nullable=False),
         sa.Column("instrument_token", sa.String(length=64), nullable=False),
         sa.Column("side", sa.String(length=10), nullable=False),
@@ -85,7 +96,12 @@ def upgrade() -> None:
     op.create_table(
         "paper_positions",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("paper_signal_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("paper_signals.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "paper_signal_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("paper_signals.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("instrument_token", sa.String(length=64), nullable=False),
         sa.Column("session_date", sa.Date(), nullable=False),
         sa.Column("strategy_version", sa.String(length=80), nullable=False),

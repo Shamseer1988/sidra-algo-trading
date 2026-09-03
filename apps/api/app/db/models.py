@@ -584,3 +584,59 @@ class ShadowOrder(TimestampMixin, Base):
     price_delta: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     compared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ScanUniverseEntry(Base):
+    """One ranked instrument in a session's dynamic scan universe.
+
+    The scanner only generates signals for ``selected`` instruments when
+    ``UNIVERSE_ENABLED`` is set; otherwise this table is advisory only.
+    """
+
+    __tablename__ = "scan_universe"
+    __table_args__ = (
+        UniqueConstraint("session_date", "instrument_token", name="uq_scan_universe_session_instrument"),
+        Index("ix_scan_universe_session_selected", "session_date", "selected"),
+        Index("ix_scan_universe_session_rank", "session_date", "rank"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    session_date: Mapped[date] = mapped_column(Date, index=True)
+    instrument_token: Mapped[str] = mapped_column(String(64), index=True)
+    rank: Mapped[int] = mapped_column(Integer, default=0)
+    score: Mapped[Decimal] = mapped_column(Numeric(8, 2), default=0)
+    selected: Mapped[bool] = mapped_column(default=False)
+    eligible: Mapped[bool] = mapped_column(default=True)
+    rejection_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    liquidity_score: Mapped[Decimal] = mapped_column(Numeric(8, 2), default=0)
+    volatility_score: Mapped[Decimal] = mapped_column(Numeric(8, 2), default=0)
+    gap_score: Mapped[Decimal] = mapped_column(Numeric(8, 2), default=0)
+    trend_score: Mapped[Decimal] = mapped_column(Numeric(8, 2), default=0)
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class BacktestSweep(TimestampMixin, Base):
+    """A parameter grid evaluated over one strategy with an out-of-sample holdout split."""
+
+    __tablename__ = "backtest_sweeps"
+    __table_args__ = (Index("ix_backtest_sweeps_created_status", "created_at", "status"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="COMPLETED", index=True)
+    strategy_id: Mapped[str] = mapped_column(String(100), index=True)
+    strategy_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    start_date: Mapped[date] = mapped_column(Date, index=True)
+    end_date: Mapped[date] = mapped_column(Date, index=True)
+    timeframe_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    validation_fraction: Mapped[Decimal] = mapped_column(Numeric(4, 3), default=Decimal("0.35"))
+    instrument_tokens: Mapped[list] = mapped_column(JSON, default=list)
+    parameter_grid: Mapped[dict] = mapped_column(JSON, default=dict)
+    combination_count: Mapped[int] = mapped_column(Integer, default=0)
+    combinations: Mapped[list] = mapped_column(JSON, default=list)
+    best_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    promoted_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    failure_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)

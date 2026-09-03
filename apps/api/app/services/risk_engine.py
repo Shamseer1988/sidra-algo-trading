@@ -74,7 +74,11 @@ class PaperRiskEngine:
                 start=Decimal("0"),
             )
             candidate_exposure = _decimal(signal.entry_price) * signal.quantity
-            leverage_mult = _decimal(controls.intraday_leverage_multiplier) if getattr(controls, "intraday_leverage_enabled", False) else Decimal("1.0")
+            leverage_mult = (
+                _decimal(controls.intraday_leverage_multiplier)
+                if getattr(controls, "intraday_leverage_enabled", False)
+                else Decimal("1.0")
+            )
             exposure_limit = (
                 _decimal(controls.account_capital)
                 * _decimal(controls.maximum_open_exposure_percent)

@@ -3,7 +3,7 @@
 import { Plus, Save, SlidersHorizontal } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { api, type PaperStrategy, type StrategyMetric } from "../../components/api";
+import { api, type PaperStrategy, type StrategyDefinition, type StrategyMetric } from "../../components/api";
 
 const editable = [
   "minimum_score",
@@ -16,6 +16,7 @@ const editable = [
 export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMessage: (message: string) => void }) {
   const [items, setItems] = useState<PaperStrategy[]>([]);
   const [metrics, setMetrics] = useState<StrategyMetric[]>([]);
+  const [definitions, setDefinitions] = useState<StrategyDefinition[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -27,13 +28,19 @@ export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMe
 
   useEffect(() => {
     void api.strategyMetrics().then(setMetrics).catch(() => setMetrics([]));
+    void api.strategyDefinitions().then(setDefinitions).catch(() => setDefinitions([]));
   }, []);
 
   const change = (id: string, key: keyof PaperStrategy, value: string | boolean) => {
     setItems((current) => current.map((item) => item.id === id ? { ...item, [key]: typeof item[key] === "number" ? Number(value) : value } : item));
   };
   const add = () => {
-    setItems((current) => current.length ? [...current, { ...current[0], id: crypto.randomUUID(), name: `ORB Retest ${current.length + 1}`, enabled: false, version: 1 }] : current);
+    setItems((current) => {
+      if (!current.length) return current;
+      const type = definitions[0]?.identifier ?? current[0].strategy_type;
+      const label = definitions[0]?.name ?? "Strategy";
+      return [...current, { ...current[0], id: crypto.randomUUID(), name: `${label} ${current.length + 1}`, strategy_type: type, enabled: false, version: 1 }];
+    });
   };
   const save = async () => {
     try {
@@ -60,7 +67,15 @@ export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMe
       <div className="mt-6 space-y-4">
         {loading ? <StrategySkeleton /> : items.map((item) => <article key={item.id} className="panel p-5">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-            <div className="min-w-0"><input aria-label={`Strategy name ${item.name}`} disabled={!isAdmin} className="field-input max-w-md font-medium" value={item.name} onChange={(event) => change(item.id, "name", event.target.value)} /><p className="mt-2 text-xs text-slate-500">{item.strategy_type} · version {item.version}</p></div>
+            <div className="min-w-0">
+              <input aria-label={`Strategy name ${item.name}`} disabled={!isAdmin} className="field-input max-w-md font-medium" value={item.name} onChange={(event) => change(item.id, "name", event.target.value)} />
+              <div className="mt-2 flex items-center gap-2 text-xs text-slate-500">
+                <select aria-label={`Strategy type ${item.name}`} disabled={!isAdmin || !definitions.length} className="field-input h-8 py-0 text-xs" value={item.strategy_type} onChange={(event) => change(item.id, "strategy_type", event.target.value)}>
+                  {(definitions.length ? definitions : [{ identifier: item.strategy_type, name: item.strategy_type, prerequisites: [] }]).map((def) => <option key={def.identifier} value={def.identifier}>{def.name}</option>)}
+                </select>
+                <span>version {item.version}</span>
+              </div>
+            </div>
             <label className="toggle-row"><input disabled={!isAdmin} type="checkbox" checked={item.enabled} onChange={(event) => change(item.id, "enabled", event.target.checked)} /><span>{item.enabled ? "Enabled" : "Paused"}</span></label>
           </div>
           <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{editable.map((key) => <label key={key} className="field-label">{key.replaceAll("_", " ")}<input disabled={!isAdmin} className="field-input mt-2" type="number" step="any" value={item[key]} onChange={(event) => change(item.id, key, event.target.value)} /></label>)}</div>
@@ -70,7 +85,9 @@ export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMe
             <label className="field-label">Session policy<select disabled={!isAdmin} className="field-input mt-2" value={item.allowed_sessions.includes("REGULAR") ? "REGULAR" : "DISABLED"} onChange={(event) => setItems((current) => current.map((value) => value.id === item.id ? { ...value, allowed_sessions: event.target.value === "REGULAR" ? ["REGULAR"] : [] } : value))}><option value="REGULAR">Regular NSE session</option><option value="DISABLED">No trading session</option></select></label>
             <label className="field-label">Risk per trade (%)<input disabled={!isAdmin} className="field-input mt-2" type="number" min="0.01" max="5" step="0.01" value={item.risk_per_trade_percent ?? ""} onChange={(event) => setItems((current) => current.map((value) => value.id === item.id ? { ...value, risk_per_trade_percent: event.target.value === "" ? null : Number(event.target.value) } : value))} /></label>
             <label className="field-label">Maximum trades/day<input disabled={!isAdmin} className="field-input mt-2" type="number" value={item.max_trades_per_day} onChange={(event) => change(item.id, "max_trades_per_day", event.target.value)} /></label>
+            <label className="field-label">Max trades/side (blank = no cap)<input disabled={!isAdmin} className="field-input mt-2" type="number" min="1" max="20" value={item.max_trades_per_side ?? ""} onChange={(event) => setItems((current) => current.map((value) => value.id === item.id ? { ...value, max_trades_per_side: event.target.value === "" ? null : Number(event.target.value) } : value))} /></label>
             <label className="field-label">Cooldown minutes<input disabled={!isAdmin} className="field-input mt-2" type="number" value={item.cooldown_minutes} onChange={(event) => change(item.id, "cooldown_minutes", event.target.value)} /></label>
+            {item.strategy_type === "rs-pullback-v1" && <label className="field-label">RS threshold % (blank = default)<input disabled={!isAdmin} className="field-input mt-2" type="number" min="0" max="10" step="0.05" value={item.rs_threshold_percent ?? ""} onChange={(event) => setItems((current) => current.map((value) => value.id === item.id ? { ...value, rs_threshold_percent: event.target.value === "" ? null : Number(event.target.value) } : value))} /></label>}
           </div>
         </article>)}
         {!loading && !items.length && <article className="empty-inset mt-6 text-center"><SlidersHorizontal className="mx-auto h-6 w-6 text-slate-500" /><p className="mt-3 text-sm text-slate-400">No persisted paper strategies are available.</p></article>}

@@ -46,6 +46,8 @@ def _settings() -> SimpleNamespace:
         ema_fast_period=9,
         ema_slow_period=21,
         volume_lookback_candles=20,
+        atr_period=14,
+        daily_history_sessions=40,
     )
 
 

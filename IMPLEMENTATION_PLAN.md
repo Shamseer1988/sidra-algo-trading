@@ -157,6 +157,158 @@ Remaining:
 
 - HTTPS reverse-proxy and certificate deployment, Windows deployment runbook, monitoring/backup/recovery operations, resource sizing, startup reconciliation, and production secret rotation. These require the target domain, network, and operator infrastructure choices.
 
+## Audit follow-up — P0 signal-quality fixes (in progress, started 3 September 2026)
+
+A full-application audit found the scanner could not reliably produce signals with the default
+configuration. P0 corrections:
+
+- **Signal path crash.** `PaperScannerOrchestrator` raised `UnboundLocalError` on `latest` whenever
+  a strategy reached `SIGNALLED` with `cooldown_minutes = 0` (the default). The quota check is now
+  `_signal_block_reason`, evaluated per SIGNALLED decision, with a safe default.
+- **Score ceiling.** `market_confirmation` scoring needs the NIFTY benchmark; when the index was not
+  streamed the maximum score was 80 while the strategy default `minimum_score` was 90, so no signal
+  could ever fire. `StrategyConfiguration.minimum_score` now defaults to 80 (matching
+  `DEFAULT_TRADING_CONTROLS`), and the live feed always subscribes the benchmark
+  (`feed_subscriptions` for Upstox and Firstock) with a `scanner.benchmark_snapshot_missing` warning.
+- **Universe starvation.** The account-wide `maximum_signals` limit short-circuited the whole
+  completed-candle handler, so once the ceiling was hit no further instruments were evaluated or
+  recorded. Evaluations are now always recorded; only signal creation is gated, through an ordered
+  set of limits: daily ceiling → per-strategy `max_trades_per_day` → optional per-strategy
+  `max_trades_per_side` → per-strategy cooldown.
+- **Batch isolation.** Each strategy evaluation for a completed candle runs in its own guarded
+  scope so one failing instrument cannot abort the batch or the market-data task.
+- **Backfill visibility.** Providers without intraday historical backfill (Firstock) now log
+  `scanner.no_intraday_backfill`; the data-quality gate already fails closed until session data is
+  complete.
+
+Coverage: `tests/test_market_data_subscriptions.py`, strategy-default assertions in
+`tests/test_paper_strategy.py`, and a database-backed `_signal_block_reason` regression in
+`tests/test_phase1_foundation.py`.
+
+## Audit follow-up — P1 signal-quality work (in progress, started 3 September 2026)
+
+### P1-a — Volatility and structure indicators (complete)
+
+- Added Wilder `atr`, `atr_percent`, volume-weighted `vwap_bands` (VWAP ±1σ/±2σ), `opening_range_atr`
+  (opening-range width in ATR units), and `extension_atr` (distance of close from VWAP in ATR units)
+  to `market_calculations`, and threaded them through `indicator_snapshot`, the live candle pipeline,
+  and the backtester. New `ATR_PERIOD` setting (default 14). Pure-function coverage added.
+- These fields are stored in every `ScannerEvaluation.indicator_snapshot` and are the inputs the
+  next scoring and universe-ranking passes consume.
+
+### P1-c — Volatility-aware stops and exposure-bounded sizing (complete)
+
+- `_risk_plan` now sets the stop to the widest of the structural distance, an ATR multiple
+  (`stop_atr_multiple`, default 1.1), and a minimum percent of price (`min_stop_distance_percent`,
+  default 0.35%). This removes the sub-tick "noise" stops that `retest_tolerance_percent` alone
+  produced.
+- Quantity is bounded by both the per-trade risk budget and the simulated account exposure ceiling
+  (`account_capital × maximum_open_exposure_percent × leverage`), so a signal is no longer created
+  only to be discarded by the risk engine for exceeding exposure.
+- Both new controls are editable from the settings workspace.
+
+### P1-b — Continuous weighted scoring (complete)
+
+- `_score` no longer returns binary 5×20 with an always-granted 20 for `breakout_retest`. Each of the
+  five components is now bounded partial credit (0-20), deterministic, still summing to 0-100 and still
+  keyed the same way so stored breakdowns and the failed-condition list are unchanged:
+  - `breakout_retest`: base credit plus reclaim strength beyond the level in ATR units, scaled down
+    when the opening range is a small fraction of ATR (no real range).
+  - `ema_alignment`: EMA direction stays a hard gate; separation beyond the choppy threshold is a bonus.
+  - `vwap_alignment`: wrong side of VWAP is still a hard zero; otherwise graded by VWAP-band position so
+    an overextended entry scores lower than one just above VWAP; capped when `extension_atr` is large.
+  - `volume_confirmation`: below the configured RVOL multiple is a hard zero; above it scales continuously
+    to full at twice the multiple.
+  - `market_confirmation`: NIFTY regime agreement plus relative-strength magnitude in the trade direction.
+- Missing inputs (no ATR yet, no benchmark snapshot, no volume baseline) award the affected component
+  full credit rather than zero, so scoring only tightens selection when the data is actually present.
+
+### P1-a2 — Daily history and time-of-day volume (complete)
+
+- On Upstox startup the worker also fetches recent completed daily candles (`backfill_daily_history`,
+  `DAILY_HISTORY_SESSIONS` default 40), stored in `market_candles` with `timeframe_seconds = 86400`.
+  The live 1-minute pipeline never reads that timeframe, so the two histories stay isolated.
+- `indicator_snapshot` gained `prior_day` (close/high/low), `gap_percent`, `daily_atr`,
+  `daily_atr_percent`, `distance_to_prior_high_atr`, `distance_to_prior_low_atr`, and `time_of_day_rvol`
+  (latest bar volume vs the average at the same IST minute over the last `RVOL_BASELINE_SESSIONS`
+  sessions — activates once that 1-minute history has accumulated).
+- The persistence service loads the daily candles and builds the time-of-day baseline once per
+  instrument per session (cached). The backtester derives the same daily candles from prior sessions
+  in its input, so live and historical evaluation stay on identical inputs.
+
+### P1-d — Dynamic scan universe (complete, opt-in)
+
+- New `scan_universe` table (Alembic `0017_scan_universe`) and `ScanUniverseEntry` model holding a
+  per-session ranked candidate list.
+- `services/universe.py` — a pure, deterministic `rank_universe` that screens the streamed
+  instruments on hard gates (daily history, liquidity floor, price band, ATR% band) and scores the
+  survivors on a liquidity / volatility / gap / momentum composite, plus `refresh_universe` which
+  reads persisted daily candles and today's first minute and upserts the result.
+- The scanner worker rebuilds the universe once per session after `UNIVERSE_REFRESH_TIME` (Upstox
+  only). `PaperScannerOrchestrator` skips instruments outside the selected set — but only when
+  `UNIVERSE_ENABLED` is true and the universe has been built; it fails open otherwise, so existing
+  deployments see no behaviour change until they opt in.
+- Protected `/universe`, `/universe/summary`, and admin `/universe/refresh` APIs, and a "Scan
+  universe" workspace showing the ranked selection, component scores, and screened-out candidates.
+- Settings: `UNIVERSE_ENABLED` (default false), `UNIVERSE_SIZE`, `UNIVERSE_REFRESH_TIME`, and the
+  liquidity / price / volatility gate bounds.
+
+### P1-e — Composite market regime (complete, opt-in)
+
+- Pure functions in `market_calculations`: `india_vix_state` (calm / normal / stressed / extreme),
+  `market_breadth` (fraction of tracked instruments above their VWAP), and `compose_market_regime`
+  which blends intraday NIFTY structure, NIFTY vs prior close, India VIX and breadth into a
+  RISK_ON / NEUTRAL / RISK_OFF regime with a 0-100 score, `allow_long` / `allow_short` gates, and a
+  `size_multiplier`.
+- `services/market_regime.py` keeps a per-session breadth marker in Redis (updated from every equity
+  snapshot) and, on each benchmark candle, reads the India VIX tick and the NIFTY snapshot and stores
+  `market:regime`. `indicator_snapshot` now also exposes `last_close`.
+- `PaperScannerOrchestrator` reads the regime and, when `MARKET_REGIME_ENABLED`: scales
+  `risk_per_trade_percent` by the size multiplier before evaluation and downgrades a signal whose
+  side the regime disallows (recorded on the evaluation with the reason). India VIX is force-added to
+  the Upstox feed when the regime is enabled.
+- Protected `GET /market-data/regime` and a regime card on the Market workspace (score, allowed
+  sides, size multiplier, VIX level/state, breadth).
+- Settings: `MARKET_REGIME_ENABLED` (default false), `UPSTOX_INDIA_VIX_KEY`, and the VIX
+  calm/stressed/extreme thresholds. Also fixed two pre-existing Ruff errors in
+  `api/routes/market_data.py` while editing it.
+
+### P2 (in progress)
+
+- **Symbol resolution & alert accuracy (done).** `trading_symbols` gained `resolve_script_names` /
+  `resolve_symbol`, which fall back to the persisted Upstox instrument master when the static table
+  and key parsing cannot name an instrument. Scanner signal/evaluation and universe API responses now
+  carry a `script_name`; the frontend prefers it. The Telegram signal alert uses the configured
+  intraday leverage multiplier instead of a hard-coded 5x.
+- **Additional strategies (done).** `paper_strategy.plan_trade` is now the shared, volatility-aware
+  entry/stop/target/quantity helper (ORB delegates to it). Two new deterministic state machines in
+  `extra_strategies.py`:
+  - **VWAP Pullback** (`vwap-pullback-v1`) — a controlled pullback to session VWAP inside an
+    EMA-defined trend, entered on the reclaim candle.
+  - **EMA Momentum** (`ema-momentum-v1`) — a fresh push through the opening range with a stacked
+    EMA / VWAP trend, rejected when already extended from VWAP.
+  - **Relative-Strength Pullback** (`rs-pullback-v1`) — a name outperforming NIFTY by at least
+    `rs_threshold_percent` (new optional `StrategyConfiguration` field, built-in default 0.3%), pulling
+    back to its fast EMA and reclaiming it.
+  All are registered in `StrategyRegistry`, share the versioned `StrategyConfiguration`, and are
+  selectable in the Strategies workspace (new `/settings/strategies/definitions` API, strategy-type
+  dropdown). Deterministic coverage in `tests/test_extra_strategies.py`.
+- **Score-component feedback (done).** `journal_analytics.analyse_score_components` splits resolved
+  paper signals at each score component's median and reports the difference in average realised R
+  between the halves ("lift"). Exposed at `GET /journal/score-analysis` and rendered as a table on the
+  Journal workspace, so an operator can see which components actually predicted outcomes before
+  changing their weights. It never tunes anything automatically.
+- **Backtest parameter sweep (done).** New `backtest_sweeps` table (Alembic `0018`).
+  `backtest_sweep.run_parameter_sweep` expands a parameter grid (strategy / trading-control / indicator
+  fields, capped at `BACKTEST_SWEEP_MAX_COMBINATIONS`), backtests each combination once, and splits the
+  trades by session date into an earlier in-sample block and a later validation block. Combinations are
+  ranked by validation return, so an in-sample-only fit ranks low; `best_index` is the top *proven*
+  combination (≥ 3 validation trades and positive validation return). `POST /backtests/sweeps`,
+  `GET /backtests/sweeps[/{id}]`, and admin `POST /backtests/sweeps/{id}/promote` which writes a
+  combination's strategy-level parameters into the `StrategyConfiguration` (bumping its version).
+  Sweep form + ranked results table with a promote action on the Backtesting workspace. Coverage in
+  `tests/test_backtest_sweep.py`.
+
 ## Phase 13 — Final QA
 
 - Complete backend, integration, load, recovery, browser, migration, Docker, dependency, and security gates.

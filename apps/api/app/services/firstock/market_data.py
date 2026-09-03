@@ -24,6 +24,19 @@ def configured_subscriptions(settings: Settings) -> list[str]:
     return [token.strip() for token in settings.firstock_subscriptions.split("|") if token.strip()]
 
 
+def feed_subscriptions(settings: Settings) -> list[str]:
+    """Subscription tokens, always including the NIFTY benchmark.
+
+    Relative strength and NIFTY regime scoring degrade to zero without the benchmark,
+    so it is force-included whenever at least one equity token is configured.
+    """
+    tokens = configured_subscriptions(settings)
+    benchmark = settings.nifty_benchmark_token
+    if tokens and benchmark and benchmark not in tokens:
+        return [benchmark, *tokens]
+    return tokens
+
+
 def parse_price(value: object) -> str | None:
     """Firstock V2 feed values are paise; retain precision as a decimal string."""
     try:
@@ -65,7 +78,7 @@ class FirstockMarketDataService:
         )
 
     async def _subscribe(self, websocket: Any) -> None:
-        tokens = configured_subscriptions(self._settings)
+        tokens = feed_subscriptions(self._settings)
         if not tokens:
             await self._state("CONNECTED", "Authenticated; no configured market-data subscriptions")
             return

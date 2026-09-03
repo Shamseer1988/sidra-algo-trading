@@ -5,8 +5,9 @@ Revises: 0011_risk_reservations
 """
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0012_backtesting"
 down_revision = "0011_risk_reservations"
@@ -18,7 +19,12 @@ def upgrade() -> None:
     op.create_table(
         "backtest_runs",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("created_by_user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "created_by_user_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("users.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
         sa.Column("status", sa.String(length=30), nullable=False, server_default="COMPLETED"),
         sa.Column("start_date", sa.Date(), nullable=False),
         sa.Column("end_date", sa.Date(), nullable=False),
@@ -48,7 +54,12 @@ def upgrade() -> None:
     op.create_table(
         "backtest_trades",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("run_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("backtest_runs.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "run_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("backtest_runs.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("trade_key", sa.String(length=220), nullable=False),
         sa.Column("strategy_id", sa.String(length=100), nullable=False),
         sa.Column("strategy_name", sa.String(length=120), nullable=False),

@@ -22,7 +22,7 @@ def test_health_response_contract() -> None:
 
 def test_default_trading_controls_are_valid_and_paper_safe() -> None:
     controls = TradingControls.model_validate(DEFAULT_TRADING_CONTROLS)
-    assert controls.minimum_score == 90
+    assert controls.minimum_score == 80
     assert controls.minimum_rr >= 1.5
     assert controls.trade_start_time == "09:24"
 
