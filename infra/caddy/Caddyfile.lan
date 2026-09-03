@@ -1,0 +1,30 @@
+# Self-signed HTTPS for a LAN address (no public ACME). Used only with
+# docker-compose.lan-https.yml. Set LAN_HTTPS_HOST in .env to the machine's LAN IP
+# or hostname (e.g. 192.168.150.35, or "192.168.150.35 sidra.lan" for both).
+
+{
+	auto_https disable_redirects
+	admin off
+}
+
+https://{$LAN_HTTPS_HOST} {
+	tls internal
+
+	encode zstd gzip
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	# Caddy upgrades WebSocket connections (the scanner event stream) automatically.
+	reverse_proxy web:3000 {
+		header_up Host {host}
+		header_up X-Forwarded-Proto https
+	}
+}
+
+http://{$LAN_HTTPS_HOST} {
+	redir https://{host}{uri} permanent
+}

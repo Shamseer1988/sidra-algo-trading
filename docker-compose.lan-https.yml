@@ -1,0 +1,37 @@
+# Opt-in self-signed HTTPS for LAN access. The terminal is served at
+# https://${LAN_HTTPS_HOST} with a certificate from Caddy's internal CA, so
+# browsers on other devices get a secure context (crypto.randomUUID, wss, etc.).
+#
+#   1. In .env set:
+#        LAN_HTTPS_HOST=192.168.150.35        # this machine's LAN IP (or a hostname)
+#        WEB_BIND_HOST=127.0.0.1              # keep the raw web port loopback-only
+#        WEB_ORIGIN=https://192.168.150.35
+#        PUBLIC_APP_URL=https://192.168.150.35
+#   2. docker compose -f docker-compose.yml -f docker-compose.lan-https.yml up -d
+#   3. Trust the root CA on each device (see README / caddy_lan_data:/data/caddy/pki).
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 15s
+    environment:
+      LAN_HTTPS_HOST: ${LAN_HTTPS_HOST:?Set LAN_HTTPS_HOST to this machine's LAN IP or hostname, e.g. 192.168.150.35}
+    depends_on:
+      web: { condition: service_healthy }
+    ports:
+      - "${LAN_HTTPS_BIND:-0.0.0.0}:443:443"
+      - "${LAN_HTTPS_BIND:-0.0.0.0}:80:80"
+    volumes:
+      - ./infra/caddy/Caddyfile.lan:/etc/caddy/Caddyfile:ro
+      - caddy_lan_data:/data
+      - caddy_lan_config:/config
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    pids_limit: 128
+    networks: [edge]
+
+volumes:
+  caddy_lan_data:
+  caddy_lan_config:
