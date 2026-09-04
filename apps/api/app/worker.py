@@ -52,6 +52,9 @@ async def run() -> None:
     active_broker: str | None = None
     active_token: str | None = None
     market_data_started_at: float | None = None
+    market_data_catchup_done = False
+    active_persistence: MarketCalculationPersistenceService | None = None
+    active_benchmark: str | None = None
     last_heartbeat = 0.0
     last_heartbeat_log = 0.0
     last_instrument_check = 0.0
@@ -208,6 +211,9 @@ async def run() -> None:
                         service.run_forever(), name=f"{selected_broker.lower()}-feed"
                     )
                     market_data_started_at = now
+                    market_data_catchup_done = selected_broker != "UPSTOX"
+                    active_persistence = persistence
+                    active_benchmark = benchmark
                     active_broker = selected_broker
                     logger.info("scanner.market_data_started", provider=selected_broker, benchmark=benchmark)
                 elif requested_state != "RUNNING" and market_data_task and not market_data_task.done():
@@ -226,6 +232,32 @@ async def run() -> None:
 
                 if aggregation is not None:
                     await aggregation.flush_expired()
+
+                if (
+                    not market_data_catchup_done
+                    and market_data_task is not None
+                    and not market_data_task.done()
+                    and market_data_started_at is not None
+                    and now - market_data_started_at >= 150
+                    and active_persistence is not None
+                ):
+                    # A mid-session (re)start leaves a 1-2 candle seam: the intraday
+                    # backfill lags the last closed minute, and the live feed only
+                    # captures buckets after the websocket connects. Once the feed has
+                    # been stable for a bit, re-run the (idempotent) intraday backfill
+                    # to fill that gap before the data-quality gate locks the session.
+                    market_data_catchup_done = True
+                    try:
+                        filled = await backfill_today_candles(
+                            settings,
+                            active_persistence,
+                            access_token=current_token,
+                            benchmark_key=active_benchmark,
+                            calendar=calendar,
+                        )
+                        logger.info("scanner.market_data_catchup_backfill", candles=filled)
+                    except Exception as exc:
+                        logger.warning("scanner.market_data_catchup_failed", error=str(exc))
 
                 if settings.universe_enabled and requested_state == "RUNNING" and selected_broker == "UPSTOX":
                     market_now = datetime.now(UTC)
