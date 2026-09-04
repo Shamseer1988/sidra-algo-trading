@@ -115,6 +115,33 @@ async def test_worker_restart_and_candle_deduplication():
 
 
 @pytest.mark.asyncio
+async def test_candle_not_completed_twice_when_flush_races_rollover():
+    """A completing candle must not be emitted by both consume() rollover and flush_expired()."""
+    emitted: list[CompletedCandle] = []
+    holder: dict[str, CandleAggregationService] = {}
+
+    async def on_candle(candle: CompletedCandle):
+        emitted.append(candle)
+        # Re-enter flush_expired mid-completion, exactly as the worker loop would if it
+        # interleaved with the market-data feed task at this await point.
+        await holder["aggregator"].flush_expired(now=datetime(2026, 8, 31, 3, 46, 30, tzinfo=UTC))
+
+    aggregator = CandleAggregationService(60, on_candle)
+    holder["aggregator"] = aggregator
+
+    base_time = datetime(2026, 8, 31, 3, 45, tzinfo=UTC)
+    for i in range(60):  # fill the 03:45 candle
+        await aggregator.consume(MarketTick("NSE:26000", Decimal("100"), 100 + i, base_time + timedelta(seconds=i)))
+    assert emitted == []
+
+    # First tick of the 03:46 bucket triggers the rollover completion of 03:45.
+    await aggregator.consume(MarketTick("NSE:26000", Decimal("101"), 200, base_time + timedelta(seconds=60)))
+
+    assert len(emitted) == 1
+    assert emitted[0].opened_at == base_time
+
+
+@pytest.mark.asyncio
 async def test_signal_and_alert_deduplication_idempotency():
     """Verify that signal generation and Telegram alert recording are strictly idempotent."""
     opened_at = datetime(2026, 8, 31, 4, 2, tzinfo=UTC)  # 09:32 Asia/Kolkata
