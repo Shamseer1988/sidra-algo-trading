@@ -248,6 +248,13 @@ async def run() -> None:
                     logger.info("scanner.worker_heartbeat", status=requested_state, provider=active_broker)
                     last_heartbeat_log = now
 
+                if loop_backoff.failures and market_data_backoff.failures == 0:
+                    # A prior iteration failed and published DEGRADED; the loop has since
+                    # recovered and market-data is healthy, so clear the stale state.
+                    with contextlib.suppress(Exception):
+                        await _publish_worker_state(
+                            redis, "RUNNING", "Scanner worker recovered after a transient error", 0
+                        )
                 loop_backoff.reset()
                 await asyncio.sleep(2)
             except asyncio.CancelledError:

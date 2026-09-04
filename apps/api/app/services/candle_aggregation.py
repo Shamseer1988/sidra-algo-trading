@@ -8,6 +8,7 @@ from decimal import Decimal
 
 from redis.asyncio import Redis
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import Settings
 from app.db.models import MarketCandle, MarketIndicatorSnapshot
@@ -159,7 +160,8 @@ class CandleAggregationService:
             )
             return
         if bucket > current.opened_at:
-            await self._on_completed(current.complete())
+            # Replace the open candle before awaiting so a concurrent flush_expired()
+            # cannot pop and complete this same candle during the await.
             self._open[tick.instrument_token] = _OpenCandle(
                 instrument_token=tick.instrument_token,
                 opened_at=bucket,
@@ -171,6 +173,7 @@ class CandleAggregationService:
                 volume=volume_delta,
                 tick_count=1,
             )
+            await self._on_completed(current.complete())
             return
         current.update(tick, volume_delta)
 
@@ -383,7 +386,14 @@ class MarketCalculationPersistenceService:
                     values=values,
                 )
             )
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Another completion of this same candle bucket (a late tick racing
+                # flush_expired, or backfill racing the live feed) already persisted
+                # the snapshot. That path handles Redis/outcomes/notification.
+                await session.rollback()
+                return
         await self._redis.set(
             f"market:indicator:{candle.instrument_token}",
             json.dumps(values),
