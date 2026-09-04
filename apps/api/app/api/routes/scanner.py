@@ -116,7 +116,7 @@ async def get_scanner_status(redis: Redis) -> ScannerStatus:
     descriptions = {
         "STOPPED": "Scanner is paused; no market data or signals are processed.",
         "STARTING": "Scanner startup has been requested.",
-        "RUNNING": "Worker is active; completed-candle calculations begin when Firstock market data is configured.",
+        "RUNNING": "Worker is active. Completed-candle calculations run each minute once a market-data connector is streaming.",
         "DEGRADED": "Scanner needs attention.",
     }
     return ScannerStatus(
