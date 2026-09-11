@@ -1,7 +1,7 @@
 """add paper signal journal outcomes
 
 Revision ID: 0007_paper_signal_outcomes
-Revises: 0006_upstox_oauth_and_instruments
+Revises: 0006_upstox_oauth_instruments
 """
 
 import sqlalchemy as sa
@@ -10,7 +10,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "0007_paper_signal_outcomes"
-down_revision = "0006_upstox_oauth_and_instruments"
+down_revision = "0006_upstox_oauth_instruments"
 branch_labels = None
 depends_on = None
 

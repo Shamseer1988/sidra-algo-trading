@@ -1,6 +1,6 @@
 """add encrypted Upstox credential and instrument refresh records
 
-Revision ID: 0006_upstox_oauth_and_instruments
+Revision ID: 0006_upstox_oauth_instruments
 Revises: 0005_paper_strategy_signals
 Create Date: 2026-08-31
 """
@@ -10,7 +10,7 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision = "0006_upstox_oauth_and_instruments"
+revision = "0006_upstox_oauth_instruments"
 down_revision = "0005_paper_strategy_signals"
 branch_labels = None
 depends_on = None
