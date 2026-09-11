@@ -21,8 +21,8 @@ venv/
 
 # Local data and logs
 logs/
-backups/*.sql
-backups/*.dump
+*.log
+backups/*
 !backups/.gitkeep
 
 # Editors and OS files

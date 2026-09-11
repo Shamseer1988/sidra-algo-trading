@@ -54,6 +54,9 @@ fi
 # backups/ looking like a usable one.
 gzip -c "$TMP" > "$OUT"
 rm -f "$TMP"
+# The dump carries users.password_hash and broker_credentials.encrypted_access_token.
+# Both are protected at rest, but the shared folder is world-readable by default.
+chmod 600 "$OUT"
 log "OK $OUT ($SIZE bytes uncompressed)"
 
 find backups -name 'intraday-sentinel-*.sql.gz' -mtime "+$KEEP_DAYS" -delete
