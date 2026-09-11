@@ -17,7 +17,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    role = sa.Enum("ADMIN", "TRADER", "VIEWER", name="user_role")
+    role = postgresql.ENUM("ADMIN", "TRADER", "VIEWER", name="user_role", create_type=False)
     role.create(op.get_bind(), checkfirst=True)
     op.create_table(
         "users",
