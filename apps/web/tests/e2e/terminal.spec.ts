@@ -428,6 +428,8 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     // In Viewer mode, settings form inputs must be disabled and Save button not rendered
     const input = page.locator('input[type="number"]').first();
     await expect(input).toBeDisabled();
+    // A viewer must not be able to hand a live order path to themselves.
+    await expect(page.getByLabel("Approval mode")).toBeDisabled();
     await expect(page.getByRole("button", { name: "Save controls" })).toHaveCount(0);
   });
 
@@ -507,7 +509,13 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
 
     // Navigate to Settings
     await page.click('button:has-text("Settings")');
-    await expect(page.getByRole("heading", { name: "Paper risk controls" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Paper risk & strategy controls" })).toBeVisible();
+
+    // The live approval mode is a fixed set of choices, never a free-text field,
+    // and a system that has not been switched on must read as disabled.
+    const approvalMode = page.getByLabel("Approval mode");
+    await expect(approvalMode).toHaveValue("DISABLED");
+    await expect(page.getByText("Disabled — no live order path is offered.")).toBeVisible();
 
     // Save controls
     const saveBtn = page.getByRole("button", { name: "Save controls" });
@@ -564,7 +572,9 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByRole("heading", { name: "Backtesting lab", exact: true })).toBeVisible();
     await expect(page.getByText("Historical replay uses only completed candles")).toBeVisible();
     await expect(page.getByText("₹1,250").first()).toBeVisible();
-    await expect(page.getByText("ORB Retest — Default", { exact: true })).toBeVisible();
+    // Scoped to the strategy-comparison row: the same name also appears as an
+    // option in the sweep form, and the point of this assertion is the results table.
+    await expect(page.getByRole("cell", { name: "ORB Retest — Default v1" })).toBeVisible();
   });
 
   test("5f. Assisted trading: paper-only approval is visible and cannot imply broker submission", async ({ page }) => {

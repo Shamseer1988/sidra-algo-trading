@@ -23,6 +23,7 @@ export function SettingsPanel({
   onNavigate?: (id: WorkspaceId) => void;
 }) {
   const isLeverageEnabled = Boolean(controls.intraday_leverage_enabled ?? true);
+  const approvalMode = controls.execution_approval_mode ?? "DISABLED";
 
   return (
     <section>
@@ -37,6 +38,46 @@ export function SettingsPanel({
       </div>
 
       <form onSubmit={onSave} className="panel mt-6 max-w-5xl p-5 sm:p-7 space-y-6">
+        {/* Live Execution Approval Mode */}
+        <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 p-4 sm:p-5">
+          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="rounded bg-amber-500/20 px-2 py-0.5 text-xs font-bold text-amber-300 border border-amber-500/30">
+                  Live Execution
+                </span>
+                <h4 className="text-sm font-semibold text-white">Order approval mode</h4>
+              </div>
+              <p className="mt-1.5 text-xs leading-5 text-slate-300">
+                Who authorises an order before it reaches the broker. This setting alone never enables live
+                trading: every submission still has to pass the live readiness gates, and the system remains
+                paper-only until those gates open.
+              </p>
+              <p className="mt-1.5 text-xs leading-5 text-amber-200/80">
+                {approvalMode === "DISABLED"
+                  ? "Disabled — no live order path is offered."
+                  : approvalMode === "TELEGRAM_APPROVAL"
+                    ? "Telegram approval — each order waits for your explicit reply before submission."
+                    : "Automatic — orders would submit without a per-order confirmation."}
+              </p>
+            </div>
+
+            <label className="field-label whitespace-nowrap">
+              Approval mode
+              <select
+                disabled={!isAdmin}
+                value={approvalMode}
+                onChange={(event) => onChange("execution_approval_mode", event.target.value)}
+                className="field-input mt-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono text-sm"
+              >
+                <option value="DISABLED">Disabled</option>
+                <option value="TELEGRAM_APPROVAL">Telegram approval</option>
+                <option value="AUTOMATIC">Automatic</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
         {/* Intraday Leverage Option */}
         <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-4 sm:p-5">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -70,7 +111,7 @@ export function SettingsPanel({
         {/* Core Controls Grid */}
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {Object.entries(controls)
-            .filter(([key]) => !["intraday_leverage_enabled", "intraday_leverage_multiplier"].includes(key))
+            .filter(([key]) => !["intraday_leverage_enabled", "intraday_leverage_multiplier", "execution_approval_mode"].includes(key))
             .map(([key, value]) => (
               <label key={key} className="field-label capitalize">
                 {key.replaceAll("_", " ")}

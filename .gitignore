@@ -31,3 +31,7 @@ backups/*
 .idea/
 Thumbs.db
 .DS_Store
+
+# Playwright run artifacts
+apps/web/test-results/
+apps/web/playwright-report/
