@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     firstock_user_id: str | None = None
     firstock_password: str | None = None
     firstock_totp_secret: str | None = None
+    # Firstock documents 10 requests/second. Stay under it so reconciliation
+    # traffic can never consume the budget an emergency cancel needs.
+    firstock_rate_limit_per_second: float = Field(default=8.0, gt=0, le=10)
     firstock_subscriptions: str = ""
     nifty_benchmark_token: str = "NSE:26000"
 
