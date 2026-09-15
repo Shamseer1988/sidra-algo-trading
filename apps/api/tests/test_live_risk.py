@@ -1,0 +1,215 @@
+"""Per-order live authorisation.
+
+Only one outcome here is dangerous: authorising something that should have been
+refused. These tests are weighted accordingly — the happy path is a single case,
+and every other test proves a refusal.
+"""
+
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
+
+from app.services.firstock.orders import FirstockApiError, FirstockTransportUnknown
+from app.services.live_risk import RECONCILIATION_MAX_AGE, authorize_live_order
+
+ORDER = {
+    "exchange": "NSE",
+    "product": "C",
+    "price_type": "LMT",
+    "trading_symbol": "IDEA-EQ",
+    "transaction_type": "B",
+    "price": "418",
+    "quantity": "1",
+}
+
+
+class FakeSession:
+    def __init__(self, reconciliation: object | None = None) -> None:
+        self._reconciliation = reconciliation
+
+    async def scalar(self, _query: object) -> object | None:
+        return self._reconciliation
+
+    async def execute(self, _query: object) -> object:
+        return object()
+
+
+def reconciliation(*, safe: bool = True, age: timedelta = timedelta(minutes=1)) -> SimpleNamespace:
+    return SimpleNamespace(
+        safe_to_trade=safe,
+        detail="blocked: untracked broker order" if not safe else "clean",
+        created_at=datetime.now(UTC) - age,
+    )
+
+
+class FakeClient:
+    def __init__(self, margin: dict | None = None, raises: Exception | None = None) -> None:
+        self._margin = margin if margin is not None else {"availableMargin": "50000", "marginOnNewOrder": "418"}
+        self._raises = raises
+
+    async def order_margin(self, **_kwargs: object) -> dict:
+        if self._raises:
+            raise self._raises
+        return self._margin
+
+
+def readiness(ready: bool):
+    """Stand in for inspect_live_readiness, which is closed by construction today."""
+
+    async def _inspect(_session: object, _settings: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            overall_ready=ready,
+            gates=[SimpleNamespace(key="broker_adapter", passed=ready)],
+        )
+
+    return _inspect
+
+
+def check(decision, key: str):
+    return next(item for item in decision.checks if item.key == key)
+
+
+# Distinguishes "caller said nothing" from "caller said there is no record",
+# since None is itself a meaningful value for recon.
+_UNSET = object()
+
+
+async def authorize(monkeypatch, *, ready=True, mode="AUTOMATIC", recon=_UNSET, client=None, **overrides):
+    monkeypatch.setattr("app.services.live_risk.inspect_live_readiness", readiness(ready))
+    payload = {**ORDER, **overrides}
+    return await authorize_live_order(
+        FakeSession(reconciliation() if recon is _UNSET else recon),
+        SimpleNamespace(),
+        client or FakeClient(),
+        approval_mode=mode,
+        **payload,
+    )
+
+
+async def test_every_gate_passing_authorises(monkeypatch: pytest.MonkeyPatch) -> None:
+    decision = await authorize(monkeypatch)
+    assert decision.authorized is True
+    assert decision.reason == "Authorised"
+    assert decision.failures == []
+
+
+async def test_readiness_gate_alone_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This is the state the repository ships in, and it must deny."""
+    decision = await authorize(monkeypatch, ready=False)
+    assert decision.authorized is False
+    assert check(decision, "live_readiness").passed is False
+
+
+@pytest.mark.parametrize("mode", ["DISABLED", "", "disabled", "something-else"])
+async def test_only_the_two_documented_modes_permit_submission(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    decision = await authorize(monkeypatch, mode=mode)
+    assert decision.authorized is False
+    assert check(decision, "approval_mode").passed is False
+
+
+@pytest.mark.parametrize("mode", ["TELEGRAM_APPROVAL", "AUTOMATIC", "  automatic  "])
+async def test_permitted_modes_are_case_and_whitespace_tolerant(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    decision = await authorize(monkeypatch, mode=mode)
+    assert check(decision, "approval_mode").passed is True
+
+
+async def test_no_reconciliation_ever_recorded_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    decision = await authorize(monkeypatch, recon=None)
+    assert decision.authorized is False
+    assert check(decision, "reconciliation").passed is False
+
+
+async def test_blocked_reconciliation_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    decision = await authorize(monkeypatch, recon=reconciliation(safe=False))
+    assert decision.authorized is False
+    assert "untracked broker order" in check(decision, "reconciliation").detail
+
+
+async def test_stale_reconciliation_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pass from an hour ago describes an account that may since have changed."""
+    stale = reconciliation(age=RECONCILIATION_MAX_AGE + timedelta(minutes=1))
+    decision = await authorize(monkeypatch, recon=stale)
+    assert decision.authorized is False
+    assert "old" in check(decision, "reconciliation").detail
+
+
+async def test_naive_reconciliation_timestamp_is_handled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Postgres can hand back a naive datetime; comparing it must not raise."""
+    naive = SimpleNamespace(
+        safe_to_trade=True,
+        detail="clean",
+        created_at=datetime.now(UTC).replace(tzinfo=None),
+    )
+    decision = await authorize(monkeypatch, recon=naive)
+    assert check(decision, "reconciliation").passed is True
+
+
+async def test_insufficient_broker_margin_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeClient({"availableMargin": "100", "marginOnNewOrder": "418"})
+    decision = await authorize(monkeypatch, client=client)
+    assert decision.authorized is False
+    assert check(decision, "broker_margin").passed is False
+
+
+async def test_success_envelope_with_insufficient_remark_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The documented response reports shortfalls in remarks, not in the status."""
+    client = FakeClient({"availableMargin": "50000", "marginOnNewOrder": "418", "remarks": "Insufficient balance"})
+    decision = await authorize(monkeypatch, client=client)
+    assert decision.authorized is False
+    assert "Insufficient balance" in check(decision, "broker_margin").detail
+
+
+async def test_unreadable_margin_refuses_rather_than_assuming_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient({"availableMargin": "n/a", "marginOnNewOrder": "418"})
+    decision = await authorize(monkeypatch, client=client)
+    assert decision.authorized is False
+    assert check(decision, "broker_margin").passed is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [FirstockTransportUnknown("timeout"), FirstockApiError("bad", code="400", name="BAD_REQUEST", field="x")],
+)
+async def test_margin_call_failure_refuses(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    decision = await authorize(monkeypatch, client=FakeClient(raises=error))
+    assert decision.authorized is False
+    assert check(decision, "broker_margin").passed is False
+
+
+@pytest.mark.parametrize("quantity", ["0", "-5", "", "abc", "1.5", None])
+async def test_non_positive_or_unparseable_quantity_refuses(monkeypatch: pytest.MonkeyPatch, quantity: object) -> None:
+    """A risk engine that raises is a risk engine that cannot say no."""
+    decision = await authorize(monkeypatch, quantity=quantity)
+    assert decision.authorized is False
+    assert check(decision, "quantity").passed is False
+
+
+async def test_all_checks_run_so_an_operator_sees_every_objection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decision = await authorize(
+        monkeypatch,
+        ready=False,
+        mode="DISABLED",
+        recon=None,
+        client=FakeClient({"availableMargin": "1", "marginOnNewOrder": "9999"}),
+        quantity="0",
+    )
+    assert decision.authorized is False
+    assert {item.key for item in decision.failures} == {
+        "live_readiness",
+        "approval_mode",
+        "reconciliation",
+        "quantity",
+        "broker_margin",
+    }
+
+
+async def test_snapshot_is_serialisable_for_the_audit_trail(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    decision = await authorize(monkeypatch, ready=False)
+    assert json.loads(json.dumps(decision.snapshot()))["authorized"] is False

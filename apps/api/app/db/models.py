@@ -561,6 +561,10 @@ class ExecutionReconciliation(Base):
     external_orders: Mapped[int] = mapped_column(Integer, default=0)
     unknown_orders: Mapped[int] = mapped_column(Integer, default=0)
     detail: Mapped[str] = mapped_column(String(255))
+    # Evidence behind the verdict: which broker order was untracked, which position
+    # unexplained. An operator deciding whether to override a block needs this.
+    findings: Mapped[list] = mapped_column(JSON, default=list)
+    safe_to_trade: Mapped[bool] = mapped_column(default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 

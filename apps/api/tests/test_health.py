@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from app.api.routes import health as health_routes
 from app.api.routes.health import DependencyHealth, HealthResponse
@@ -25,6 +26,33 @@ def test_default_trading_controls_are_valid_and_paper_safe() -> None:
     assert controls.minimum_score == 80
     assert controls.minimum_rr >= 1.5
     assert controls.trade_start_time == "09:24"
+
+
+def test_execution_approval_mode_ships_disabled() -> None:
+    """The live path must be off in a freshly installed system."""
+    assert TradingControls.model_validate(DEFAULT_TRADING_CONTROLS).execution_approval_mode == "DISABLED"
+
+
+def test_settings_absent_from_the_database_still_default_to_disabled() -> None:
+    """A stored row written before this field existed must not read as enabled."""
+    stored = {key: value for key, value in DEFAULT_TRADING_CONTROLS.items() if key != "execution_approval_mode"}
+    assert TradingControls.model_validate(stored).execution_approval_mode == "DISABLED"
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [("automatic", "AUTOMATIC"), ("  telegram_approval  ", "TELEGRAM_APPROVAL"), ("Disabled", "DISABLED")],
+)
+def test_execution_approval_mode_is_normalised(given: str, expected: str) -> None:
+    controls = TradingControls.model_validate({**DEFAULT_TRADING_CONTROLS, "execution_approval_mode": given})
+    assert controls.execution_approval_mode == expected
+
+
+@pytest.mark.parametrize("given", ["", "ENABLED", "yes", "AUTO", "TELEGRAM"])
+def test_unrecognised_execution_approval_mode_is_rejected(given: str) -> None:
+    """A typo must fail loudly rather than fall through to something permissive."""
+    with pytest.raises(ValidationError):
+        TradingControls.model_validate({**DEFAULT_TRADING_CONTROLS, "execution_approval_mode": given})
 
 
 def test_firstock_paise_price_normalization() -> None:

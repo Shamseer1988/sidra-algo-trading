@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession, require_roles
@@ -13,6 +13,9 @@ from app.services.strategy_registry import (
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 TRADING_KEY = "trading_controls"
+
+# Who authorises a live submission. DISABLED means no live path is offered at all.
+EXECUTION_APPROVAL_MODES = frozenset({"DISABLED", "TELEGRAM_APPROVAL", "AUTOMATIC"})
 DEFAULT_TRADING_CONTROLS = {
     "account_capital": 10000.0,
     "risk_per_trade_percent": 1.0,
@@ -31,6 +34,7 @@ DEFAULT_TRADING_CONTROLS = {
     "trade_cutoff_time": "14:45",
     "intraday_leverage_enabled": True,
     "intraday_leverage_multiplier": 5.0,
+    "execution_approval_mode": "DISABLED",
 }
 
 
@@ -54,6 +58,19 @@ class TradingControls(BaseModel):
     trade_cutoff_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     intraday_leverage_enabled: bool = Field(default=True)
     intraday_leverage_multiplier: float = Field(default=5.0, ge=1.0, le=10.0)
+    # How a live order reaches the broker, once a live path exists at all.
+    # DISABLED is the default and the only value that is safe by construction:
+    # the other two describe who authorises submission, not whether submission is
+    # permitted, which remains governed by the live readiness gates.
+    execution_approval_mode: str = Field(default="DISABLED")
+
+    @field_validator("execution_approval_mode")
+    @classmethod
+    def validate_approval_mode(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in EXECUTION_APPROVAL_MODES:
+            raise ValueError(f"execution_approval_mode must be one of {sorted(EXECUTION_APPROVAL_MODES)}")
+        return normalized
 
 
 class StrategyMetric(BaseModel):
