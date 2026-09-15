@@ -46,6 +46,10 @@ class LiveRiskCheck:
     key: str
     passed: bool
     detail: str
+    # Structured facts behind the verdict, for callers that need the numbers
+    # rather than the sentence. Parsing them back out of ``detail`` would be a
+    # fragility worth avoiding: the prose is for operators, this is for code.
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -141,13 +145,15 @@ async def _margin_check(
     available = _decimal(data.get("availableMargin"))
     if required is None or available is None:
         return LiveRiskCheck("broker_margin", False, "Broker margin response was not readable.")
+
+    numbers = {"required": str(required), "available": str(available)}
     if required > available:
-        return LiveRiskCheck("broker_margin", False, f"Order needs {required} against {available} available.")
+        return LiveRiskCheck("broker_margin", False, f"Order needs {required} against {available} available.", numbers)
 
     remarks = str(data.get("remarks") or "").strip()
     if remarks and "insufficient" in remarks.lower():
-        return LiveRiskCheck("broker_margin", False, f"Broker reported: {remarks}")
-    return LiveRiskCheck("broker_margin", True, f"Broker margin {available} covers {required}.")
+        return LiveRiskCheck("broker_margin", False, f"Broker reported: {remarks}", numbers)
+    return LiveRiskCheck("broker_margin", True, f"Broker margin {available} covers {required}.", numbers)
 
 
 async def authorize_live_order(

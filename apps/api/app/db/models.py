@@ -644,3 +644,56 @@ class BacktestSweep(TimestampMixin, Base):
     best_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     promoted_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     failure_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class LiveShadowDecision(Base):
+    """What the live path would have done with a paper signal, without doing it.
+
+    One row per paper signal. The point of the table is the refusals: a run of
+    these against real broker responses, gathered while still trading on paper,
+    is the only evidence available before real money that the live path would
+    have worked. An authorisation rate well below the paper fill rate means the
+    live system is not the paper system, and it is far cheaper to learn that
+    here.
+
+    Nothing writes to this table as a result of a submission, because Phase 3
+    submits nothing.
+    """
+
+    __tablename__ = "live_shadow_decisions"
+    __table_args__ = (
+        UniqueConstraint("paper_signal_id", name="uq_live_shadow_decisions_paper_signal"),
+        Index("ix_live_shadow_decisions_created_authorized", "created_at", "authorized"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    paper_signal_id: Mapped[UUID] = mapped_column(
+        ForeignKey("paper_signals.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    oms_order_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("oms_orders.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    instrument_token: Mapped[str] = mapped_column(String(64), index=True)
+
+    # The order as it would have been addressed at the broker. Null whenever the
+    # symbol could not be resolved, which is itself a recorded outcome.
+    translation_status: Mapped[str] = mapped_column(String(20), default="UNRESOLVED", index=True)
+    trading_symbol: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    exchange: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    product: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    price_type: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    transaction_type: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    quantity: Mapped[int] = mapped_column(Integer, default=0)
+    price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+
+    authorized: Mapped[bool] = mapped_column(default=False, index=True)
+    # The first refusal an operator should read, and the full check list behind it.
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    failed_checks: Mapped[list] = mapped_column(JSON, default=list)
+    decision_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    approval_mode: Mapped[str] = mapped_column(String(30), default="DISABLED")
+    broker_margin_required: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    broker_margin_available: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

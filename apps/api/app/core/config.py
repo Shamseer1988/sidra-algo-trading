@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     # traffic can never consume the budget an emergency cancel needs.
     firstock_rate_limit_per_second: float = Field(default=8.0, gt=0, le=10)
     firstock_subscriptions: str = ""
+    # Live shadow mode: evaluate the live path against every paper signal and
+    # record the verdict. It reads broker state and submits nothing, but it does
+    # spend broker API calls, so it stays off until deliberately enabled.
+    live_shadow_enabled: bool = False
+    # How long a Firstock login is reused before re-authenticating. Kept short
+    # because a jKey that expires early degrades into recorded margin refusals
+    # rather than an obvious failure.
+    live_shadow_session_ttl_minutes: int = Field(default=30, ge=1, le=240)
     nifty_benchmark_token: str = "NSE:26000"
 
     upstox_access_token: str | None = None

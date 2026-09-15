@@ -8,8 +8,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.db.models import ApplicationSetting, PaperFill, PaperOrder, PaperPosition, PaperSignal
 from app.db.session import SessionLocal
+from app.services.live_shadow_runner import run_live_shadow
 from app.services.market_calculations import CompletedCandle
 from app.services.oms import PaperOmsGateway
 
@@ -112,6 +114,10 @@ class PaperOrderManager:
                 )
             )
             await session.commit()
+        # After the paper order is durable, and outside its transaction: record
+        # what the live path would have decided about this same signal. Reads
+        # broker state, submits nothing, and cannot raise into paper execution.
+        await run_live_shadow(get_settings(), signal, oms_order.id)
 
     async def _controls(self, session: AsyncSession) -> PaperExecutionControls:
         setting = await session.get(ApplicationSetting, PAPER_EXECUTION_KEY)

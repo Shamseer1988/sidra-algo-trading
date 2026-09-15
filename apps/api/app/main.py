@@ -16,6 +16,7 @@ from app.api.routes import (
     health,
     journal,
     live,
+    live_shadow,
     market_data,
     oms,
     paper,
@@ -150,4 +151,5 @@ app.include_router(oms.router, prefix="/api/v1")
 app.include_router(shadow.router, prefix="/api/v1")
 app.include_router(assisted.router, prefix="/api/v1")
 app.include_router(live.router, prefix="/api/v1")
+app.include_router(live_shadow.router, prefix="/api/v1")
 app.include_router(universe.router, prefix="/api/v1")

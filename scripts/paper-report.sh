@@ -46,4 +46,16 @@ docker compose exec -T postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_D
         round(sum(brokerage), 2)       as brokerage
    from paper_fills;" \
 -c "\echo === STILL OPEN ===" \
--c "select status, count(*) from paper_positions group by 1 order by 2 desc;"'
+-c "select status, count(*) from paper_positions group by 1 order by 2 desc;" \
+-c "\echo === LIVE SHADOW (what the live path would have decided; nothing was submitted) ===" \
+-c "select count(*)                                    as evaluated,
+        count(*) filter (where authorized)             as would_authorize,
+        count(*) filter (where translation_status <> '''RESOLVED''') as unmapped_symbols,
+        round(100.0 * count(*) filter (where authorized)
+              / nullif(count(*),0), 1)                 as authorize_pct
+   from live_shadow_decisions;" \
+-c "\echo === LIVE SHADOW REFUSALS (which gate said no, most frequent first) ===" \
+-c "select check_key, count(*)
+   from live_shadow_decisions, jsonb_array_elements_text(failed_checks::jsonb) as check_key
+  where not authorized
+  group by 1 order by 2 desc;"'

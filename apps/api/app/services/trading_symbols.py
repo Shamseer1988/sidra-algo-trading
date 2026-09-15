@@ -80,7 +80,7 @@ def resolve_script_name(instrument_token: str) -> str:
     return instrument_token
 
 
-async def _instrument_master_symbols(session: AsyncSession) -> dict[str, str]:
+async def instrument_master_symbols(session: AsyncSession) -> dict[str, str]:
     """trading_symbol for every key in the most recent persisted Upstox instrument master."""
     latest = await session.scalar(
         select(InstrumentMasterRefresh)
@@ -101,7 +101,7 @@ async def resolve_script_names(session: AsyncSession, tokens: Iterable[str]) -> 
     result = {token: resolve_script_name(token) for token in tokens}
     unresolved = {token for token, name in result.items() if name == token}
     if unresolved:
-        master = await _instrument_master_symbols(session)
+        master = await instrument_master_symbols(session)
         for token in unresolved:
             if token in master:
                 result[token] = master[token]
