@@ -1,9 +1,14 @@
-"""Live readiness gates.
+"""Live readiness gates, now that a submission adapter exists.
 
-The report is what an operator reads to decide whether the system may go live,
-so the property under test is that each gate describes the system as it actually
-is. A gate that reads green for a condition nobody checked is the failure mode
-worth writing tests against.
+Before Phase 4 this report was advisory: nothing could place an order whatever
+it said. It is now the thing that decides whether an administrator may arm live
+trading, so each gate has to describe a condition somebody satisfied rather than
+a state of the codebase.
+
+The distinction these tests protect is between ``ready_for_activation`` — every
+precondition met, so a person may arm it — and ``overall_ready``, which
+additionally requires that they have. Conflating them is a deadlock: an
+activation would be needed before an activation could be granted.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -11,21 +16,26 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.db.models import ExecutionReconciliation, LiveActivation
 from app.services import live_readiness
 
 
 class FakeSession:
-    """Only the two calls readiness makes: a health probe and one scalar query."""
+    """Answers the two scalar queries readiness makes, by entity rather than order."""
 
-    def __init__(self, reconciliation: object | None = None) -> None:
-        self._reconciliation = reconciliation
+    def __init__(self, reconciliation: object | None = None, activation: object | None = None) -> None:
+        self._by_entity = {
+            ExecutionReconciliation: reconciliation,
+            LiveActivation: activation,
+        }
         self.added: list[object] = []
 
     async def execute(self, _query: object) -> object:
         return object()
 
-    async def scalar(self, _query: object) -> object | None:
-        return self._reconciliation
+    async def scalar(self, query: object) -> object | None:
+        entity = query.column_descriptions[0]["entity"]
+        return self._by_entity.get(entity)
 
     def add(self, value: object) -> None:
         self.added.append(value)
@@ -42,18 +52,17 @@ class FakeRedis:
         return None
 
 
-def settings() -> SimpleNamespace:
-    """Every attestation a configuration file can assert, asserted."""
+def settings(*, live: bool = True) -> SimpleNamespace:
     return SimpleNamespace(
-        application_mode="PAPER",
-        live_trading_enabled=False,
+        application_mode="LIVE" if live else "PAPER",
+        live_trading_enabled=live,
         live_compliance_approved=True,
         live_static_ip_verified=True,
         redis_url="redis://unused",
     )
 
 
-def live_reconciliation(*, safe: bool = True, age: timedelta = timedelta(minutes=1)) -> SimpleNamespace:
+def reconciliation(*, safe: bool = True, age: timedelta = timedelta(minutes=1)) -> SimpleNamespace:
     return SimpleNamespace(
         safe_to_trade=safe,
         detail="blocked: untracked broker order" if not safe else "clean",
@@ -61,67 +70,116 @@ def live_reconciliation(*, safe: bool = True, age: timedelta = timedelta(minutes
     )
 
 
-async def inspect(monkeypatch: pytest.MonkeyPatch, reconciliation: object | None = None):
+def activation(*, expired: bool = False, revoked: bool = False) -> SimpleNamespace:
+    return SimpleNamespace(
+        expires_at=datetime.now(UTC) + (timedelta(minutes=-1) if expired else timedelta(hours=2)),
+        revoked_at=datetime.now(UTC) if revoked else None,
+    )
+
+
+async def inspect(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    recon: object | None = None,
+    armed: object | None = None,
+    live: bool = True,
+):
     monkeypatch.setattr(live_readiness.Redis, "from_url", lambda *_args, **_kwargs: FakeRedis())
-    report = await live_readiness.inspect_live_readiness(FakeSession(reconciliation), settings())  # type: ignore[arg-type]
+    report = await live_readiness.inspect_live_readiness(
+        FakeSession(recon, armed),  # type: ignore[arg-type]
+        settings(live=live),
+    )
     return report, {gate.key: gate for gate in report.gates}
 
 
-async def test_the_system_stays_locked_with_every_attestation_granted(
+# --- the two readiness questions -----------------------------------------
+
+
+async def test_everything_met_but_unarmed_is_ready_to_arm_and_not_ready_to_trade(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No configuration can open the lock, because the lock is about code."""
-    report, gates = await inspect(monkeypatch, live_reconciliation())
-    assert report.status == "HARD_LOCKED"
+    """The distinction the whole activation flow rests on."""
+    report, gates = await inspect(monkeypatch, recon=reconciliation(), armed=None)
+    assert report.ready_for_activation is True
     assert report.overall_ready is False
-    assert gates["broker_adapter"].passed is False
     assert gates["administrator_activation"].passed is False
-    assert report.snapshot()["broker_submission_permitted"] is False
 
 
-async def test_gates_that_became_true_now_report_true(monkeypatch: pytest.MonkeyPatch) -> None:
-    """These two described a system without a live-execution layer. It has one now."""
-    _, gates = await inspect(monkeypatch, live_reconciliation())
-    assert gates["live_risk_engine"].passed is True
-    assert gates["external_reconciliation"].passed is True
+async def test_armed_and_everything_met_is_ready_to_trade(monkeypatch: pytest.MonkeyPatch) -> None:
+    report, _ = await inspect(monkeypatch, recon=reconciliation(), armed=activation())
+    assert report.overall_ready is True
+    assert report.status == "READY"
 
 
-async def test_no_live_reconciliation_fails_the_reconciliation_gate(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _, gates = await inspect(monkeypatch, None)
+async def test_overall_readiness_is_derived_from_the_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Derived, so a gate nobody wired in cannot leave the report claiming readiness."""
+    report, gates = await inspect(monkeypatch, recon=reconciliation(), armed=activation())
+    assert report.overall_ready == all(gate.passed for gate in gates.values())
+
+
+# --- runtime configuration ------------------------------------------------
+
+
+async def test_a_paper_runtime_is_not_ready_for_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    report, gates = await inspect(monkeypatch, recon=reconciliation(), armed=activation(), live=False)
+    assert report.overall_ready is False
+    assert report.ready_for_activation is False
+    assert gates["runtime_mode"].passed is False
+    assert "APPLICATION_MODE is PAPER" in gates["runtime_mode"].detail
+    assert "LIVE_TRADING_ENABLED is false" in gates["runtime_mode"].detail
+
+
+# --- reconciliation -------------------------------------------------------
+
+
+async def test_no_live_reconciliation_blocks_activation(monkeypatch: pytest.MonkeyPatch) -> None:
+    report, gates = await inspect(monkeypatch, recon=None, armed=activation())
     assert gates["external_reconciliation"].passed is False
-    assert "No live reconciliation" in gates["external_reconciliation"].detail
+    assert report.ready_for_activation is False
 
 
-async def test_a_blocked_live_reconciliation_fails_the_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    _, gates = await inspect(monkeypatch, live_reconciliation(safe=False))
+async def test_a_blocked_live_reconciliation_blocks_activation(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, gates = await inspect(monkeypatch, recon=reconciliation(safe=False), armed=activation())
     assert gates["external_reconciliation"].passed is False
     assert "untracked broker order" in gates["external_reconciliation"].detail
 
 
-async def test_a_stale_live_reconciliation_fails_the_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    stale = live_reconciliation(age=live_readiness.RECONCILIATION_FRESHNESS + timedelta(minutes=1))
-    _, gates = await inspect(monkeypatch, stale)
+async def test_a_stale_live_reconciliation_blocks_activation(monkeypatch: pytest.MonkeyPatch) -> None:
+    stale = reconciliation(age=live_readiness.RECONCILIATION_FRESHNESS + timedelta(minutes=1))
+    _, gates = await inspect(monkeypatch, recon=stale, armed=activation())
     assert gates["external_reconciliation"].passed is False
     assert "minutes old" in gates["external_reconciliation"].detail
 
 
 async def test_a_naive_reconciliation_timestamp_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Postgres can return a naive datetime; comparing it must not explode."""
     naive = SimpleNamespace(safe_to_trade=True, detail="clean", created_at=datetime.now(UTC).replace(tzinfo=None))
-    _, gates = await inspect(monkeypatch, naive)
+    _, gates = await inspect(monkeypatch, recon=naive, armed=activation())
     assert gates["external_reconciliation"].passed is True
 
 
-async def test_overall_readiness_is_derived_from_the_gates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Derived, so a gate nobody wired in cannot leave the report claiming readiness."""
-    report, gates = await inspect(monkeypatch, live_reconciliation())
-    assert report.overall_ready == all(gate.passed for gate in gates.values())
+# --- activation -----------------------------------------------------------
 
 
-def test_the_submission_lock_is_a_statement_about_the_code() -> None:
-    """If this ever flips without a submission module existing, the gate is a lie."""
-    assert live_readiness.SUBMISSION_ADAPTER_IMPLEMENTED is False
-    with pytest.raises(ImportError):
-        __import__("app.services.live_orders")
+@pytest.mark.parametrize("state", [{"expired": True}, {"revoked": True}])
+async def test_an_expired_or_revoked_activation_does_not_count(monkeypatch: pytest.MonkeyPatch, state: dict) -> None:
+    report, gates = await inspect(monkeypatch, recon=reconciliation(), armed=activation(**state))
+    assert gates["administrator_activation"].passed is False
+    assert report.overall_ready is False
+
+
+# --- the adapter claim ----------------------------------------------------
+
+
+def test_the_gate_and_the_code_agree_that_an_adapter_exists() -> None:
+    """A True here with no adapter would be a gate lying to the operator."""
+    import app.services.live_orders  # noqa: F401 - existence is the assertion
+
+    assert live_readiness.SUBMISSION_ADAPTER_IMPLEMENTED is True
+
+
+async def test_the_snapshot_states_both_readiness_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    report, _ = await inspect(monkeypatch, recon=reconciliation(), armed=None)
+    snapshot = report.snapshot()
+    assert snapshot["ready_for_activation"] is True
+    assert snapshot["overall_ready"] is False
+    assert snapshot["broker_submission_permitted"] is True

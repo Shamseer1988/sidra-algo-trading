@@ -697,3 +697,136 @@ class LiveShadowDecision(Base):
     broker_margin_available: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class LiveActivation(Base):
+    """An administrator's explicit, time-boxed permission for live submission.
+
+    Configuration says whether live trading is *possible*; this says whether it
+    is *armed right now*. The distinction matters because a configuration flag
+    set once stays set: a system armed on Monday is still armed on Friday, when
+    nobody is watching it. An activation expires on its own, so the default
+    state of the system at any future moment is off.
+
+    Nothing here places an order. It records a decision that submission code is
+    required to consult.
+    """
+
+    __tablename__ = "live_activations"
+    __table_args__ = (Index("ix_live_activations_expires_revoked", "expires_at", "revoked_at"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    activated_by_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    reason: Mapped[str] = mapped_column(String(255), default="")
+    # The readiness report as it stood at activation, so a later review can see
+    # what the administrator was actually told when they armed the system.
+    gate_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    revoked_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class LiveOrderSubmission(Base):
+    """One attempt to place a live order, written down before it is attempted.
+
+    The record is created and committed *before* the request leaves the process.
+    If it were written afterwards, a crash or a lost connection between the send
+    and the write would leave an order at the exchange that this system has no
+    record of, and the next reconciliation would find an untracked broker order
+    it cannot explain — or worse, the strategy would place the same order again.
+
+    ``client_order_id`` is carried to the broker in the documented ``remarks``
+    field, which makes it the key that resolves an UNKNOWN: an attempt whose
+    outcome was never learned can be searched for in the order book by the
+    identifier we chose, rather than guessed at by symbol and quantity.
+
+    ``broker_order_numbers`` is a list because the broker slices an order that
+    exceeds the exchange freeze quantity, and one submission then corresponds to
+    several broker orders. Storing a single id would silently lose the rest.
+    """
+
+    __tablename__ = "live_order_submissions"
+    __table_args__ = (
+        UniqueConstraint("client_order_id", name="uq_live_order_submissions_client_order_id"),
+        Index("ix_live_order_submissions_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    client_order_id: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    paper_signal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("paper_signals.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    oms_order_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("oms_orders.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    approval_reference: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+
+    exchange: Mapped[str] = mapped_column(String(20))
+    trading_symbol: Mapped[str] = mapped_column(String(64), index=True)
+    product: Mapped[str] = mapped_column(String(10))
+    price_type: Mapped[str] = mapped_column(String(10))
+    transaction_type: Mapped[str] = mapped_column(String(5))
+    retention: Mapped[str] = mapped_column(String(10), default="DAY")
+    quantity: Mapped[int] = mapped_column(Integer)
+    price: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    trigger_price: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+
+    status: Mapped[str] = mapped_column(String(30), default="PREPARED", index=True)
+    broker_order_numbers: Mapped[list] = mapped_column(JSON, default=list)
+    # Never contains jKey. The redaction happens before the snapshot is stored.
+    request_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    response_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    failure_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    failure_name: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    failure_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    resolution_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    resolution_detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class LiveOrderApproval(Base):
+    """A per-order authorisation request sent to the operator, and its answer.
+
+    Deliberately separate from ``TradeApprovalIntent``, which is paper-only and
+    revalidates through the paper risk engine. Sharing it would mean a change
+    made for paper approvals could alter what reaches a broker.
+
+    An approval is not permission to submit later: conditions move between the
+    alert and the reply, so the answer is re-validated against the live risk
+    engine at the moment it arrives, not at the moment it was asked for.
+    """
+
+    __tablename__ = "live_order_approvals"
+    __table_args__ = (
+        UniqueConstraint("reference_id", name="uq_live_order_approvals_reference"),
+        Index("ix_live_order_approvals_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    reference_id: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    paper_signal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("paper_signals.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    instrument_token: Mapped[str] = mapped_column(String(64))
+    trading_symbol: Mapped[str] = mapped_column(String(64))
+    exchange: Mapped[str] = mapped_column(String(20))
+    product: Mapped[str] = mapped_column(String(10))
+    price_type: Mapped[str] = mapped_column(String(10))
+    transaction_type: Mapped[str] = mapped_column(String(5))
+    quantity: Mapped[int] = mapped_column(Integer)
+    price: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    block_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    revalidation_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

@@ -6,11 +6,15 @@ exists" and "no external-broker reconciliation adapter exists" — and both are 
 untrue. A gate that lies about the system is worse than no gate: it is the input
 an operator uses to decide whether to go live.
 
-``overall_ready`` is computed from the gates rather than pinned to False. The
-lock that actually holds is ``SUBMISSION_ADAPTER_IMPLEMENTED`` below, which is a
-statement about whether code capable of placing an order exists. That is a
-stronger guarantee than a hardcoded verdict, because no configuration change can
-alter it and no gate passing by accident can route around it.
+``overall_ready`` is computed from the gates, so a gate added without being
+wired into the result refuses rather than passes.
+
+A submission adapter now exists, so the gates are no longer decorative: this
+report is what decides whether an administrator may arm live trading, and every
+gate below is a condition somebody has to satisfy deliberately. The two that
+cannot be satisfied by editing a file are ``external_reconciliation``, which
+requires the broker's own state to agree with ours within the last few minutes,
+and ``administrator_activation``, which requires a person.
 """
 
 from dataclasses import asdict, dataclass
@@ -23,9 +27,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.db.models import ExecutionReconciliation, LiveReadinessCheck, User
 
-# There is no module in this codebase that can place, modify or cancel a live
-# order. The phase that adds one flips this, in the same change that adds it.
-SUBMISSION_ADAPTER_IMPLEMENTED = False
+# app.services.live_orders can place, modify and cancel orders at Firstock. This
+# flipped in the same change that added it, and the test suite asserts the two
+# stay consistent: a True here with no adapter, or an adapter with a False here,
+# is a gate that lies to the operator.
+SUBMISSION_ADAPTER_IMPLEMENTED = True
 
 # Reconciliation older than this describes an account that may since have moved.
 RECONCILIATION_FRESHNESS = timedelta(minutes=15)
@@ -39,6 +45,11 @@ class LiveGate:
     detail: str
 
 
+# Excluded when asking whether a person may arm the system, because requiring it
+# there would mean an activation is needed before an activation can be granted.
+ACTIVATION_GATE = "administrator_activation"
+
+
 @dataclass(frozen=True)
 class LiveReadinessReport:
     status: str
@@ -46,12 +57,27 @@ class LiveReadinessReport:
     checked_at: datetime
     gates: list[LiveGate]
 
+    @property
+    def ready_for_activation(self) -> bool:
+        """Every precondition met, so an administrator may now arm the system.
+
+        Distinct from ``overall_ready``, which additionally requires that they
+        already have. Submission needs the second; granting an activation needs
+        the first, and conflating them is a deadlock.
+        """
+        return all(gate.passed for gate in self.gates if gate.key != ACTIVATION_GATE)
+
+    @property
+    def blocking_activation(self) -> list[str]:
+        return [gate.key for gate in self.gates if not gate.passed and gate.key != ACTIVATION_GATE]
+
     def snapshot(self) -> dict:
         return {
             "status": self.status,
             "overall_ready": self.overall_ready,
             "checked_at": self.checked_at.isoformat(),
             "gates": [asdict(gate) for gate in self.gates],
+            "ready_for_activation": self.ready_for_activation,
             "broker_submission_permitted": SUBMISSION_ADAPTER_IMPLEMENTED,
         }
 
@@ -83,12 +109,18 @@ async def inspect_live_readiness(session: AsyncSession, settings: Settings) -> L
         .limit(1)
     )
     reconciliation_passed, reconciliation_detail = _reconciliation_gate(latest_live_reconciliation)
+
+    # Imported here rather than at module scope: live_activation reads this
+    # module's report type, and a top-level import would be circular.
+    from app.services.live_activation import current_activation
+
+    activation = await current_activation(session)
     gates = [
         LiveGate(
-            "runtime_lock",
-            "Runtime hard lock",
-            settings.application_mode != "LIVE" and not settings.live_trading_enabled,
-            "PAPER/REPLAY configuration is asserted; live activation remains rejected at startup.",
+            "runtime_mode",
+            "Runtime configured for live",
+            settings.application_mode == "LIVE" and settings.live_trading_enabled,
+            _runtime_mode_detail(settings),
         ),
         LiveGate(
             "compliance",
@@ -133,8 +165,10 @@ async def inspect_live_readiness(session: AsyncSession, settings: Settings) -> L
         LiveGate(
             "administrator_activation",
             "Administrator activation",
-            False,
-            "There is intentionally no live activation endpoint in this release.",
+            activation is not None,
+            f"Armed by an administrator until {activation.expires_at.isoformat()}."
+            if activation is not None
+            else "No administrator has armed live submission, or the activation expired or was revoked.",
         ),
     ]
     # Computed from the gates, so a gate that is added and never wired in cannot
@@ -146,6 +180,18 @@ async def inspect_live_readiness(session: AsyncSession, settings: Settings) -> L
         checked_at=datetime.now(UTC),
         gates=gates,
     )
+
+
+def _runtime_mode_detail(settings: Settings) -> str:
+    """Say which half of the configuration is missing, not merely that it is."""
+    if settings.application_mode == "LIVE" and settings.live_trading_enabled:
+        return "APPLICATION_MODE is LIVE and LIVE_TRADING_ENABLED is set."
+    missing = []
+    if settings.application_mode != "LIVE":
+        missing.append(f"APPLICATION_MODE is {settings.application_mode}")
+    if not settings.live_trading_enabled:
+        missing.append("LIVE_TRADING_ENABLED is false")
+    return "The runtime is not configured for live trading: " + ", ".join(missing) + "."
 
 
 def _reconciliation_gate(record: ExecutionReconciliation | None) -> tuple[bool, str]:

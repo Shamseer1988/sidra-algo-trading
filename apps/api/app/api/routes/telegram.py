@@ -1,5 +1,6 @@
 import contextlib
 import hmac
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -9,11 +10,24 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
-from app.db.models import AuditLog, TelegramAlert, TelegramInboundEvent, TradeApprovalIntent, User, UserRole
+from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
+from app.db.models import (
+    ApplicationSetting,
+    AuditLog,
+    TelegramAlert,
+    TelegramInboundEvent,
+    TradeApprovalIntent,
+    User,
+    UserRole,
+)
 from app.services.assisted_trading import decide_approval
+from app.services.live_approval import APPROVE_ACTION, CALLBACK_PREFIX, REJECT_ACTION, decide_live_approval
+from app.services.live_execution_gateway import live_order_client
 from app.services.safety import emergency_stop
 from app.services.telegram import TelegramError, TelegramNotificationService
 from app.services.telegram_config import save_telegram_config
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/telegram", tags=["Telegram"])
 
@@ -132,6 +146,48 @@ def _callback_parts(payload: dict[str, Any]) -> tuple[str | None, str | None]:
     return data if isinstance(data, str) else None, callback_id if isinstance(callback_id, str) else None
 
 
+async def _handle_live_decision(
+    session: DbSession,
+    settings: AppSettings,
+    *,
+    reference_id: str,
+    action: str,
+    decided_by: str | None,
+) -> str:
+    """Act on a live approval tap, and never let a failure read as success.
+
+    Every failure path here returns a message saying nothing was sent, because
+    the operator's next action depends on believing the answer. A silent error
+    would leave them assuming an order exists, or assuming one does not.
+    """
+    trading = await session.get(ApplicationSetting, TRADING_KEY)
+    controls = TradingControls.model_validate(trading.value if trading else DEFAULT_TRADING_CONTROLS)
+
+    try:
+        client = await live_order_client(settings)
+    except Exception as exc:  # broker unreachable, credentials missing, TOTP wrong
+        return f"Could not reach the broker; nothing was sent. ({exc})"
+
+    redis = Redis.from_url(str(settings.redis_url), decode_responses=True)
+    try:
+        result = await decide_live_approval(
+            session,
+            settings,
+            client,
+            redis,
+            reference_id=reference_id,
+            action=action,
+            decided_by=decided_by,
+            approval_mode=controls.execution_approval_mode,
+        )
+    except Exception:
+        logger.exception("Live approval decision failed for %s", reference_id)
+        return "The decision could not be completed. Check the order book before retrying."
+    finally:
+        await redis.aclose()
+    return result.detail
+
+
 @router.post("/webhook", status_code=status.HTTP_200_OK)
 async def inbound_webhook(
     payload: dict[str, Any],
@@ -191,7 +247,24 @@ async def inbound_webhook(
     response_text = "Command rejected"
     if accepted and callback_data:
         parts = callback_data.split(":")
+        # Live approvals carry their own prefix so that a live decision can never
+        # be handled by the paper branch, or the reverse, however either evolves.
         if (
+            len(parts) == 3
+            and parts[0] == CALLBACK_PREFIX
+            and parts[1] in {APPROVE_ACTION, REJECT_ACTION}
+            and 1 <= len(parts[2]) <= 40
+        ):
+            response_text = await _handle_live_decision(
+                session, settings, reference_id=parts[2], action=parts[1], decided_by=sender_id
+            )
+            session.add(
+                AuditLog(
+                    event_type="telegram.live_order_decision",
+                    metadata_json={"reference_id": parts[2], "action": parts[1], "sender_id": sender_id},
+                )
+            )
+        elif (
             len(parts) == 3
             and parts[0] == "sentinel"
             and parts[1] in {"approve", "reject"}

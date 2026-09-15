@@ -117,6 +117,14 @@ async def clear_stop(settings: AppSettings, user: User = Depends(require_roles(U
 async def rejected_live_enable(
     _: EmergencyStopRequest, __: User = Depends(require_roles(UserRole.ADMIN))
 ) -> SafetyStatus:
+    # An order path exists now, so the old message would be untrue. Live
+    # submission is armed through POST /live-shadow/activation, which checks
+    # every readiness gate and grants a window that expires on its own; a
+    # boolean toggle with none of that is exactly what should not exist here.
     raise HTTPException(
-        status_code=status.HTTP_409_CONFLICT, detail="Live execution is unavailable in Release 1; no order path exists"
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "Live execution is not enabled from this endpoint. "
+            "Arm it through POST /api/v1/live-shadow/activation, which requires every readiness gate to pass."
+        ),
     )

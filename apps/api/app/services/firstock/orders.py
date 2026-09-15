@@ -258,3 +258,130 @@ class FirstockReportClient:
         }
         data = await self._post("orderMargin", payload)
         return data if isinstance(data, dict) else {}
+
+
+class FirstockOrderClient(FirstockReportClient):
+    """The read-only client plus the three calls that change broker state.
+
+    Kept as a subclass so that every safeguard the report client established —
+    the rate limiter, the error taxonomy, the token redaction — applies
+    unchanged to the calls where the consequences are real. Kept as a *separate
+    class* so that a caller must ask for submission capability explicitly: code
+    holding a ``FirstockReportClient`` cannot place an order however it is
+    edited, which is what makes the reconciliation and shadow paths provably
+    safe rather than safe by inspection.
+
+    None of these methods retries. Every one of them can fail in a way that
+    leaves the broker's state changed and ours unknown, and the only correct
+    response to that is to read the order book — which is the caller's job,
+    with the identifiers the caller wrote down first.
+    """
+
+    async def place_order(
+        self,
+        *,
+        exchange: str,
+        trading_symbol: str,
+        product: str,
+        price_type: str,
+        transaction_type: str,
+        retention: str,
+        quantity: str,
+        price: str,
+        trigger_price: str = "0",
+        remarks: str,
+        mkt_protection: str | None = None,
+    ) -> Any:
+        """Place one order. ``remarks`` carries the caller's identifier.
+
+        ``remarks`` is not optional here although the API would accept an empty
+        one: it is the only field that lets a lost response be resolved against
+        the order book later, and an order placed without it is an order that
+        cannot be found again except by guesswork.
+        """
+        if not remarks:
+            raise FirstockError("remarks must carry a client order id; it is the recovery key")
+        payload: dict[str, Any] = {
+            **self._auth_payload(),
+            "exchange": exchange,
+            "retention": retention,
+            "product": product,
+            "priceType": price_type,
+            "tradingSymbol": trading_symbol,
+            "transactionType": transaction_type,
+            "price": price,
+            "triggerPrice": trigger_price,
+            "quantity": quantity,
+            "remarks": remarks,
+        }
+        # Documented as required for MKT and SL-MKT, and documented as needing a
+        # value greater than zero.
+        if price_type in {"MKT", "SL-MKT"}:
+            payload["mkt_protection"] = mkt_protection or "1"
+        elif mkt_protection is not None:
+            payload["mkt_protection"] = mkt_protection
+        return await self._post("placeOrder", payload)
+
+    async def cancel_order(self, order_number: str) -> dict[str, Any]:
+        """Request cancellation of one order.
+
+        A success envelope does not prove the order was cancelled: the documented
+        response can carry a non-empty ``rejreason`` saying the order was not open
+        to cancel. Callers must confirm the terminal state from the order book
+        rather than from this return value.
+        """
+        if not order_number:
+            raise FirstockError("order_number is required")
+        payload = {**self._auth_payload(), "orderNumber": order_number}
+        data = await self._post("cancelOrder", payload)
+        return data if isinstance(data, dict) else {}
+
+    async def modify_order(
+        self,
+        *,
+        order_number: str,
+        exchange: str,
+        trading_symbol: str,
+        product: str,
+        price_type: str,
+        retention: str,
+        quantity: str,
+        price: str,
+        trigger_price: str = "0",
+        mkt_protection: str | None = None,
+    ) -> dict[str, Any]:
+        """Adjust an existing order. Same caveat as cancellation: confirm, do not assume."""
+        if not order_number:
+            raise FirstockError("order_number is required")
+        payload: dict[str, Any] = {
+            **self._auth_payload(),
+            "orderNumber": order_number,
+            "exchange": exchange,
+            "tradingSymbol": trading_symbol,
+            "product": product,
+            "priceType": price_type,
+            "retention": retention,
+            "quantity": quantity,
+            "price": price,
+            "triggerPrice": trigger_price,
+        }
+        if price_type in {"MKT", "SL-MKT"}:
+            payload["mkt_protection"] = mkt_protection or "1"
+        elif mkt_protection is not None:
+            payload["mkt_protection"] = mkt_protection
+        data = await self._post("modifyOrder", payload)
+        return data if isinstance(data, dict) else {}
+
+
+def cancellation_confirmed(data: dict[str, Any]) -> tuple[bool, str]:
+    """Read a cancellation response honestly.
+
+    Separated from the call so it can be tested against the documented shape
+    without a broker, and so the caller cannot skip it by reading the envelope.
+    """
+    reason = str(data.get("rejreason") or "").strip()
+    if reason:
+        return False, f"Broker did not cancel: {reason}"
+    if not str(data.get("orderNumber") or "").strip():
+        return False, "Cancellation response carried no order number."
+    return True, "Broker accepted the cancellation request; confirm from the order book."

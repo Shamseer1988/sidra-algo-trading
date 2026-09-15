@@ -10,13 +10,21 @@ only by the shadow evaluator, which records its answer instead of acting on it.
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
-from app.db.models import AuditLog, LiveShadowDecision, User, UserRole
+from app.db.models import AuditLog, LiveOrderSubmission, LiveShadowDecision, User, UserRole
 from app.services.firstock.client import FirstockClient, FirstockError
 from app.services.firstock.orders import FirstockReportClient
+from app.services.live_activation import (
+    LiveActivationError,
+    activate_live_trading,
+    current_activation,
+    revoke_live_activation,
+)
+from app.services.live_order_recovery import resolve_submission, unresolved_submissions
+from app.services.live_readiness import inspect_live_readiness
 from app.services.live_reconciliation import persist_live_reconciliation, reconcile_live_execution
 from app.services.live_shadow import summarize_live_shadow
 
@@ -172,4 +180,171 @@ def _decision(row: LiveShadowDecision) -> LiveShadowDecisionResponse:
             float(row.broker_margin_available) if row.broker_margin_available is not None else None
         ),
         created_at=row.created_at,
+    )
+
+
+class ActivationRequest(BaseModel):
+    reason: str = Field(min_length=8, max_length=255)
+
+
+class ActivationResponse(BaseModel):
+    id: str | None
+    armed: bool
+    reason: str
+    expires_at: datetime | None
+    revoked_at: datetime | None
+    revoked_reason: str | None
+    blocking_gates: list[str]
+
+
+class UnresolvedSubmissionResponse(BaseModel):
+    id: str
+    client_order_id: str
+    trading_symbol: str
+    transaction_type: str
+    quantity: int
+    status: str
+    resolution_attempts: int
+    resolution_detail: str | None
+    created_at: datetime
+
+
+@router.get("/activation", response_model=ActivationResponse)
+async def activation_status(_: CurrentUser, session: DbSession, settings: AppSettings) -> ActivationResponse:
+    record = await current_activation(session)
+    report = await inspect_live_readiness(session, settings)
+    return ActivationResponse(
+        id=str(record.id) if record else None,
+        armed=record is not None,
+        reason=record.reason if record else "",
+        expires_at=record.expires_at if record else None,
+        revoked_at=record.revoked_at if record else None,
+        revoked_reason=record.revoked_reason if record else None,
+        blocking_gates=report.blocking_activation,
+    )
+
+
+@router.post("/activation", response_model=ActivationResponse)
+async def arm_live_trading(
+    payload: ActivationRequest,
+    session: DbSession,
+    settings: AppSettings,
+    user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> ActivationResponse:
+    """Arm live submission for a bounded window.
+
+    Refuses unless every other readiness gate passes. A reason is required and
+    stored: an armed trading system should be able to say who armed it and why.
+    """
+    report = await inspect_live_readiness(session, settings)
+    try:
+        record = await activate_live_trading(session, settings, report, user, reason=payload.reason)
+    except LiveActivationError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            event_type="live.activated",
+            metadata_json={"reason": payload.reason, "expires_at": record.expires_at.isoformat()},
+        )
+    )
+    await session.commit()
+    await session.refresh(record)
+    return ActivationResponse(
+        id=str(record.id),
+        armed=True,
+        reason=record.reason,
+        expires_at=record.expires_at,
+        revoked_at=None,
+        revoked_reason=None,
+        blocking_gates=[],
+    )
+
+
+@router.delete("/activation", response_model=ActivationResponse)
+async def disarm_live_trading(
+    session: DbSession,
+    settings: AppSettings,
+    user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> ActivationResponse:
+    """Disarm immediately. Succeeds even when nothing was armed."""
+    record = await revoke_live_activation(session, reason=f"Revoked by {user.email}")
+    session.add(AuditLog(user_id=user.id, event_type="live.deactivated", metadata_json={}))
+    await session.commit()
+    report = await inspect_live_readiness(session, settings)
+    return ActivationResponse(
+        id=str(record.id) if record else None,
+        armed=False,
+        reason=record.reason if record else "",
+        expires_at=record.expires_at if record else None,
+        revoked_at=record.revoked_at if record else None,
+        revoked_reason=record.revoked_reason if record else None,
+        blocking_gates=report.blocking_activation,
+    )
+
+
+@router.get("/submissions/unresolved", response_model=list[UnresolvedSubmissionResponse])
+async def unresolved(_: CurrentUser, session: DbSession) -> list[UnresolvedSubmissionResponse]:
+    """Submissions whose outcome is still open. Any row here blocks live trading."""
+    rows = await unresolved_submissions(session)
+    return [
+        UnresolvedSubmissionResponse(
+            id=str(row.id),
+            client_order_id=row.client_order_id,
+            trading_symbol=row.trading_symbol,
+            transaction_type=row.transaction_type,
+            quantity=row.quantity,
+            status=row.status,
+            resolution_attempts=row.resolution_attempts,
+            resolution_detail=row.resolution_detail,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+@router.post("/submissions/{client_order_id}/resolve", response_model=UnresolvedSubmissionResponse)
+async def resolve_unknown_submission(
+    client_order_id: str,
+    session: DbSession,
+    settings: AppSettings,
+    user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> UnresolvedSubmissionResponse:
+    """Look one ambiguous submission up in the broker's order book.
+
+    Uses the read-only client: resolving an uncertain order must not be able to
+    place or cancel anything, or one uncertain order becomes two certain ones.
+    """
+    record = await session.scalar(
+        select(LiveOrderSubmission).where(LiveOrderSubmission.client_order_id == client_order_id)
+    )
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such submission")
+    if not settings.firstock_is_configured:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Firstock credentials are not configured")
+    try:
+        broker_session = await FirstockClient(settings).login()
+    except FirstockError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Firstock login failed: {exc}") from exc
+
+    result = await resolve_submission(FirstockReportClient(settings, broker_session), record)
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            event_type="live.submission_resolution_attempted",
+            metadata_json={"client_order_id": client_order_id, "status": result.status},
+        )
+    )
+    await session.commit()
+    await session.refresh(record)
+    return UnresolvedSubmissionResponse(
+        id=str(record.id),
+        client_order_id=record.client_order_id,
+        trading_symbol=record.trading_symbol,
+        transaction_type=record.transaction_type,
+        quantity=record.quantity,
+        status=record.status,
+        resolution_attempts=record.resolution_attempts,
+        resolution_detail=record.resolution_detail,
+        created_at=record.created_at,
     )

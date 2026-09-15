@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     # because a jKey that expires early degrades into recorded margin refusals
     # rather than an obvious failure.
     live_shadow_session_ttl_minutes: int = Field(default=30, ge=1, le=240)
+    # How long an operator has to answer a per-order Telegram approval. Short by
+    # design: the price the approval was requested at stops being the price.
+    live_approval_expiry_seconds: int = Field(default=180, ge=30, le=900)
+    # How long an administrator's live activation stays armed. It expires on its
+    # own so that a system armed today is not still armed unattended tomorrow.
+    live_activation_ttl_minutes: int = Field(default=480, ge=5, le=1440)
     nifty_benchmark_token: str = "NSE:26000"
 
     upstox_access_token: str | None = None
