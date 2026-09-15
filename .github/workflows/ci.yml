@@ -10,6 +10,41 @@ jobs:
   backend-quality-and-tests:
     name: Backend Lint, Unit, Load & Recovery Tests
     runs-on: ubuntu-latest
+
+    # The suite talks to a real PostgreSQL and Redis. Without them every test
+    # module fails at import, which is how this job came to report failure on
+    # every run while appearing to be a working release gate.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sidra_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/sidra_ci
+      REDIS_URL: redis://127.0.0.1:6379/0
+      # CI-only value. Settings requires at least 32 characters.
+      JWT_SECRET: ci-only-not-a-real-secret-0123456789abcdef
+      APP_ENV: test
+
     steps:
       - uses: actions/checkout@v4
 
@@ -29,13 +64,20 @@ jobs:
           python -m ruff check apps/api
           python -m ruff format --check apps/api
 
+      # Builds the schema the way production does. This also makes the migration
+      # chain a release gate: the two migration faults that blocked a clean
+      # deploy would both have failed here rather than on the server.
+      - name: Apply Database Migrations
+        working-directory: apps/api
+        run: alembic upgrade head
+
       - name: Run Backend Unit & Integration Tests
-        run: |
-          pytest apps/api/tests -v
+        working-directory: apps/api
+        run: pytest tests -v
 
       - name: Run Backend Load & Recovery Tests
-        run: |
-          pytest apps/api/tests/load apps/api/tests/recovery -v
+        working-directory: apps/api
+        run: pytest tests/load tests/recovery -v
 
   frontend-build-and-browser-tests:
     name: Frontend Lint, Typecheck, Build & Playwright Tests
