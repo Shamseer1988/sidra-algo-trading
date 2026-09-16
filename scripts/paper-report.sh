@@ -30,6 +30,12 @@
 # Sections that need tables from a newer schema are skipped rather than allowed to error,
 # so this runs unchanged against an older deployment.
 #
+# Set SINCE to exclude earlier sessions, which matters after a settings change:
+# results gathered under a different account size or risk budget describe a
+# different system and must not be pooled with results gathered under this one.
+#
+#   SINCE=2026-09-17 scripts/paper-report.sh
+#
 # Nothing here writes; it is safe to run at any time, including mid-session.
 
 set -e
@@ -41,6 +47,9 @@ PROJECT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$PROJECT"
 
 [ -f .env ] || { echo "Missing .env in $PROJECT" >&2; exit 1; }
+
+# Unset means every session ever recorded.
+SINCE=${SINCE:-1900-01-01}
 
 # psql reading its script from stdin, so no SQL ever passes through shell quoting.
 run_sql() {
@@ -61,10 +70,15 @@ table_exists() {
 }
 
 {
+  printf "\\set since '%s'\n" "$SINCE"
   cat <<'SQL'
 \echo
+\echo Sessions from :'since' onward.
 \echo === SESSIONS ===
-select session_date, count(*) as signals from paper_signals group by 1 order by 1;
+select session_date, count(*) as signals
+  from paper_signals
+ where session_date >= :'since'::date
+ group by 1 order by 1;
 
 \echo === PER-STRATEGY, GROSS (no costs: exits assumed at the exact target or stop) ===
 select s.strategy_version,
@@ -79,6 +93,7 @@ select s.strategy_version,
   from paper_signals s
   join paper_signal_outcomes o on o.paper_signal_id = s.id
  where o.status <> 'OPEN'
+   and s.session_date >= :'since'::date
  group by 1 order by total_r desc;
 
 \echo === PER-STRATEGY, NET OF COSTS (this is the number the go-live decision rests on) ===
@@ -89,6 +104,7 @@ with resolved as (
    where o.status in ('TARGET', 'STOP')
      and o.realized_r is not null
      and s.risk_amount > 0
+     and s.session_date >= :'since'::date
 ), costs as (
   select po.paper_signal_id,
          sum(f.total_fees + f.slippage_amount) as cost
@@ -117,16 +133,19 @@ select round(avg(s.entry_price * s.quantity), 0) as avg_notional_rs,
           from application_settings where key = 'trading_controls')        as risk_pct,
        (select value::jsonb->>'slippage_bps'
           from application_settings where key = 'paper_execution_controls') as slippage_bps
-  from paper_signals s;
+  from paper_signals s
+ where s.session_date >= :'since'::date;
 
 \echo === RISK GATES (anything other than accepted means signals were suppressed) ===
 select decision_reason, count(*) from risk_reservations group by 1 order by 2 desc;
 
-\echo === COSTS AND FILLS (every fill ever recorded, not only resolved trades) ===
-select count(*)                      as fills,
-       round(sum(slippage_amount), 2) as slippage,
-       round(sum(total_fees), 2)      as fees_total
-  from paper_fills;
+\echo === COSTS AND FILLS (every fill in range, not only resolved trades) ===
+select count(*)                        as fills,
+       round(sum(f.slippage_amount), 2) as slippage,
+       round(sum(f.total_fees), 2)      as fees_total
+  from paper_fills f
+  join paper_orders o on o.id = f.paper_order_id
+ where o.session_date >= :'since'::date;
 
 \echo === STILL OPEN ===
 select status, count(*) from paper_positions group by 1 order by 2 desc;

@@ -63,13 +63,37 @@ def fill_capacity(candle_volume: int, participation_percent: float) -> int:
     return max(1, int(Decimal(max(candle_volume, 0)) * Decimal(str(participation_percent)) / Decimal("100")))
 
 
-def transaction_costs(price: Decimal, quantity: int, side: str, controls: PaperExecutionControls) -> CostBreakdown:
+def transaction_costs(
+    price: Decimal,
+    quantity: int,
+    side: str,
+    controls: PaperExecutionControls,
+    prior_gross: Decimal = Decimal("0"),
+) -> CostBreakdown:
+    """Costs for one fill, with the brokerage cap applied across the whole order.
+
+    Every charge except brokerage is a flat percentage, so splitting an order into
+    fills leaves them unchanged. Brokerage is not: it is capped per order, and an
+    order that fills in eleven slices is still one order to the broker. Charging
+    the cap once per fill therefore overstates it by the number of slices — which
+    barely shows at a large position size, where the cap binds anyway, and
+    dominates every other cost at a small one, where it does not.
+
+    ``prior_gross`` is the value already filled on this order. The brokerage due
+    is the cap-limited charge on the cumulative value minus what earlier fills
+    were charged, which is correct whether or not the cap has been reached and
+    needs no record of the earlier charges.
+    """
     gross = price * quantity
 
     def percentage(rate: float) -> Decimal:
         return gross * Decimal(str(rate)) / Decimal("100")
 
-    brokerage = min(percentage(controls.brokerage_percent), Decimal(str(controls.brokerage_cap)))
+    def capped_brokerage(value: Decimal) -> Decimal:
+        rate = Decimal(str(controls.brokerage_percent)) / Decimal("100")
+        return min(value * rate, Decimal(str(controls.brokerage_cap)))
+
+    brokerage = capped_brokerage(prior_gross + gross) - capped_brokerage(prior_gross)
     stt = percentage(controls.stt_sell_percent) if side == "SELL" else Decimal("0")
     exchange_charge = percentage(controls.exchange_transaction_percent)
     gst = (brokerage + exchange_charge) * Decimal(str(controls.gst_percent)) / Decimal("100")
@@ -185,7 +209,10 @@ class PaperOrderManager:
         quantity: int,
     ) -> bool:
         price = slipped_price(reference_price, order.side, controls.slippage_bps)
-        costs = transaction_costs(price, quantity, order.side, controls)
+        # What this order has already filled, so the brokerage cap is applied to
+        # the order rather than re-applied to each slice of it.
+        prior_gross = (order.average_fill_price or Decimal("0")) * order.filled_quantity
+        costs = transaction_costs(price, quantity, order.side, controls, prior_gross)
         previous_quantity = order.filled_quantity
         order.filled_quantity += quantity
         order.average_fill_price = _money(
