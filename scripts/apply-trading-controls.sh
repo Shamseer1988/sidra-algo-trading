@@ -16,11 +16,17 @@
 #     price, that is a position of about 26,600 rupees, which needs 2.7x of the
 #     5x intraday leverage available.
 #
-#   maximum_open_positions 1, maximum_open_exposure_percent 300
-#     30,000 rupees of exposure allows one position of that size and refuses a
-#     second. This is the honest ceiling, not a preference: 5x leverage on
-#     10,000 is 50,000, and two positions do not fit. A config that permits 8
-#     would have the broker refuse the rest, which is a worse way to find out.
+#   maximum_open_positions 1, maximum_open_exposure_percent 80
+#     Read the exposure percentage carefully: the risk engine computes
+#     capital * percent * leverage / 100, so the leverage multiplier is applied
+#     on top of it. At 5x, 80 percent means 4x the account, or 40,000 rupees.
+#     One position at the observed 0.376% average stop is 26,600, so a second
+#     does not fit. The previous 400 meant 20x the account, which was survivable
+#     at 10,00,000 only because the position count bound first.
+#
+#     Both limits are set because they fail differently: the position count stops
+#     a second trade regardless of its size, and the exposure limit stops one
+#     oversized trade. Either alone leaves a gap.
 #
 #   maximum_daily_risk_percent 3.0
 #     Three full stop-outs ends the day at 300 rupees down. The previous 8.0 was
@@ -82,7 +88,7 @@ cat <<'PROFILE' | tee /tmp/trading-controls-proposed.json
   "risk_per_trade_percent": 1.0,
   "maximum_daily_risk_percent": 3.0,
   "maximum_open_positions": 1,
-  "maximum_open_exposure_percent": 300.0,
+  "maximum_open_exposure_percent": 80.0,
   "maximum_signals": 8,
   "minimum_score": 60,
   "minimum_rr": 1.5,
