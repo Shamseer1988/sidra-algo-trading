@@ -5,6 +5,10 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  # Lets a run be started by hand against any ref. Pushes made with an
+  # automation token do not trigger workflows, so without this there is no way
+  # to check a change to this file except by pushing again as a human.
+  workflow_dispatch:
 
 jobs:
   backend-quality-and-tests:
