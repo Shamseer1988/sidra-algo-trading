@@ -80,7 +80,7 @@ select session_date, count(*) as signals
  where session_date >= :'since'::date
  group by 1 order by 1;
 
-\echo === PER-STRATEGY, GROSS (no costs: exits assumed at the exact target or stop) ===
+\echo === SIGNAL QUALITY, GROSS (every signal, whether or not the account could take it) ===
 select s.strategy_version,
        count(*)                                 as trades,
        count(*) filter (where o.realized_r > 0) as wins,
@@ -96,7 +96,7 @@ select s.strategy_version,
    and s.session_date >= :'since'::date
  group by 1 order by total_r desc;
 
-\echo === PER-STRATEGY, NET OF COSTS (this is the number the go-live decision rests on) ===
+\echo === EXECUTED TRADES ONLY, NET OF COSTS (signals the account actually took) ===
 with resolved as (
   select s.id, s.strategy_version, s.risk_amount, o.realized_r
     from paper_signals s
@@ -115,12 +115,12 @@ with resolved as (
 select r.strategy_version,
        count(*)                                                          as trades,
        round(sum(r.realized_r), 2)                                       as gross_r,
-       round(sum(coalesce(c.cost, 0)), 2)                                as costs_rs,
-       round(sum(coalesce(c.cost, 0) / r.risk_amount), 2)                as costs_r,
-       round(sum(r.realized_r - coalesce(c.cost, 0) / r.risk_amount), 2) as net_r,
-       round(avg(r.realized_r - coalesce(c.cost, 0) / r.risk_amount), 3) as avg_net_r
+       round(sum(c.cost), 2)                                as costs_rs,
+       round(avg(c.cost / r.risk_amount), 3)                as cost_per_trade_r,
+       round(sum(r.realized_r - c.cost / r.risk_amount), 2) as net_r,
+       round(avg(r.realized_r - c.cost / r.risk_amount), 3) as avg_net_r
   from resolved r
-  left join costs c on c.paper_signal_id = r.id
+  join costs c on c.paper_signal_id = r.id
  group by 1 order by net_r desc;
 
 \echo === POSITION SIZE (paper sizing against the capital you intend to trade) ===
@@ -136,8 +136,38 @@ select round(avg(s.entry_price * s.quantity), 0) as avg_notional_rs,
   from paper_signals s
  where s.session_date >= :'since'::date;
 
-\echo === RISK GATES (anything other than accepted means signals were suppressed) ===
-select decision_reason, count(*) from risk_reservations group by 1 order by 2 desc;
+\echo === ACCOUNT RESULT (the money, from the position ledger) ===
+select p.session_date,
+       count(*)                                                                as positions,
+       count(*) filter (where p.realized_pnl - p.fees_total > 0)               as wins,
+       round(sum(p.realized_pnl), 2)                                           as gross_pnl_rs,
+       round(sum(p.fees_total), 2)                                             as fees_rs,
+       round(sum(p.realized_pnl - p.fees_total), 2)                            as net_pnl_rs,
+       round(sum((p.realized_pnl - p.fees_total) / nullif(s.risk_amount, 0)), 2) as net_r
+  from paper_positions p
+  join paper_signals s on s.id = p.paper_signal_id
+ where p.session_date >= :'since'::date
+ group by 1 order by 1;
+
+\echo === SIGNALS THE ACCOUNT COULD NOT TAKE (its size declining its own strategy) ===
+select r.session_date,
+       count(*)                                                       as signals,
+       count(*) filter (where r.decision_reason = 'Paper risk reserved'
+                           or r.decision_reason like 'Paper position closed%') as accepted,
+       count(*) filter (where r.decision_reason not like 'Paper risk reserved'
+                         and r.decision_reason not like 'Paper position closed%') as declined,
+       round(100.0 * count(*) filter (where r.decision_reason not like 'Paper risk reserved'
+                                        and r.decision_reason not like 'Paper position closed%')
+             / nullif(count(*), 0), 1)                                as declined_pct
+  from risk_reservations r
+ where r.session_date >= :'since'::date
+ group by 1 order by 1;
+
+\echo === RISK GATES, BY REASON ===
+select decision_reason, count(*)
+  from risk_reservations
+ where session_date >= :'since'::date
+ group by 1 order by 2 desc;
 
 \echo === COSTS AND FILLS (every fill in range, not only resolved trades) ===
 select count(*)                        as fills,
