@@ -35,6 +35,8 @@ DEFAULT_TRADING_CONTROLS = {
     "intraday_leverage_enabled": True,
     "intraday_leverage_multiplier": 5.0,
     "execution_approval_mode": "DISABLED",
+    "daily_profit_target": 0.0,
+    "daily_loss_limit": 0.0,
 }
 
 
@@ -63,6 +65,18 @@ class TradingControls(BaseModel):
     # the other two describe who authorises submission, not whether submission is
     # permitted, which remains governed by the live readiness gates.
     execution_approval_mode: str = Field(default="DISABLED")
+
+    # Realised-plus-open session P&L at which the day stops, in rupees. Zero
+    # disables the limit. Deliberately rupees rather than a percentage: a daily
+    # stop is an amount somebody is willing to lose today, not a ratio that
+    # should quietly rescale when account_capital is edited.
+    #
+    # These are not maximum_daily_risk_percent, which caps how much *risk* may be
+    # allocated in a session regardless of how it turns out. A day that allocates
+    # its whole risk budget and wins every trade has hit that limit while making
+    # money. These two are the other thing: stop when the money says stop.
+    daily_profit_target: float = Field(default=0.0, ge=0, le=10_000_000)
+    daily_loss_limit: float = Field(default=0.0, ge=0, le=10_000_000)
 
     @field_validator("execution_approval_mode")
     @classmethod

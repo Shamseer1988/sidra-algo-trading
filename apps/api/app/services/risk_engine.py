@@ -62,6 +62,15 @@ class PaperRiskEngine:
                     )
                 ).all()
             )
+            # Exposure counts only what is still open; the day's P&L counts every
+            # position the session produced, closed ones included.
+            positions_today = list(
+                (
+                    await session.scalars(
+                        select(PaperPosition).where(PaperPosition.session_date == signal.session_date)
+                    )
+                ).all()
+            )
             risk_amount = _decimal(signal.risk_amount)
             daily_limit = _decimal(controls.account_capital) * _decimal(controls.maximum_daily_risk_percent) / 100
             reserved = sum(
@@ -85,8 +94,20 @@ class PaperRiskEngine:
                 * leverage_mult
                 / 100
             )
+            # Session P&L including open positions and costs. total_pnl is
+            # realized + unrealized - fees, so a day sitting on a large open loss
+            # has already hit its limit even though nothing has been booked —
+            # which is the point of a daily stop.
+            session_pnl = sum((_decimal(item.total_pnl) for item in positions_today), start=Decimal("0"))
+            profit_target = _decimal(getattr(controls, "daily_profit_target", 0) or 0)
+            loss_limit = _decimal(getattr(controls, "daily_loss_limit", 0) or 0)
+
             reason = "Paper risk reserved"
-            if reserved + risk_amount > daily_limit:
+            if loss_limit > 0 and session_pnl <= -loss_limit:
+                reason = "Daily loss limit reached"
+            elif profit_target > 0 and session_pnl >= profit_target:
+                reason = "Daily profit target reached"
+            elif reserved + risk_amount > daily_limit:
                 reason = "Daily paper-risk allocation limit reached"
             elif active_reservations >= controls.maximum_open_positions:
                 reason = "Maximum concurrent paper positions reached"

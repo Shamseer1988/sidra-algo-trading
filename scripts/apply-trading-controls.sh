@@ -11,34 +11,52 @@
 #
 # WHY THESE NUMBERS
 #
-#   account_capital 10000, risk_per_trade_percent 1.0
-#     100 rupees at risk per trade. With the observed average stop of 0.376% of
-#     price, that is a position of about 26,600 rupees, which needs 2.7x of the
-#     5x intraday leverage available.
+#   account_capital 10000, risk_per_trade_percent 1.8
+#     180 rupees at risk per trade. At the observed 0.376% average stop that is a
+#     position of 47,872 rupees, or 4.79x the account — which is the point of
+#     asking for 5x. The hard ceiling is 1.88%: 5x on 10,000 is 50,000 of
+#     exposure, and 50,000 at a 0.376% stop is 188 rupees of risk. Nothing larger
+#     fits, whatever the setting says.
 #
-#   maximum_open_positions 1, maximum_open_exposure_percent 80
-#     Read the exposure percentage carefully: the risk engine computes
-#     capital * percent * leverage / 100, so the leverage multiplier is applied
-#     on top of it. At 5x, 80 percent means 4x the account, or 40,000 rupees.
-#     One position at the observed 0.376% average stop is 26,600, so a second
-#     does not fit. The previous 400 meant 20x the account, which was survivable
-#     at 10,00,000 only because the position count bound first.
+#     This is nearly double the previous 1.0%. On a system whose measured edge is
+#     zero, double the risk loses roughly twice as fast. It is set here because
+#     the daily limits below are meaningless at 100 rupees a trade: a 1,000 rupee
+#     loss limit would need ten consecutive losses to bind, which cannot happen
+#     at two or three trades a day.
 #
-#     Both limits are set because they fail differently: the position count stops
-#     a second trade regardless of its size, and the exposure limit stops one
-#     oversized trade. Either alone leaves a gap.
+#   maximum_open_positions 1, maximum_open_exposure_percent 100
+#     The risk engine computes capital * percent * leverage / 100, so the
+#     leverage multiplier is applied on top of the percentage. At 5x, 100 percent
+#     is 50,000 rupees, the whole of what the broker extends. One position of
+#     47,872 fits and a second does not. Both limits are set because they fail
+#     differently: the count stops a second trade of any size, the exposure limit
+#     stops one oversized trade. Either alone leaves a gap.
 #
-#   maximum_daily_risk_percent 3.0
-#     Three full stop-outs ends the day at 300 rupees down. The previous 8.0 was
-#     set for data collection against a paper account; on real money it is a
-#     third of the account in a bad week.
+#   daily_loss_limit 1000, daily_profit_target 2000
+#     The day stops when session P&L — realised plus open, after costs — reaches
+#     either. At 180 rupees of risk a losing trade costs 250 net, so the loss
+#     limit binds on the fourth loss; a winning trade makes 200 net, so the
+#     profit target needs ten.
+#
+#     Be clear about what that means. At the current two to three signals a day
+#     the best possible session is about 600 rupees and the worst about 750, so
+#     the profit target will effectively never bind. Reaching 2,000 needs ten
+#     winning trades in one session, which needs minimum_score back at 60 for the
+#     volume and a near-perfect day besides: eight trades all winning is 1,602.
+#
+#   maximum_daily_risk_percent 10.0
+#     A different control from the two above: it caps how much risk may be
+#     allocated in a session regardless of how it turns out. 10% of 10,000 is
+#     1,000, which is 5.5 trades at 180, and it is the ceiling the schema allows.
 #
 #   maximum_signals 8
 #     Matches the observed generation rate, so the scanner is not the binding
 #     constraint. Exposure will decline most of them; that is the point.
 #
-#   minimum_rr 1.5, minimum_score 60, min_stop_distance_percent 0.35
-#     Unchanged, deliberately. Average favourable excursion currently runs
+#   minimum_rr 1.5, minimum_score 71, min_stop_distance_percent 0.35
+#     minimum_score matches what apply-strategies.sh set on the strategies, so the
+#     account-level filter cannot re-admit what the strategy filter rejected. The
+#     other two are unchanged, deliberately. Average favourable excursion currently runs
 #     0.89 R to 1.54 R, so a target beyond 1.5 R would rarely be reached, and
 #     widening the stop moves the target with it — halving the cost per R while
 #     putting the target out of reach. The tight stop is what these strategies
@@ -81,16 +99,18 @@ printf "select coalesce((select jsonb_pretty(value::jsonb) from application_sett
   | run_sql_value | tee /tmp/trading-controls-current.json
 
 echo
-echo "=== PROPOSED (10,000 rupee account) ==="
+echo "=== PROPOSED (10,000 rupee account, 5x, +2000 / -1000 daily) ==="
 cat <<'PROFILE' | tee /tmp/trading-controls-proposed.json
 {
   "account_capital": 10000.0,
-  "risk_per_trade_percent": 1.0,
-  "maximum_daily_risk_percent": 3.0,
+  "risk_per_trade_percent": 1.8,
+  "maximum_daily_risk_percent": 10.0,
+  "daily_loss_limit": 1000.0,
+  "daily_profit_target": 2000.0,
   "maximum_open_positions": 1,
-  "maximum_open_exposure_percent": 80.0,
+  "maximum_open_exposure_percent": 100.0,
   "maximum_signals": 8,
-  "minimum_score": 60,
+  "minimum_score": 71,
   "minimum_rr": 1.5,
   "volume_multiplier": 1.3,
   "retest_tolerance_percent": 0.15,
