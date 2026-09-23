@@ -44,14 +44,21 @@
 #     winning trades in one session, which needs minimum_score back at 60 for the
 #     volume and a near-perfect day besides: eight trades all winning is 1,602.
 #
-#   maximum_daily_risk_percent 10.0
-#     A different control from the two above: it caps how much risk may be
-#     allocated in a session regardless of how it turns out. 10% of 10,000 is
-#     1,000, which is 5.5 trades at 180, and it is the ceiling the schema allows.
+#   maximum_signals 3, maximum_daily_risk_percent 5.5
+#     Two to three trades a day, capped twice over so neither cap alone has to
+#     hold. The signal cap stops the scanner producing a fourth; the risk budget
+#     of 550 rupees is three trades at 180 and stops the risk engine reserving
+#     one. Brokerage is a flat 20 rupees per order at this size, so a fourth
+#     trade costs 40 rupees of certain charges against an uncertain edge.
 #
-#   maximum_signals 8
-#     Matches the observed generation rate, so the scanner is not the binding
-#     constraint. Exposure will decline most of them; that is the point.
+#     This is a testing limit, not a permanent one. Raising it later is a one
+#     line change to both values together — they must move together or the
+#     tighter of the two silently becomes the real limit.
+#
+#     Note what it does to the daily limits above: at three trades the most a
+#     session can lose is 750 rupees and the most it can make is about 600, so
+#     neither the 1,000 loss limit nor the 2,000 target can bind. They are
+#     harmless, and they become meaningful when the trade count rises.
 #
 #   minimum_rr 1.5, minimum_score 71, min_stop_distance_percent 0.35
 #     minimum_score matches what apply-strategies.sh set on the strategies, so the
@@ -104,12 +111,12 @@ cat <<'PROFILE' | tee /tmp/trading-controls-proposed.json
 {
   "account_capital": 10000.0,
   "risk_per_trade_percent": 1.8,
-  "maximum_daily_risk_percent": 10.0,
+  "maximum_daily_risk_percent": 5.5,
   "daily_loss_limit": 1000.0,
   "daily_profit_target": 2000.0,
   "maximum_open_positions": 1,
   "maximum_open_exposure_percent": 100.0,
-  "maximum_signals": 8,
+  "maximum_signals": 3,
   "minimum_score": 71,
   "minimum_rr": 1.5,
   "volume_multiplier": 1.3,
