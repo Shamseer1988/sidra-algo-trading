@@ -80,6 +80,41 @@ select session_date, count(*) as signals
  where session_date >= :'since'::date
  group by 1 order by 1;
 
+\echo === READINESS TEST (does it beat a coin flip by enough to pay the costs?) ===
+with ratio as (
+  select coalesce(
+           (select (value::jsonb->>'minimum_rr')::numeric
+              from application_settings where key = 'trading_controls'),
+           1.5) as rr
+), measured_cost as (
+  select coalesce(avg(c.cost / s.risk_amount), 0.41) as cost_r
+    from paper_signals s
+    join (select po.paper_signal_id, sum(f.total_fees + f.slippage_amount) as cost
+            from paper_orders po
+            join paper_fills f on f.paper_order_id = po.id
+           group by 1) c on c.paper_signal_id = s.id
+   where s.risk_amount > 0 and s.session_date >= :'since'::date
+)
+select s.strategy_version,
+       count(*)                                                        as signals,
+       round(100.0 * count(*) filter (where o.realized_r > 0)
+             / nullif(count(*), 0), 1)                                 as win_pct,
+       round(100.0 / (1 + (select rr from ratio)), 1)                  as coinflip_pct,
+       round(avg(o.realized_r), 3)                                     as avg_r,
+       round((select cost_r from measured_cost), 3)                    as cost_r,
+       round(avg(o.realized_r) - (select cost_r from measured_cost), 3) as net_r_per_trade,
+       case
+         when avg(o.realized_r) - (select cost_r from measured_cost) <= 0
+              then 'NO - loses after costs'
+         when count(*) < 100 then 'MAYBE - need 100+ signals'
+         else 'CANDIDATE - review before funding'
+       end                                                             as verdict
+  from paper_signals s
+  join paper_signal_outcomes o on o.paper_signal_id = s.id
+ where o.status in ('TARGET', 'STOP')
+   and s.session_date >= :'since'::date
+ group by 1 order by net_r_per_trade desc;
+
 \echo === SIGNAL QUALITY, GROSS (every signal, whether or not the account could take it) ===
 select s.strategy_version,
        count(*)                                 as trades,
