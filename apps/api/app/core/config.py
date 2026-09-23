@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     upstox_pin: str | None = None
     upstox_totp_secret: str | None = None
     upstox_auto_auth_enabled: bool = False
+    # Exchange-approved algo name, sent as X-Algo-Name on every Upstox call.
+    # Required only for a SEBI-registered algo — which is required only above ten
+    # orders a second — so it is unset by default. Must match the name in Upstox
+    # My Apps exactly, including case. Registering an algo and not setting this
+    # is how orders start being rejected for a reason nothing in the response
+    # explains.
+    upstox_algo_name: str | None = None
     upstox_subscriptions: str = ""
     upstox_nifty_benchmark_key: str = "NSE_INDEX|Nifty 50"
     candle_timeframe_seconds: int = Field(default=60, ge=60, le=900)

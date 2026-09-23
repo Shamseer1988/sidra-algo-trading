@@ -137,13 +137,21 @@ class UpstoxReportClient:
         self._limiter = rate_limiter or RateLimiter(
             rate_per_second=getattr(settings, "upstox_rate_limit_per_second", DEFAULT_REQUESTS_PER_SECOND)
         )
+        self._algo_name = (getattr(settings, "upstox_algo_name", None) or "").strip()
 
     def _headers(self) -> dict[str, str]:
-        return {
+        headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._session.access_token}",
         }
+        # Only for an exchange-approved algo, which is required above 10 orders a
+        # second and optional below it. Sent only when configured, and sent
+        # verbatim: Upstox matches it case-sensitively against the name
+        # registered in My Apps, so normalising it here would break it.
+        if self._algo_name:
+            headers["X-Algo-Name"] = self._algo_name
+        return headers
 
     def _redact(self, text: str) -> str:
         """Strip the bearer token from anything about to be raised or logged.

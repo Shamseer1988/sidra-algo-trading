@@ -26,6 +26,7 @@ from app.services.upstox_orders import (
 
 class FakeSettings:
     upstox_rate_limit_per_second = 1000.0
+    upstox_algo_name = None
 
 
 def respond(status_code: int, body, *, monkeypatch):
@@ -283,3 +284,29 @@ def test_a_repeated_id_counts_once() -> None:
 @pytest.mark.parametrize("data", [None, {}, [], "nonsense", {"order_ids": []}, {"order_id": ""}])
 def test_shapes_carrying_no_id_yield_none(data: object) -> None:
     assert order_ids_from(data) == []
+
+
+# --- the algo-name header -------------------------------------------------
+
+
+def client_with_algo_name(name):
+    settings = FakeSettings()
+    settings.upstox_algo_name = name
+    return UpstoxReportClient(settings, UpstoxSession(access_token="a-token"))
+
+
+def test_no_algo_name_sends_no_algo_header() -> None:
+    """Below ten orders a second no algo is registered, and an unregistered
+    name would be rejected rather than ignored."""
+    assert "X-Algo-Name" not in client_with_algo_name(None)._headers()
+
+
+def test_a_blank_algo_name_is_the_same_as_none() -> None:
+    """An empty environment variable is an unset one, not an empty algo."""
+    assert "X-Algo-Name" not in client_with_algo_name("   ")._headers()
+
+
+def test_a_configured_algo_name_travels_verbatim() -> None:
+    """Upstox matches it case-sensitively against the name in My Apps."""
+    headers = client_with_algo_name("  Sidra-ORB-v1  ")._headers()
+    assert headers["X-Algo-Name"] == "Sidra-ORB-v1"
