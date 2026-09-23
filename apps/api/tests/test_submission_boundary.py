@@ -23,16 +23,35 @@ import pytest
 from app.services.firstock.orders import FirstockOrderClient, FirstockReportClient
 from app.services.live_readiness import SUBMISSION_ADAPTER_IMPLEMENTED
 
-# Firstock's state-changing order endpoints, exactly as the API names them.
-MUTATING_ENDPOINTS = {"placeOrder", "modifyOrder", "cancelOrder", "exitOrder"}
+# State-changing order endpoints, exactly as each broker names them. Firstock
+# names methods; Upstox names URL paths. Both spellings belong here, because a
+# guard that knows one broker's vocabulary silently stops guarding when a second
+# broker arrives — which is what happened when the Upstox adapter was added and
+# this file did not fail.
+MUTATING_ENDPOINTS = {
+    # Firstock
+    "placeOrder",
+    "modifyOrder",
+    "cancelOrder",
+    "exitOrder",
+    # Upstox
+    "/v3/order/place",
+    "/v3/order/cancel",
+    "/v2/order/place",
+    "/v2/order/cancel",
+}
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "app"
 
-# The only file permitted to name a state-changing endpoint.
-BROKER_ADAPTER = "services/firstock/orders.py"
+# The only files permitted to name a state-changing endpoint, one per broker.
+BROKER_ADAPTERS = ("services/firstock/orders.py", "services/upstox_orders.py")
 
 # The only file permitted to construct a submission-capable client.
 CLIENT_FACTORY = "services/live_execution_gateway.py"
+
+# Every submission-capable client class. Each must be unreachable from the
+# read-only callers below.
+SUBMISSION_CLIENTS = ("FirstockOrderClient", "UpstoxOrderClient")
 
 # Files that read broker state and must never be able to change it.
 READ_ONLY_CALLERS = (
@@ -69,24 +88,31 @@ def called_names(tree: ast.AST) -> set[str]:
     return {node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
 
 
-def test_only_the_broker_adapter_names_a_state_changing_endpoint() -> None:
+def test_only_a_broker_adapter_names_a_state_changing_endpoint() -> None:
     offenders: list[str] = []
     for path in sorted(APP_ROOT.rglob("*.py")):
         relative = path.relative_to(APP_ROOT).as_posix()
-        if relative == BROKER_ADAPTER:
+        if relative in BROKER_ADAPTERS:
             continue
-        for endpoint in sorted(MUTATING_ENDPOINTS & string_literals(ast.parse(path.read_text(encoding="utf-8")))):
-            offenders.append(f"{relative} references {endpoint}")
-    assert offenders == [], "A submission endpoint escaped the adapter: " + "; ".join(offenders)
+        literals = string_literals(ast.parse(path.read_text(encoding="utf-8")))
+        for endpoint in sorted(MUTATING_ENDPOINTS):
+            if any(endpoint in literal for literal in literals):
+                offenders.append(f"{relative} references {endpoint}")
+    assert offenders == [], "A submission endpoint escaped its adapter: " + "; ".join(offenders)
 
 
-def test_the_broker_adapter_does_name_them() -> None:
-    """Guards the guard: a typo in the path above would make the test vacuous."""
-    assert MUTATING_ENDPOINTS & string_literals(parse(BROKER_ADAPTER)) == {
-        "placeOrder",
-        "modifyOrder",
-        "cancelOrder",
-    }
+@pytest.mark.parametrize(
+    ("adapter", "expected"),
+    [
+        ("services/firstock/orders.py", {"placeOrder", "modifyOrder", "cancelOrder"}),
+        ("services/upstox_orders.py", {"/v3/order/place", "/v3/order/cancel"}),
+    ],
+)
+def test_each_adapter_does_name_its_own(adapter: str, expected: set[str]) -> None:
+    """Guards the guard: a typo in a path above would make the test vacuous."""
+    literals = string_literals(parse(adapter))
+    found = {e for e in MUTATING_ENDPOINTS if any(e in literal for literal in literals)}
+    assert expected <= found
 
 
 @pytest.mark.parametrize("name", ["place_order", "modify_order", "cancel_order", "exit_order", "submit"])
@@ -100,23 +126,31 @@ def test_the_order_client_is_the_one_that_can(name: str) -> None:
     assert hasattr(FirstockOrderClient, name)
 
 
-def test_only_the_gateway_constructs_a_submission_capable_client() -> None:
+@pytest.mark.parametrize("client", SUBMISSION_CLIENTS)
+def test_only_the_gateway_constructs_a_submission_capable_client(client: str) -> None:
     """Asking "what can reach a broker with intent" should be one grep."""
     offenders: list[str] = []
     for path in sorted(APP_ROOT.rglob("*.py")):
         relative = path.relative_to(APP_ROOT).as_posix()
         if relative == CLIENT_FACTORY:
             continue
-        if "FirstockOrderClient" in called_names(ast.parse(path.read_text(encoding="utf-8"))):
+        if client in called_names(ast.parse(path.read_text(encoding="utf-8"))):
             offenders.append(relative)
-    assert offenders == [], "A submission client was built outside the gateway: " + "; ".join(offenders)
+    assert offenders == [], f"{client} was built outside the gateway: " + "; ".join(offenders)
 
 
 @pytest.mark.parametrize("relative", READ_ONLY_CALLERS)
-def test_state_reading_modules_never_mention_the_submission_client(relative: str) -> None:
+@pytest.mark.parametrize("client", SUBMISSION_CLIENTS)
+def test_state_reading_modules_never_mention_a_submission_client(relative: str, client: str) -> None:
     """Not even as a type annotation: the name should not be reachable there."""
-    source = (APP_ROOT / relative).read_text(encoding="utf-8")
-    assert "FirstockOrderClient" not in source
+    assert client not in (APP_ROOT / relative).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", ["place_order", "cancel_order", "modify_order"])
+def test_the_upstox_read_only_client_exposes_no_way_to_change_an_order(name: str) -> None:
+    from app.services.upstox_orders import UpstoxReportClient
+
+    assert not hasattr(UpstoxReportClient, name)
 
 
 def test_the_readiness_gate_agrees_that_an_adapter_exists() -> None:
