@@ -1,7 +1,7 @@
 """Deterministic paper-only order simulation driven exclusively by completed candles."""
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from pydantic import BaseModel, Field
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.models import ApplicationSetting, PaperFill, PaperOrder, PaperPosition, PaperSignal
 from app.db.session import SessionLocal
+from app.services import daily_limits
 from app.services.live_shadow_runner import run_live_shadow
 from app.services.market_calculations import CompletedCandle
 from app.services.oms import PaperOmsGateway
@@ -34,6 +35,11 @@ class PaperExecutionControls(BaseModel):
 
 
 DEFAULT_PAPER_EXECUTION_CONTROLS = PaperExecutionControls().model_dump()
+
+# Order roles that close a position. One of them filling settles the signal, so
+# the others must not also fill on the same candle — which would exit a position
+# twice and book the second exit against a quantity that is no longer there.
+EXIT_ROLES = frozenset({"TARGET", "STOP", "HALT"})
 
 
 @dataclass(frozen=True)
@@ -321,6 +327,85 @@ class PaperOrderManager:
             - Decimal(str(position.fees_total))
         )
 
+    async def _halt_if_the_day_is_over(self, session: AsyncSession, session_date: date) -> None:
+        """Record the halt once, then flatten and stand down.
+
+        Blocking new entries is not enough on its own. A position left running
+        after the loss limit keeps losing: a day stopped at -1,050 whose open
+        trade then ran to -1,800 has honoured the letter of a 1,000 limit and
+        none of its intent. So the open positions are exited too.
+
+        The exit is a MARKET order rather than an immediate synthetic fill,
+        which means it fills on the instrument's next candle at that candle's
+        open. That is slower, and it is what actually happens: you cannot leave
+        a position at the price you decided to leave it. Booking the exit at the
+        current mark would make the journal flatter than the truth, and the
+        journal is the evidence this whole system is being judged on.
+
+        The profit target flattens too, symmetrically. A day declared finished
+        at +2,200 that drifts to +800 with the position still open has not
+        finished; it has only stopped looking.
+        """
+        # The trading controls, not the execution controls: the limits are the
+        # operator's money settings, which live under a different key.
+        from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
+
+        setting = await session.get(ApplicationSetting, TRADING_KEY)
+        trading = TradingControls.model_validate(setting.value if setting else DEFAULT_TRADING_CONTROLS)
+
+        verdict = await daily_limits.verdict_for(session, session_date, trading)
+        if await daily_limits.record_halt(session, session_date, verdict) is None:
+            # Either nothing was reached, or the day halted on an earlier candle
+            # and the positions were flattened then.
+            return
+
+        for order in (
+            await session.scalars(
+                select(PaperOrder).where(
+                    PaperOrder.session_date == session_date,
+                    PaperOrder.status.in_(["PENDING", "PARTIALLY_FILLED"]),
+                )
+            )
+        ).all():
+            # A halted day must not open anything new, and the brackets on a
+            # position being exited would otherwise race the exit.
+            order.status = "CANCELLED"
+            order.rejection_reason = verdict.reason
+
+        for position in (
+            await session.scalars(
+                select(PaperPosition).where(
+                    PaperPosition.session_date == session_date,
+                    PaperPosition.status.in_(["OPENING", "OPEN", "REDUCING"]),
+                )
+            )
+        ).all():
+            if position.open_quantity <= 0:
+                continue
+            signal = await session.get(PaperSignal, position.paper_signal_id)
+            if signal is None:
+                continue
+            session.add(
+                PaperOrder(
+                    paper_signal_id=signal.id,
+                    client_order_id=f"paper:{signal.id}:halt",
+                    instrument_token=signal.instrument_token,
+                    session_date=session_date,
+                    strategy_version=signal.strategy_version,
+                    side=exit_side(signal.side),
+                    order_type="MARKET",
+                    order_role="HALT",
+                    quantity=position.open_quantity,
+                    eligible_after=position.opened_at or signal.candle_opened_at,
+                    simulation_snapshot={
+                        "source": "daily_limit_halt",
+                        "reason": verdict.reason,
+                        "session_pnl": str(verdict.session_pnl),
+                        "paper_only": True,
+                    },
+                )
+            )
+
     async def process_completed_candle(self, candle: CompletedCandle) -> None:
         async with SessionLocal() as session:
             controls = await self._controls(session)
@@ -338,11 +423,13 @@ class PaperOrderManager:
                     )
                 ).all()
             )
-            orders.sort(key=lambda order: {"STOP": 0, "TARGET": 1, "ENTRY": 2}.get(order.order_role, 3))
+            # HALT first: it is the day's stop, and an exit that queued behind a
+            # re-entry would be an exit that happened after one more trade.
+            orders.sort(key=lambda order: {"HALT": 0, "STOP": 1, "TARGET": 2, "ENTRY": 3}.get(order.order_role, 4))
             processed_exit_signals: set[object] = set()
             settled_signal_ids: set[object] = set()
             for order in orders:
-                if order.order_role in {"TARGET", "STOP"} and order.paper_signal_id in processed_exit_signals:
+                if order.order_role in EXIT_ROLES and order.paper_signal_id in processed_exit_signals:
                     continue
                 fillable, reference = self._fillable(order, candle)
                 if not fillable:
@@ -356,7 +443,7 @@ class PaperOrderManager:
                 if quantity > 0:
                     if await self._apply_fill(session, order, signal, candle, controls, reference, quantity):
                         settled_signal_ids.add(signal.id)
-                    if order.order_role in {"TARGET", "STOP"}:
+                    if order.order_role in EXIT_ROLES:
                         processed_exit_signals.add(order.paper_signal_id)
             positions = list(
                 (
@@ -371,6 +458,11 @@ class PaperOrderManager:
             )
             for position in positions:
                 self._mark_to_market(position, candle.close)
+            # Checked on every candle rather than only when a signal arrives: a
+            # daily limit is normally crossed by a price moving, and on a day
+            # that then halts, the next signal never comes — so nothing would
+            # ever notice.
+            await self._halt_if_the_day_is_over(session, candle.session_date)
             await session.commit()
         if settled_signal_ids:
             from app.services.risk_engine import PaperRiskEngine

@@ -9,6 +9,7 @@ from sqlalchemy import select, text
 from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
 from app.db.models import ApplicationSetting, PaperPosition, PaperSignal, RiskReservation
 from app.db.session import SessionLocal
+from app.services import daily_limits
 
 
 @dataclass(frozen=True)
@@ -62,15 +63,6 @@ class PaperRiskEngine:
                     )
                 ).all()
             )
-            # Exposure counts only what is still open; the day's P&L counts every
-            # position the session produced, closed ones included.
-            positions_today = list(
-                (
-                    await session.scalars(
-                        select(PaperPosition).where(PaperPosition.session_date == signal.session_date)
-                    )
-                ).all()
-            )
             risk_amount = _decimal(signal.risk_amount)
             daily_limit = _decimal(controls.account_capital) * _decimal(controls.maximum_daily_risk_percent) / 100
             reserved = sum(
@@ -94,19 +86,20 @@ class PaperRiskEngine:
                 * leverage_mult
                 / 100
             )
-            # Session P&L including open positions and costs. total_pnl is
-            # realized + unrealized - fees, so a day sitting on a large open loss
-            # has already hit its limit even though nothing has been booked —
-            # which is the point of a daily stop.
-            session_pnl = sum((_decimal(item.total_pnl) for item in positions_today), start=Decimal("0"))
-            profit_target = _decimal(getattr(controls, "daily_profit_target", 0) or 0)
-            loss_limit = _decimal(getattr(controls, "daily_loss_limit", 0) or 0)
+            # The day's standing: a halt already recorded, or a fresh look at the
+            # money. Delegated so that this and paper execution cannot disagree
+            # about what "the limit was reached" means, and latched so that a
+            # day which has finished cannot un-finish when an open winner gives
+            # back its gains.
+            verdict = await daily_limits.verdict_for(session, signal.session_date, controls)
 
             reason = "Paper risk reserved"
-            if loss_limit > 0 and session_pnl <= -loss_limit:
-                reason = "Daily loss limit reached"
-            elif profit_target > 0 and session_pnl >= profit_target:
-                reason = "Daily profit target reached"
+            if verdict.halted:
+                reason = verdict.reason or reason
+                # Written here as well as in paper execution because a limit can
+                # first be crossed by a signal arriving rather than by a price
+                # moving, and whichever notices first owns recording it.
+                await daily_limits.record_halt(session, signal.session_date, verdict)
             elif reserved + risk_amount > daily_limit:
                 reason = "Daily paper-risk allocation limit reached"
             elif active_reservations >= controls.maximum_open_positions:

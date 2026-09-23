@@ -16,10 +16,16 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
-from app.db.models import ApplicationSetting, PaperPosition, PaperSignal, RiskReservation
+from app.db.models import (
+    ApplicationSetting,
+    PaperPosition,
+    PaperSessionHalt,
+    PaperSignal,
+    RiskReservation,
+)
 from app.db.session import SessionLocal
 from app.services.risk_engine import PaperRiskEngine
 
@@ -41,6 +47,9 @@ async def controls(**overrides) -> None:
 
 async def clean() -> None:
     async with SessionLocal() as session:
+        # The halt is keyed on the session date alone, and it latches — leaving
+        # one behind would silently stop every later test's day.
+        await session.execute(delete(PaperSessionHalt).where(PaperSessionHalt.session_date == SESSION))
         await session.execute(delete(RiskReservation).where(RiskReservation.instrument_token == TOKEN))
         await session.execute(delete(PaperPosition).where(PaperPosition.instrument_token == TOKEN))
         await session.execute(delete(PaperSignal).where(PaperSignal.instrument_token == TOKEN))
@@ -212,3 +221,78 @@ async def test_yesterdays_losses_do_not_stop_today() -> None:
         )
         await session.commit()
     assert await decide() == "Paper risk reserved"
+
+
+# --- the latch ------------------------------------------------------------
+#
+# The behaviour these protect is the one that was wrong before: the limits were
+# recomputed on every check, so a day that had finished could un-finish. That is
+# a filter, not a stop, and the difference is visible only in the case below.
+
+
+async def test_a_reached_target_stays_reached_when_an_open_winner_gives_it_back() -> None:
+    """The case that made this a latch.
+
+    A position showing +2,200 halts the day. It then closes at +800. Without the
+    latch the next signal recomputes 800, finds it under target, and trades on —
+    so an operator told "target reached" would watch the system keep trading.
+    """
+    await controls(daily_profit_target=2000.0, maximum_daily_risk_percent=10.0)
+    await book(realized="0", unrealized="2200", status="OPEN")
+    assert await decide() == "Daily profit target reached"
+
+    async with SessionLocal() as session:
+        position = await session.scalar(select(PaperPosition).where(PaperPosition.instrument_token == TOKEN))
+        position.status, position.open_quantity = "CLOSED", 0
+        position.realized_pnl, position.unrealized_pnl = Decimal("800"), Decimal("0")
+        position.total_pnl = Decimal("800")
+        await session.commit()
+
+    assert await decide() == "Daily profit target reached"
+
+
+async def test_a_reached_loss_limit_stays_reached_when_the_position_recovers() -> None:
+    await controls(daily_loss_limit=1000.0, maximum_daily_risk_percent=10.0)
+    await book(realized="0", unrealized="-1100", status="OPEN")
+    assert await decide() == "Daily loss limit reached"
+
+    async with SessionLocal() as session:
+        position = await session.scalar(select(PaperPosition).where(PaperPosition.instrument_token == TOKEN))
+        position.status, position.open_quantity = "CLOSED", 0
+        position.realized_pnl, position.unrealized_pnl = Decimal("-200"), Decimal("0")
+        position.total_pnl = Decimal("-200")
+        await session.commit()
+
+    assert await decide() == "Daily loss limit reached"
+
+
+async def test_the_halt_records_the_figure_that_tripped_it() -> None:
+    """Not the figure now. It is what the operator was told."""
+    await controls(daily_profit_target=2000.0, maximum_daily_risk_percent=10.0)
+    await book(realized="2400", status="CLOSED")
+    await decide()
+    async with SessionLocal() as session:
+        halt = await session.scalar(select(PaperSessionHalt).where(PaperSessionHalt.session_date == SESSION))
+    assert halt is not None
+    assert halt.reason == "Daily profit target reached"
+    assert Decimal(str(halt.session_pnl)) == Decimal("2400")
+
+
+async def test_one_halt_per_session_however_many_signals_arrive() -> None:
+    await controls(daily_loss_limit=1000.0, maximum_daily_risk_percent=10.0)
+    await book(realized="-1500")
+    for _ in range(3):
+        assert await decide() == "Daily loss limit reached"
+    async with SessionLocal() as session:
+        halts = list(
+            (await session.scalars(select(PaperSessionHalt).where(PaperSessionHalt.session_date == SESSION))).all()
+        )
+    assert len(halts) == 1
+
+
+async def test_a_day_that_never_reaches_a_limit_records_no_halt() -> None:
+    await controls(daily_loss_limit=1000.0, daily_profit_target=2000.0, maximum_daily_risk_percent=10.0)
+    await book(realized="300")
+    assert await decide() == "Paper risk reserved"
+    async with SessionLocal() as session:
+        assert await session.scalar(select(PaperSessionHalt).where(PaperSessionHalt.session_date == SESSION)) is None

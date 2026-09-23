@@ -367,6 +367,32 @@ class PaperFill(TimestampMixin, Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class PaperSessionHalt(Base):
+    """The day the money said stop, recorded once.
+
+    One row per session date, written the first time the day's P&L reaches the
+    profit target or the loss limit. Its existence is the answer: every later
+    check reads it rather than recomputing, which is what makes the stop a stop.
+
+    Recomputing would be wrong in a specific and expensive way. Session P&L
+    counts open positions, so a winner showing +2,200 can close at +800 — and a
+    day that had been told it was finished would quietly start trading again.
+
+    ``session_pnl`` is the figure at the moment it tripped, not the figure now.
+    It is what the operator was told, and an audit that reported today's number
+    against yesterday's decision would explain nothing.
+    """
+
+    __tablename__ = "paper_session_halts"
+    __table_args__ = (UniqueConstraint("session_date", name="uq_paper_session_halts_session_date"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    session_date: Mapped[date] = mapped_column(Date, unique=True, index=True)
+    reason: Mapped[str] = mapped_column(String(60))
+    session_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 class PaperPosition(TimestampMixin, Base):
     """One paper position per source signal, never a broker-held position."""
 
