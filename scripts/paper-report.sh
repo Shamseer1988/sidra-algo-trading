@@ -123,6 +123,22 @@ select r.strategy_version,
   join costs c on c.paper_signal_id = r.id
  group by 1 order by net_r desc;
 
+\echo === SCORE VS OUTCOME (does the score filter predict anything?) ===
+select width_bucket(s.score, 60, 101, 4)                         as band,
+       min(s.score)                                              as from_score,
+       max(s.score)                                              as to_score,
+       count(*)                                                  as signals,
+       count(*) filter (where o.realized_r > 0)                  as wins,
+       round(100.0 * count(*) filter (where o.realized_r > 0)
+             / nullif(count(*), 0), 1)                           as win_pct,
+       round(avg(o.realized_r), 2)                               as avg_r,
+       round(avg(o.mfe_r), 2)                                    as avg_mfe_r
+  from paper_signals s
+  join paper_signal_outcomes o on o.paper_signal_id = s.id
+ where o.status in ('TARGET', 'STOP')
+   and s.session_date >= :'since'::date
+ group by 1 order by 1;
+
 \echo === POSITION SIZE (paper sizing against the capital you intend to trade) ===
 select round(avg(s.entry_price * s.quantity), 0) as avg_notional_rs,
        round(avg(s.risk_amount), 2)              as avg_risk_rs,
