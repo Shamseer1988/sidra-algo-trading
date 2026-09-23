@@ -430,6 +430,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(input).toBeDisabled();
     // A viewer must not be able to hand a live order path to themselves.
     await expect(page.getByLabel("Approval mode")).toBeDisabled();
+    await expect(page.getByLabel("Live broker")).toBeDisabled();
     await expect(page.getByRole("button", { name: "Save controls" })).toHaveCount(0);
   });
 
@@ -516,6 +517,10 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     const approvalMode = page.getByLabel("Approval mode");
     await expect(approvalMode).toHaveValue("DISABLED");
     await expect(page.getByText("Disabled — no live order path is offered.")).toBeVisible();
+
+    // No broker chosen is a refusal, not a fallback to whichever one exists.
+    await expect(page.getByLabel("Live broker")).toHaveValue("NONE");
+    await expect(page.getByText("No broker selected — no order can be routed anywhere.")).toBeVisible();
 
     // Save controls
     const saveBtn = page.getByRole("button", { name: "Save controls" });

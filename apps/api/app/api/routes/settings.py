@@ -16,6 +16,11 @@ TRADING_KEY = "trading_controls"
 
 # Who authorises a live submission. DISABLED means no live path is offered at all.
 EXECUTION_APPROVAL_MODES = frozenset({"DISABLED", "TELEGRAM_APPROVAL", "AUTOMATIC"})
+
+# Which broker a live order would reach. NONE is the default and means no
+# broker is selected, which is a refusal rather than a fallback: a system that
+# picked one for you is a system that could pick the wrong one.
+LIVE_BROKERS = frozenset({"NONE", "UPSTOX", "FIRSTOCK"})
 DEFAULT_TRADING_CONTROLS = {
     "account_capital": 10000.0,
     "risk_per_trade_percent": 1.0,
@@ -35,6 +40,7 @@ DEFAULT_TRADING_CONTROLS = {
     "intraday_leverage_enabled": True,
     "intraday_leverage_multiplier": 5.0,
     "execution_approval_mode": "DISABLED",
+    "live_broker": "NONE",
     "daily_profit_target": 0.0,
     "daily_loss_limit": 0.0,
 }
@@ -65,6 +71,12 @@ class TradingControls(BaseModel):
     # the other two describe who authorises submission, not whether submission is
     # permitted, which remains governed by the live readiness gates.
     execution_approval_mode: str = Field(default="DISABLED")
+    # The broker a live order would be sent to. Separate from the approval
+    # mode because they answer different questions — who authorises a
+    # submission, and where it goes — and a system where one implies the
+    # other is one where changing your mind about a broker silently changes
+    # who has to approve.
+    live_broker: str = Field(default="NONE")
 
     # Realised-plus-open session P&L at which the day stops, in rupees. Zero
     # disables the limit. Deliberately rupees rather than a percentage: a daily
@@ -84,6 +96,14 @@ class TradingControls(BaseModel):
         normalized = value.strip().upper()
         if normalized not in EXECUTION_APPROVAL_MODES:
             raise ValueError(f"execution_approval_mode must be one of {sorted(EXECUTION_APPROVAL_MODES)}")
+        return normalized
+
+    @field_validator("live_broker")
+    @classmethod
+    def validate_live_broker(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in LIVE_BROKERS:
+            raise ValueError(f"live_broker must be one of {sorted(LIVE_BROKERS)}")
         return normalized
 
 

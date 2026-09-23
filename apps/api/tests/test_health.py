@@ -84,3 +84,38 @@ async def test_readiness_report_preserves_paper_mode_and_never_reports_live_trad
 
     assert report.mode in {"PAPER", "REPLAY"}
     assert report.live_trading_enabled is False
+
+
+def test_live_broker_ships_unselected() -> None:
+    """No broker chosen is a refusal, not a fallback to whichever exists."""
+    assert TradingControls.model_validate(DEFAULT_TRADING_CONTROLS).live_broker == "NONE"
+
+
+def test_a_stored_profile_without_a_broker_reads_as_none() -> None:
+    stored = {key: value for key, value in DEFAULT_TRADING_CONTROLS.items() if key != "live_broker"}
+    assert TradingControls.model_validate(stored).live_broker == "NONE"
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [("upstox", "UPSTOX"), ("  firstock  ", "FIRSTOCK"), ("None", "NONE")],
+)
+def test_live_broker_is_normalised(given: str, expected: str) -> None:
+    controls = TradingControls.model_validate({**DEFAULT_TRADING_CONTROLS, "live_broker": given})
+    assert controls.live_broker == expected
+
+
+@pytest.mark.parametrize("given", ["", "ZERODHA", "upstx", "both"])
+def test_an_unrecognised_broker_is_rejected(given: str) -> None:
+    """A typo must fail loudly rather than route an order somewhere unintended."""
+    with pytest.raises(ValidationError):
+        TradingControls.model_validate({**DEFAULT_TRADING_CONTROLS, "live_broker": given})
+
+
+def test_broker_and_approval_mode_are_independent() -> None:
+    """Changing where an order goes must not change who approves it."""
+    controls = TradingControls.model_validate(
+        {**DEFAULT_TRADING_CONTROLS, "live_broker": "UPSTOX", "execution_approval_mode": "TELEGRAM_APPROVAL"}
+    )
+    assert controls.live_broker == "UPSTOX"
+    assert controls.execution_approval_mode == "TELEGRAM_APPROVAL"

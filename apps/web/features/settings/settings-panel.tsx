@@ -24,6 +24,7 @@ export function SettingsPanel({
 }) {
   const isLeverageEnabled = Boolean(controls.intraday_leverage_enabled ?? true);
   const approvalMode = controls.execution_approval_mode ?? "DISABLED";
+  const liveBroker = controls.live_broker ?? "NONE";
 
   return (
     <section>
@@ -54,6 +55,11 @@ export function SettingsPanel({
                 paper-only until those gates open.
               </p>
               <p className="mt-1.5 text-xs leading-5 text-amber-200/80">
+                {liveBroker === "NONE"
+                  ? "No broker selected — no order can be routed anywhere."
+                  : `Orders would be routed to ${liveBroker}.`}
+              </p>
+              <p className="mt-1.5 text-xs leading-5 text-amber-200/80">
                 {approvalMode === "DISABLED"
                   ? "Disabled — no live order path is offered."
                   : approvalMode === "TELEGRAM_APPROVAL"
@@ -62,19 +68,35 @@ export function SettingsPanel({
               </p>
             </div>
 
-            <label className="field-label whitespace-nowrap">
-              Approval mode
-              <select
-                disabled={!isAdmin}
-                value={approvalMode}
-                onChange={(event) => onChange("execution_approval_mode", event.target.value)}
-                className="field-input mt-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono text-sm"
-              >
-                <option value="DISABLED">Disabled</option>
-                <option value="TELEGRAM_APPROVAL">Telegram approval</option>
-                <option value="AUTOMATIC">Automatic</option>
-              </select>
-            </label>
+            <div className="flex flex-col gap-3 sm:min-w-[13rem]">
+              <label className="field-label whitespace-nowrap">
+                Live broker
+                <select
+                  disabled={!isAdmin}
+                  value={liveBroker}
+                  onChange={(event) => onChange("live_broker", event.target.value)}
+                  className="field-input mt-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono text-sm"
+                >
+                  <option value="NONE">None selected</option>
+                  <option value="UPSTOX">Upstox</option>
+                  <option value="FIRSTOCK">Firstock</option>
+                </select>
+              </label>
+
+              <label className="field-label whitespace-nowrap">
+                Approval mode
+                <select
+                  disabled={!isAdmin}
+                  value={approvalMode}
+                  onChange={(event) => onChange("execution_approval_mode", event.target.value)}
+                  className="field-input mt-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono text-sm"
+                >
+                  <option value="DISABLED">Disabled</option>
+                  <option value="TELEGRAM_APPROVAL">Telegram approval</option>
+                  <option value="AUTOMATIC">Automatic</option>
+                </select>
+              </label>
+            </div>
           </div>
         </div>
 
@@ -111,7 +133,7 @@ export function SettingsPanel({
         {/* Core Controls Grid */}
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {Object.entries(controls)
-            .filter(([key]) => !["intraday_leverage_enabled", "intraday_leverage_multiplier", "execution_approval_mode"].includes(key))
+            .filter(([key]) => !["intraday_leverage_enabled", "intraday_leverage_multiplier", "execution_approval_mode", "live_broker"].includes(key))
             .map(([key, value]) => (
               <label key={key} className="field-label capitalize">
                 {key.replaceAll("_", " ")}
