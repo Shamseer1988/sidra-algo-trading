@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import ExecutionReconciliation, LiveReadinessCheck, User
+from app.services.broker_adapter import SUPPORTED_BROKERS
 
 # app.services.live_orders can place, modify and cancel orders at Firstock. This
 # flipped in the same change that added it, and the test suite asserts the two
@@ -115,6 +116,12 @@ async def inspect_live_readiness(session: AsyncSession, settings: Settings) -> L
     from app.services.live_activation import current_activation
 
     activation = await current_activation(session)
+    # Read here rather than taken as an argument: the readiness report is what an
+    # operator reads to find out what is still missing, and "nobody has chosen a
+    # broker" is one of the things that can be missing.
+    from app.services.live_execution_gateway import selected_live_broker
+
+    live_broker = await selected_live_broker(session)
     gates = [
         LiveGate(
             "runtime_mode",
@@ -141,6 +148,14 @@ async def inspect_live_readiness(session: AsyncSession, settings: Settings) -> L
             "PostgreSQL and Redis must be healthy at activation time."
             if database_healthy and redis_healthy
             else "PostgreSQL or Redis health check failed.",
+        ),
+        LiveGate(
+            "broker_selected",
+            "Live broker selected",
+            live_broker in SUPPORTED_BROKERS,
+            f"Live orders would be sent to {live_broker}."
+            if live_broker in SUPPORTED_BROKERS
+            else "No live broker is selected. Choose one in admin settings; NONE sends nothing.",
         ),
         LiveGate(
             "broker_adapter",

@@ -16,6 +16,7 @@ from sqlalchemy import delete, select
 
 from app.db.models import LiveActivation, LiveOrderApproval, LiveOrderSubmission
 from app.db.session import SessionLocal
+from app.services.broker_adapter import BrokerOrderDescription, UpstoxAdapter
 from app.services.live_approval import (
     APPROVED,
     BLOCKED,
@@ -33,14 +34,26 @@ from app.services.live_orders import LiveOrderRequest
 from app.services.telegram import TelegramError
 
 REQUEST = LiveOrderRequest(
-    exchange="NSE",
-    trading_symbol="IDEA-EQ",
-    product="I",
-    price_type="LMT",
-    transaction_type="B",
+    instrument_token="NSE_EQ|INE669E01016",
+    side="BUY",
     quantity=10,
+    order_type="LIMIT",
+    product="INTRADAY",
     price=Decimal("418"),
 )
+
+# What the operator is shown: the broker's own name for the instrument.
+DESCRIPTION = BrokerOrderDescription(
+    True,
+    exchange="NSE_EQ",
+    symbol="IDEA-EQ",
+    side="BUY",
+    order_type="LIMIT",
+    product="I",
+    validity="DAY",
+)
+
+BROKER = "UPSTOX"
 
 
 class FakeRedis:
@@ -53,11 +66,18 @@ class FakeClient:
         self.placements: list[dict] = []
 
     async def order_margin(self, **_kwargs: object) -> dict:
-        return {"availableMargin": "500000", "marginOnNewOrder": "4180"}
+        return {"final_margin": 4180.0}
+
+    async def funds_and_margin(self, _segment: str = "SEC") -> dict:
+        return {"equity": {"available_margin": 500000.0}}
 
     async def place_order(self, **kwargs: object) -> object:
         self.placements.append(dict(kwargs))
-        return {"orderNumber": "24091500042"}
+        return ["24091500042"]
+
+
+def adapter_for(client: FakeClient) -> UpstoxAdapter:
+    return UpstoxAdapter(client)
 
 
 def settings(expiry: int = 180) -> SimpleNamespace:
@@ -106,15 +126,16 @@ async def arm(session, minutes: int = 60) -> None:  # noqa: ANN001
     await session.commit()
 
 
-async def pending_approval(session, *, expires_in: int = 180) -> LiveOrderApproval:  # noqa: ANN001
+async def pending_approval(session, *, expires_in: int = 180, broker: str = BROKER) -> LiveOrderApproval:  # noqa: ANN001
     approval = LiveOrderApproval(
         reference_id=new_reference_id(),
-        instrument_token="NSE_EQ|INE669E01016",
-        trading_symbol=REQUEST.trading_symbol,
-        exchange=REQUEST.exchange,
+        instrument_token=REQUEST.instrument_token,
+        broker=broker,
+        trading_symbol=DESCRIPTION.symbol,
+        exchange=DESCRIPTION.exchange,
         product=REQUEST.product,
-        price_type=REQUEST.price_type,
-        transaction_type=REQUEST.transaction_type,
+        price_type=REQUEST.order_type,
+        transaction_type=REQUEST.side,
         quantity=REQUEST.quantity,
         price=REQUEST.price,
         status=PENDING,
@@ -136,7 +157,7 @@ async def test_the_operator_is_told_what_they_are_approving(monkeypatch: pytest.
     async with SessionLocal() as session:
         await clean(session)
         approval = await request_live_approval(
-            session, settings(), request=REQUEST, instrument_token="NSE_EQ|INE669E01016"
+            session, settings(), request=REQUEST, description=DESCRIPTION, broker=BROKER
         )
         text = sent[0][0]
         assert "IDEA-EQ" in text
@@ -163,7 +184,7 @@ async def test_the_approval_is_stored_before_the_message_goes_out(
     monkeypatch.setattr("app.services.telegram.TelegramNotificationService.send_message", _send)
     async with SessionLocal() as session:
         await clean(session)
-        await request_live_approval(session, settings(), request=REQUEST, instrument_token="token")
+        await request_live_approval(session, settings(), request=REQUEST, description=DESCRIPTION, broker=BROKER)
         await clean(session)
     assert stored_at_send_time == [1]
 
@@ -175,7 +196,9 @@ async def test_an_undeliverable_alert_blocks_rather_than_looking_ignored(
     patch_telegram(monkeypatch, [], raises=TelegramError("bot token rejected"))
     async with SessionLocal() as session:
         await clean(session)
-        approval = await request_live_approval(session, settings(), request=REQUEST, instrument_token="token")
+        approval = await request_live_approval(
+            session, settings(), request=REQUEST, description=DESCRIPTION, broker=BROKER
+        )
         assert approval.status == BLOCKED
         assert "Telegram alert failed" in approval.block_reason
         await clean(session)
@@ -188,7 +211,7 @@ async def decide(session, client, reference_id: str, action: str, mode: str = "T
     return await decide_live_approval(
         session,
         settings(),
-        client,
+        adapter_for(client),
         FakeRedis(),
         reference_id=reference_id,
         action=action,
@@ -333,19 +356,47 @@ async def test_unanswered_approvals_are_expired(monkeypatch: pytest.MonkeyPatch)
         await clean(session)
 
 
-def test_the_message_names_the_side_in_words() -> None:
-    """B and S are the broker's language, not the operator's."""
+def test_the_message_names_the_side_in_words_and_says_where_it_is_going() -> None:
+    """The row stores the side in the operator's language, not the broker's.
+
+    And it names the broker, because two are now possible: an approval that does
+    not say where the money goes is not an informed one.
+    """
     approval = SimpleNamespace(
-        transaction_type="S",
+        transaction_type="SELL",
+        broker="UPSTOX",
         quantity=5,
         trading_symbol="IDEA-EQ",
-        exchange="NSE",
+        exchange="NSE_EQ",
         price=Decimal("400"),
-        product="I",
-        price_type="LMT",
+        product="INTRADAY",
+        price_type="LIMIT",
         expires_at=datetime.now(UTC),
     )
-    assert "SELL" in approval_message(approval)
+    text = approval_message(approval)
+    assert "SELL" in text
+    assert "UPSTOX" in text
+    assert "B</b>" not in text
+
+
+async def test_an_approval_for_another_broker_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The selection can change between the question and the answer.
+
+    Sending it anyway would place a real order at a broker the operator did not
+    approve — with the same symbol, side, size and price they did read, which is
+    exactly what makes it easy to miss.
+    """
+    patch_green(monkeypatch)
+    client = FakeClient()
+    async with SessionLocal() as session:
+        await clean(session)
+        await arm(session)
+        approval = await pending_approval(session, broker="FIRSTOCK")
+        result = await decide(session, client, approval.reference_id, "approve")
+        assert result.status == BLOCKED
+        assert "FIRSTOCK" in result.detail and "UPSTOX" in result.detail
+        assert client.placements == []
+        await clean(session)
 
 
 def test_approved_is_not_the_same_as_submitted() -> None:

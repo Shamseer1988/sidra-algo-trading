@@ -1,8 +1,12 @@
-"""Compare Firstock's view of the account against our own.
+"""Compare the broker's view of the account against our own.
 
 Phase 2 of the live-execution layer. Nothing here submits, modifies or cancels:
-it reads broker state through the Phase 1 report client and decides one thing —
-whether our record of the world matches the broker's well enough to trade.
+it reads broker state through a read-only adapter and decides one thing — whether
+our record of the world matches the broker's well enough to trade.
+
+Which broker is not this module's business. It works from the normalised records
+the adapter produces, so the same logic — and the same tests — cover Upstox and
+Firstock, rather than two nearly-identical parsers that would drift.
 
 The default answer is no. ``safe_to_trade`` is granted only when every check
 passes, so a bug that skips a check, an exception mid-way, or an endpoint that
@@ -28,6 +32,12 @@ Why blocking is the right default for each finding:
     We believe an order is finished and the broker says it is still working, or
     the reverse. Our stop-loss accounting is wrong in one direction or the other.
 
+``UNREADABLE_ORDER_STATUS``
+    The broker reported a status no adapter recognises. It is blocking for the
+    same reason an unreadable position is: we cannot tell whether the order is
+    working or finished, and an unrecognised status that fell into the gap
+    between the two would be silently ignored by every check below.
+
 ``MISSING_AT_BROKER`` is the one finding that only warrants review: an order we
 created but have not submitted looks exactly like this, and that is a normal
 state between intent and submission.
@@ -35,19 +45,17 @@ state between intent and submission.
 
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ExecutionReconciliation, OmsOrder
-from app.services.firstock.client import FirstockError
-from app.services.firstock.orders import FirstockReportClient
-
-# Documented Firstock order statuses that mean the order is still working.
-BROKER_OPEN_STATUSES = frozenset({"OPEN", "TRIGGER_PENDING", "PENDING"})
-BROKER_TERMINAL_STATUSES = frozenset({"COMPLETE", "FILLED", "CANCELLED", "REJECTED"})
+from app.services.broker_adapter import (
+    OPEN_STATUSES,
+    STATUS_UNREADABLE,
+    TERMINAL_STATUSES,
+    BrokerAdapter,
+)
 
 # Our own terminal states, from services/oms.py.
 OMS_TERMINAL_STATUSES = frozenset({"FILLED", "CANCELLED", "REJECTED"})
@@ -89,21 +97,9 @@ class LiveReconciliationReport:
         return f"Trading blocked: {blocking} blocking ({kinds}), {review} for review."[:255]
 
 
-def _decimal(value: Any) -> Decimal | None:
-    """Firstock returns numbers as strings. Unreadable is None, never zero.
-
-    Zero means flat, which means safe. An unparseable quantity means we do not
-    know the exposure, which is the opposite, so the two must not share a value.
-    """
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, TypeError, ValueError):
-        return None
-
-
 async def reconcile_live_execution(
     session: AsyncSession,
-    client: FirstockReportClient,
+    adapter: BrokerAdapter,
 ) -> LiveReconciliationReport:
     """Read broker state and decide whether it is safe to trade.
 
@@ -116,9 +112,9 @@ async def reconcile_live_execution(
     findings: list[Finding] = []
 
     try:
-        broker_orders = await client.order_book()
-        broker_positions = await client.position_book()
-    except FirstockError as exc:
+        broker_orders = await adapter.normalised_orders()
+        broker_positions = await adapter.normalised_positions()
+    except Exception as exc:
         # Deliberately fail closed. We cannot prove the account is in a safe state.
         return LiveReconciliationReport(
             status="BLOCKED",
@@ -156,12 +152,28 @@ async def reconcile_live_execution(
 
     seen_broker_ids: set[str] = set()
     for record in broker_orders:
-        number = str(record.get("orderNumber") or "").strip()
+        number = record.broker_order_id
         if not number:
             continue
         seen_broker_ids.add(number)
-        status = str(record.get("status") or "").upper()
+        status = record.status
         local = by_broker_id.get(number)
+
+        if status == STATUS_UNREADABLE:
+            findings.append(
+                Finding(
+                    kind="UNREADABLE_ORDER_STATUS",
+                    severity=BLOCKING,
+                    detail=(
+                        f"Broker order {number} reported status "
+                        f"{record.raw.get('status')!r}, which no status map recognises. "
+                        "Whether it is still working cannot be established."
+                    ),
+                    broker_order_number=number,
+                    oms_order_id=str(local.id) if local is not None else None,
+                )
+            )
+            continue
 
         if local is None:
             findings.append(
@@ -175,7 +187,7 @@ async def reconcile_live_execution(
             continue
 
         local_terminal = local.status in OMS_TERMINAL_STATUSES
-        broker_working = status in BROKER_OPEN_STATUSES
+        broker_working = status in OPEN_STATUSES
         if local_terminal and broker_working:
             findings.append(
                 Finding(
@@ -186,7 +198,7 @@ async def reconcile_live_execution(
                     oms_order_id=str(local.id),
                 )
             )
-        elif not local_terminal and status in BROKER_TERMINAL_STATUSES:
+        elif not local_terminal and status in TERMINAL_STATUSES:
             findings.append(
                 Finding(
                     kind="STATUS_DIVERGENCE",
@@ -211,15 +223,15 @@ async def reconcile_live_execution(
         )
 
     for position in broker_positions:
-        symbol = str(position.get("tradingSymbol") or "unknown")
-        net = _decimal(position.get("netQuantity"))
+        symbol = position.symbol
+        net = position.net_quantity
         if net is None:
             findings.append(
                 Finding(
                     kind="UNREADABLE_POSITION",
                     severity=BLOCKING,
                     detail=(
-                        f"Broker reported an unreadable netQuantity for {symbol}. "
+                        f"Broker reported an unreadable net quantity for {symbol}. "
                         "Exposure cannot be established, so trading must not continue."
                     ),
                 )

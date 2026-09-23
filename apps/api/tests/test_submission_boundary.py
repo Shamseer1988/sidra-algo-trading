@@ -22,6 +22,7 @@ import pytest
 
 from app.services.firstock.orders import FirstockOrderClient, FirstockReportClient
 from app.services.live_readiness import SUBMISSION_ADAPTER_IMPLEMENTED
+from app.services.upstox_orders import UpstoxOrderClient, UpstoxReportClient
 
 # State-changing order endpoints, exactly as each broker names them. Firstock
 # names methods; Upstox names URL paths. Both spellings belong here, because a
@@ -84,8 +85,25 @@ def string_literals(tree: ast.AST) -> set[str]:
     }
 
 
-def called_names(tree: ast.AST) -> set[str]:
-    return {node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+def referenced_names(tree: ast.AST) -> set[str]:
+    """Every name the module mentions, not only the ones it calls directly.
+
+    Deliberately stricter than looking for a call. ``factory = UpstoxOrderClient``
+    followed by ``factory(...)`` constructs a submission-capable client without
+    ever calling that name, and a guard that only watched calls would have
+    nothing to say about it. Naming the class at all is the thing being fenced.
+    """
+    return {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} | {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    }
+
+
+def imported_names(tree: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom | ast.Import):
+            names.update(alias.asname or alias.name.rsplit(".", 1)[-1] for alias in node.names)
+    return names
 
 
 def test_only_a_broker_adapter_names_a_state_changing_endpoint() -> None:
@@ -115,10 +133,15 @@ def test_each_adapter_does_name_its_own(adapter: str, expected: set[str]) -> Non
     assert expected <= found
 
 
+@pytest.mark.parametrize("client", [FirstockReportClient, UpstoxReportClient])
 @pytest.mark.parametrize("name", ["place_order", "modify_order", "cancel_order", "exit_order", "submit"])
-def test_the_read_only_client_exposes_no_way_to_change_an_order(name: str) -> None:
-    """This is what makes reconciliation and shadow evaluation provably safe."""
-    assert not hasattr(FirstockReportClient, name)
+def test_the_read_only_client_exposes_no_way_to_change_an_order(client: type, name: str) -> None:
+    """This is what makes reconciliation and shadow evaluation provably safe.
+
+    Both brokers, because an operator now chooses between them and a guarantee
+    that holds at one of them is not a guarantee.
+    """
+    assert not hasattr(client, name)
 
 
 @pytest.mark.parametrize("name", ["place_order", "modify_order", "cancel_order"])
@@ -126,17 +149,52 @@ def test_the_order_client_is_the_one_that_can(name: str) -> None:
     assert hasattr(FirstockOrderClient, name)
 
 
+@pytest.mark.parametrize("name", ["place_order", "cancel_order"])
+def test_the_upstox_order_client_is_the_one_that_can(name: str) -> None:
+    """Guards the guard: without this, deleting place_order would look like a pass."""
+    assert hasattr(UpstoxOrderClient, name)
+
+
 @pytest.mark.parametrize("client", SUBMISSION_CLIENTS)
-def test_only_the_gateway_constructs_a_submission_capable_client(client: str) -> None:
+def test_only_the_gateway_names_a_submission_capable_client(client: str) -> None:
     """Asking "what can reach a broker with intent" should be one grep."""
     offenders: list[str] = []
     for path in sorted(APP_ROOT.rglob("*.py")):
         relative = path.relative_to(APP_ROOT).as_posix()
         if relative == CLIENT_FACTORY:
             continue
-        if client in called_names(ast.parse(path.read_text(encoding="utf-8"))):
+        if client in referenced_names(ast.parse(path.read_text(encoding="utf-8"))):
             offenders.append(relative)
-    assert offenders == [], f"{client} was built outside the gateway: " + "; ".join(offenders)
+    assert offenders == [], f"{client} was named outside the gateway: " + "; ".join(offenders)
+
+
+def test_the_gateway_does_name_them() -> None:
+    """Guards the guard: a renamed class would make the fence above vacuous."""
+    named = referenced_names(parse(CLIENT_FACTORY))
+    assert set(SUBMISSION_CLIENTS) <= named
+
+
+@pytest.mark.parametrize("caller", READ_ONLY_CALLERS)
+def test_a_read_only_caller_imports_nothing_that_can_submit(caller: str) -> None:
+    """Recovery is the one that matters most.
+
+    The thing it is resolving is an order that may already exist, so code that
+    could place one there turns a single uncertain order into two certain ones.
+    """
+    imported = imported_names(parse(caller))
+    assert not (set(SUBMISSION_CLIENTS) & imported), f"{caller} imports a client that can submit"
+
+
+@pytest.mark.parametrize("caller", READ_ONLY_CALLERS)
+def test_a_read_only_caller_names_no_broker_at_all(caller: str) -> None:
+    """Broker-neutral by construction, not by care.
+
+    A module that knows which broker it is talking to is a module that will grow
+    a second code path the day a second broker is selected, and the two will
+    drift. These three work from the adapter's normalised records instead.
+    """
+    imported = imported_names(parse(caller))
+    assert not ({"FirstockReportClient", "UpstoxReportClient"} & imported), f"{caller} names a broker's own client"
 
 
 @pytest.mark.parametrize("relative", READ_ONLY_CALLERS)

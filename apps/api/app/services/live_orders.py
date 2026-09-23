@@ -1,4 +1,4 @@
-"""Place, modify and cancel live orders at Firstock.
+"""Place live orders at whichever broker an operator selected.
 
 Phase 4. This is the first module in the repository that can change state at a
 broker, and it is written around one fact: a network call that does not return
@@ -24,16 +24,23 @@ the risk engine sizes against. So an UNKNOWN is never retried here and never
 guessed at: it is recorded, and resolved by looking the order up in the broker's
 own book through ``live_order_recovery``.
 
-**Identity.** ``client_order_id`` travels to the broker in the documented
-``remarks`` field. That is what makes recovery possible at all: an attempt whose
-outcome was never learned can be found by the identifier we chose, instead of
-being guessed at from symbol, side and quantity — which cannot distinguish our
-order from a second one like it.
+**Identity.** ``client_order_id`` travels to the broker in a client-chosen
+field — ``remarks`` at Firstock, ``tag`` at Upstox — and the adapter knows which.
+That is what makes recovery possible at all: an attempt whose outcome was never
+learned can be found by the identifier we chose, instead of being guessed at from
+symbol, side and quantity, which cannot distinguish our order from a second one
+like it.
 
-**Slicing.** Firstock slices an order that exceeds the exchange freeze quantity,
-so one submission can produce several order numbers. They are all stored; a
+**Slicing.** Both brokers can split an order that exceeds the exchange freeze
+quantity, so one submission can produce several order ids. They are all stored; a
 schema that held one would silently lose the remainder, and the lost slices are
 real exposure.
+
+**Two vocabularies, written down together.** The request is canonical — BUY,
+LIMIT, INTRADAY, an instrument token — and the record also stores what the broker
+was actually asked for, resolved by the adapter *before* the row is written. An
+operator resolving an UNKNOWN is then reading the same words the broker's order
+book shows them, rather than translating in their head against a live position.
 
 Nothing in this module decides whether an order *should* be sent. That is
 ``live_execution``'s job, and it is kept separate so that the code which can
@@ -50,11 +57,10 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import LiveOrderSubmission
-from app.services.firstock.orders import (
-    FirstockApiError,
-    FirstockAuthError,
-    FirstockOrderClient,
-    FirstockTransportUnknown,
+from app.services.broker_adapter import (
+    BrokerAdapter,
+    BrokerOrder,
+    BrokerOrderDescription,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,24 +71,42 @@ UNKNOWN = "UNKNOWN"
 
 PREPARED = "PREPARED"
 
-# Firstock's remarks field carries our identifier. Keep it short enough to be
-# safe in a callback payload and long enough to be unique without coordination.
+# The broker's client-tag field carries our identifier. Keep it short enough for
+# Upstox's 40-character tag limit and long enough to be unique without
+# coordination.
 CLIENT_ORDER_ID_PREFIX = "sidra"
 
 
 @dataclass(frozen=True)
 class LiveOrderRequest:
-    """Everything the broker needs, and nothing that decides whether to send it."""
+    """Everything the broker needs, and nothing that decides whether to send it.
 
-    exchange: str
-    trading_symbol: str
-    product: str
-    price_type: str
-    transaction_type: str
+    Stated in the canonical vocabulary rather than any broker's, so that the
+    gates above it, the approval message an operator reads, and the audit trail
+    all say the same thing regardless of where the order ends up going.
+    """
+
+    instrument_token: str
+    side: str
     quantity: int
+    order_type: str
+    product: str
     price: Decimal
     trigger_price: Decimal = Decimal("0")
-    retention: str = "DAY"
+    validity: str = "DAY"
+
+    def to_broker_order(self, client_order_id: str) -> BrokerOrder:
+        return BrokerOrder(
+            instrument_token=self.instrument_token,
+            side=self.side,
+            quantity=self.quantity,
+            order_type=self.order_type,
+            product=self.product,
+            price=self.price,
+            client_order_id=client_order_id,
+            trigger_price=self.trigger_price,
+            validity=self.validity,
+        )
 
 
 @dataclass(frozen=True)
@@ -137,7 +161,9 @@ def _order_numbers(data: Any) -> list[str]:
 async def prepare_submission(
     session: AsyncSession,
     request: LiveOrderRequest,
+    description: BrokerOrderDescription,
     *,
+    broker: str,
     client_order_id: str,
     paper_signal_id: Any = None,
     oms_order_id: Any = None,
@@ -148,33 +174,50 @@ async def prepare_submission(
     Split from ``send_prepared_order`` so that the commit boundary is the
     caller's and therefore visible. A single function that did both would make
     the write-ahead guarantee depend on a transaction the reader cannot see.
+
+    Takes the resolved ``description`` rather than resolving it here, so the row
+    records the order in the broker's own words — and so a symbol that cannot be
+    named is refused before anything is written, not discovered mid-send.
     """
     record = LiveOrderSubmission(
         client_order_id=client_order_id,
         paper_signal_id=paper_signal_id,
         oms_order_id=oms_order_id,
         approval_reference=approval_reference,
-        exchange=request.exchange,
-        trading_symbol=request.trading_symbol,
-        product=request.product,
-        price_type=request.price_type,
-        transaction_type=request.transaction_type,
-        retention=request.retention,
+        broker=broker,
+        exchange=description.exchange,
+        trading_symbol=description.symbol,
+        product=description.product,
+        price_type=description.order_type,
+        transaction_type=description.side,
+        retention=description.validity,
         quantity=request.quantity,
         price=request.price,
         trigger_price=request.trigger_price,
         status=PREPARED,
         request_snapshot={
-            "exchange": request.exchange,
-            "tradingSymbol": request.trading_symbol,
-            "product": request.product,
-            "priceType": request.price_type,
-            "transactionType": request.transaction_type,
-            "retention": request.retention,
+            "broker": broker,
+            # What the broker is being asked for.
+            "exchange": description.exchange,
+            "symbol": description.symbol,
+            "product": description.product,
+            "orderType": description.order_type,
+            "side": description.side,
+            "validity": description.validity,
             "quantity": str(request.quantity),
             "price": str(request.price),
             "triggerPrice": str(request.trigger_price),
-            "remarks": client_order_id,
+            "clientOrderId": client_order_id,
+            # What this system decided, before translation. Kept alongside so a
+            # mapping bug is visible in the record rather than only in its
+            # consequences.
+            "canonical": {
+                "instrumentToken": request.instrument_token,
+                "side": request.side,
+                "orderType": request.order_type,
+                "product": request.product,
+                "validity": request.validity,
+            },
         },
     )
     session.add(record)
@@ -183,9 +226,10 @@ async def prepare_submission(
 
 
 async def send_prepared_order(
-    client: FirstockOrderClient,
+    adapter: BrokerAdapter,
     record: LiveOrderSubmission,
     request: LiveOrderRequest,
+    description: BrokerOrderDescription,
 ) -> SubmissionOutcome:
     """Send one prepared order and classify the result. Never retries.
 
@@ -193,46 +237,19 @@ async def send_prepared_order(
     encounter most often — a timeout — is exactly the case where the first one
     may already be live. Retrying is the caller's decision to make with the
     order book in hand, not this function's to make blind.
-    """
-    try:
-        data = await client.place_order(
-            exchange=request.exchange,
-            trading_symbol=request.trading_symbol,
-            product=request.product,
-            price_type=request.price_type,
-            transaction_type=request.transaction_type,
-            retention=request.retention,
-            quantity=str(request.quantity),
-            price=str(request.price),
-            trigger_price=str(request.trigger_price),
-            remarks=record.client_order_id,
-        )
-    except FirstockTransportUnknown as exc:
-        # The request may have reached the exchange. This is the whole reason
-        # the record above was committed first.
-        return SubmissionOutcome(status=UNKNOWN, detail=str(exc))
-    except FirstockAuthError as exc:
-        # A rejected session token is answered by the broker before an order is
-        # created, so this is a refusal rather than an unknown.
-        return SubmissionOutcome(status=REJECTED, detail=str(exc), failure_name="INVALID_JKEY")
-    except FirstockApiError as exc:
-        return SubmissionOutcome(
-            status=REJECTED,
-            detail=str(exc),
-            failure_code=exc.code,
-            failure_name=exc.name,
-        )
 
-    numbers = _order_numbers(data)
-    if not numbers:
-        # A success envelope with no order number is not a placement we can
-        # track, and treating it as accepted would create an order we cannot
-        # cancel. It is unknown until the order book says otherwise.
-        return SubmissionOutcome(
-            status=UNKNOWN,
-            detail="Broker returned success without an order number.",
-        )
-    return SubmissionOutcome(status=ACCEPTED, broker_order_numbers=numbers, detail=f"Accepted as {', '.join(numbers)}")
+    The classification is the adapter's; this function only carries it across.
+    Re-deriving it here would mean two places that decide what UNKNOWN means,
+    and they would drift.
+    """
+    submission = await adapter.submit(request.to_broker_order(record.client_order_id), description)
+    return SubmissionOutcome(
+        status=submission.status,
+        broker_order_numbers=list(submission.broker_order_ids),
+        detail=submission.detail,
+        failure_code=submission.failure_code,
+        failure_name=submission.failure_name,
+    )
 
 
 def apply_outcome(record: LiveOrderSubmission, outcome: SubmissionOutcome, response: Any = None) -> None:

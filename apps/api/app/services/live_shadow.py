@@ -15,9 +15,9 @@ and every one of them is cheaper to find in a table than in a trading session.
 
 Two properties this module must keep:
 
-**It cannot submit.** It holds a ``FirstockReportClient``, which has no
-placeOrder, and it calls the live risk engine, which returns a verdict rather
-than performing anything.
+**It cannot submit.** It holds a read-only adapter, built over a client with no
+placement method at all, and it calls the live risk engine, which returns a
+verdict rather than performing anything.
 
 **It cannot break paper trading.** Paper execution is the system that is
 currently working and producing the results the operator depends on. Shadow
@@ -28,9 +28,9 @@ an evidence row, never a paper trade.
 One modelling decision is recorded here rather than buried. The paper system
 places its entry as MARKET, but the shadow evaluates a LIMIT order at the
 signal's entry price, for two reasons: a market order on a thin intraday name is
-how a live system pays for its slippage, and ``orderMargin`` needs a real price
-to return a meaningful number. This is a proposal about how live entries should
-be placed, and it should be confirmed before Phase 4 makes it real.
+how a live system pays for its slippage, and a margin quote needs a real price to
+return a meaningful number. This is a proposal about how live entries should be
+placed, and it should be confirmed before Phase 4 makes it real.
 """
 
 import logging
@@ -44,35 +44,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import LiveShadowDecision, PaperSignal
-from app.services.firstock.orders import FirstockReportClient
+from app.services.broker_adapter import (
+    BUY,
+    DELIVERY,
+    INTRADAY,
+    LIMIT,
+    SELL,
+    BrokerAdapter,
+    BrokerOrder,
+    BrokerOrderDescription,
+)
 from app.services.live_risk import authorize_live_order
 from app.services.live_symbols import SymbolTranslation, translate_for_order
 
 logger = logging.getLogger(__name__)
 
-# Firstock product codes. ``I`` is intraday (MIS), ``C`` is cash and carry.
-# The paper system's leverage switch is what decides which one a live order
-# would use, so the shadow reads the same control rather than assuming.
-PRODUCT_INTRADAY = "I"
-PRODUCT_DELIVERY = "C"
+# The paper system's leverage switch is what decides whether a live order would
+# be intraday or delivery, so the shadow reads the same control rather than
+# assuming. The broker's own code for each is the adapter's business.
+PRODUCT_INTRADAY = INTRADAY
+PRODUCT_DELIVERY = DELIVERY
 
 # See the module docstring: the shadow prices entries as limits.
-SHADOW_PRICE_TYPE = "LMT"
+SHADOW_PRICE_TYPE = LIMIT
 
 REASON_MAX_LENGTH = 500
-
-
-@dataclass(frozen=True)
-class ShadowPayload:
-    """The order as it would have been addressed at the broker."""
-
-    exchange: str
-    trading_symbol: str
-    product: str
-    price_type: str
-    transaction_type: str
-    price: str
-    quantity: str
 
 
 def product_for(intraday_leverage_enabled: bool) -> str:
@@ -83,39 +79,38 @@ def transaction_type_for(signal_side: str) -> str:
     """LONG buys, SHORT sells. Anything else is not a side we can trade."""
     side = (signal_side or "").strip().upper()
     if side == "LONG":
-        return "B"
+        return BUY
     if side == "SHORT":
-        return "S"
+        return SELL
     raise ValueError(f"Unsupported signal side {signal_side!r}")
 
 
 async def build_shadow_payload(
-    session: AsyncSession,
     signal: PaperSignal,
     *,
     intraday_leverage_enabled: bool,
-) -> tuple[ShadowPayload | None, SymbolTranslation]:
-    """Address the signal at the broker, or explain why it cannot be addressed."""
-    translation = await translate_for_order(session, signal.instrument_token)
-    if not translation.resolved or not translation.trading_symbol or not translation.exchange:
-        return None, translation
+) -> BrokerOrder | None:
+    """State the signal as a live order, or refuse a side we cannot trade.
 
+    Naming the instrument at the broker is no longer done here: it is the
+    adapter's job, and doing it twice is how the shadow would come to evaluate a
+    different order than the one live execution would place.
+    """
     try:
-        transaction_type = transaction_type_for(signal.side)
-    except ValueError as exc:
-        return None, SymbolTranslation(resolved=False, reason=str(exc))
+        side = transaction_type_for(signal.side)
+    except ValueError:
+        return None
 
-    return (
-        ShadowPayload(
-            exchange=translation.exchange,
-            trading_symbol=translation.trading_symbol,
-            product=product_for(intraday_leverage_enabled),
-            price_type=SHADOW_PRICE_TYPE,
-            transaction_type=transaction_type,
-            price=str(signal.entry_price),
-            quantity=str(signal.quantity),
-        ),
-        translation,
+    return BrokerOrder(
+        instrument_token=signal.instrument_token,
+        side=side,
+        quantity=int(signal.quantity),
+        order_type=SHADOW_PRICE_TYPE,
+        product=product_for(intraday_leverage_enabled),
+        price=signal.entry_price,
+        # The shadow submits nothing, so the identifier only has to be a
+        # plausible one for the margin question to carry.
+        client_order_id="shadow",
     )
 
 
@@ -141,7 +136,7 @@ def _optional_decimal(value: Any) -> Decimal | None:
 async def evaluate_live_shadow(
     session: AsyncSession,
     settings: Settings,
-    client: FirstockReportClient,
+    adapter: BrokerAdapter,
     *,
     signal: PaperSignal,
     oms_order_id: UUID | None,
@@ -154,36 +149,50 @@ async def evaluate_live_shadow(
     broker call: there is nothing to ask the broker about an instrument we cannot
     name, and the refusal is the finding.
     """
-    payload, translation = await build_shadow_payload(
-        session, signal, intraday_leverage_enabled=intraday_leverage_enabled
-    )
+    # Kept for the evidence row, which records the symbol map's verdict whether
+    # or not the chosen broker needed it. A broker that takes the token
+    # unchanged still benefits from knowing which names are unmapped, because
+    # the operator may switch to one that does not.
+    translation = await translate_for_order(session, signal.instrument_token)
 
-    if payload is None:
+    order = await build_shadow_payload(signal, intraday_leverage_enabled=intraday_leverage_enabled)
+    if order is None:
+        reason = f"Unsupported signal side {signal.side!r}"
         return await _persist(
             session,
             signal=signal,
             oms_order_id=oms_order_id,
             approval_mode=approval_mode,
             translation=translation,
-            payload=None,
+            description=None,
             authorized=False,
-            reason=translation.reason,
+            reason=reason,
+            failed_checks=["signal_side"],
+            snapshot={"signal_side": {"resolved": False, "reason": reason}},
+        )
+
+    description = await adapter.describe(order)
+    if not description.resolved:
+        return await _persist(
+            session,
+            signal=signal,
+            oms_order_id=oms_order_id,
+            approval_mode=approval_mode,
+            translation=translation,
+            description=None,
+            authorized=False,
+            reason=description.detail,
             failed_checks=["symbol_translation"],
-            snapshot={"symbol_translation": {"resolved": False, "reason": translation.reason}},
+            snapshot={"symbol_translation": {"resolved": False, "reason": description.detail}},
         )
 
     decision = await authorize_live_order(
         session,
         settings,
-        client,
+        adapter,
         approval_mode=approval_mode,
-        exchange=payload.exchange,
-        product=payload.product,
-        price_type=payload.price_type,
-        trading_symbol=payload.trading_symbol,
-        transaction_type=payload.transaction_type,
-        price=payload.price,
-        quantity=payload.quantity,
+        order=order,
+        description=description,
     )
     snapshot = decision.snapshot()
     return await _persist(
@@ -192,7 +201,7 @@ async def evaluate_live_shadow(
         oms_order_id=oms_order_id,
         approval_mode=approval_mode,
         translation=translation,
-        payload=payload,
+        description=description,
         authorized=decision.authorized,
         reason=decision.reason,
         failed_checks=[check.key for check in decision.failures],
@@ -207,7 +216,7 @@ async def _persist(
     oms_order_id: UUID | None,
     approval_mode: str,
     translation: SymbolTranslation,
-    payload: ShadowPayload | None,
+    description: BrokerOrderDescription | None,
     authorized: bool,
     reason: str,
     failed_checks: list[str],
@@ -219,11 +228,11 @@ async def _persist(
         oms_order_id=oms_order_id,
         instrument_token=signal.instrument_token,
         translation_status=translation.status,
-        trading_symbol=payload.trading_symbol if payload else None,
-        exchange=payload.exchange if payload else None,
-        product=payload.product if payload else None,
-        price_type=payload.price_type if payload else None,
-        transaction_type=payload.transaction_type if payload else None,
+        trading_symbol=description.symbol if description else None,
+        exchange=description.exchange if description else None,
+        product=description.product if description else None,
+        price_type=description.order_type if description else None,
+        transaction_type=description.side if description else None,
         quantity=signal.quantity,
         price=signal.entry_price,
         authorized=authorized,
@@ -242,7 +251,7 @@ async def _persist(
 async def shadow_paper_signal(
     session: AsyncSession,
     settings: Settings,
-    client: FirstockReportClient,
+    adapter: BrokerAdapter,
     *,
     signal: PaperSignal,
     oms_order_id: UUID | None,
@@ -264,7 +273,7 @@ async def shadow_paper_signal(
         return await evaluate_live_shadow(
             session,
             settings,
-            client,
+            adapter,
             signal=signal,
             oms_order_id=oms_order_id,
             approval_mode=approval_mode,

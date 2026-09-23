@@ -56,9 +56,10 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import get_settings  # noqa: E402
+from app.services.broker_adapter import FIRSTOCK_CLIENT_ID_KEYS, FirstockAdapter  # noqa: E402
 from app.services.firstock.client import FirstockClient, FirstockError  # noqa: E402
 from app.services.firstock.orders import FirstockOrderClient, cancellation_confirmed  # noqa: E402
-from app.services.live_order_recovery import REMARKS_KEYS, match_submission  # noqa: E402
+from app.services.live_order_recovery import match_submission  # noqa: E402
 from app.services.live_orders import new_client_order_id  # noqa: E402
 
 CONFIRMATION = "PLACE A REAL ORDER"
@@ -83,7 +84,7 @@ def report_remarks_support(order_book: list[dict[str, Any]]) -> bool | None:
         print("  Either run this again on a day with orders, or use stage 2.")
         return None
 
-    present = [key for key in REMARKS_KEYS if any(key in record for record in order_book)]
+    present = [key for key in FIRSTOCK_CLIENT_ID_KEYS if any(key in record for record in order_book)]
     print(f"  Fields present on order records: {', '.join(field_names(order_book))}")
     if present:
         print(f"  [OK] The order book carries {', '.join(present)}. Automatic recovery works.")
@@ -171,7 +172,11 @@ async def stage_two(client: FirstockOrderClient, *, symbol: str, price: str, exc
         print(f"  Response: {data!r}")
 
         print("\n  Re-reading the order book to look for our remarks...")
-        book = await client.order_book()
+        # Through the adapter, so this probe exercises the same normalisation
+        # live recovery uses rather than a second reading of the same response.
+        # The session argument is only used for symbol translation, which
+        # reading the order book does not need.
+        book = await FirstockAdapter(client, None).normalised_orders()
         result = match_submission(book, client_order_id)
         order_numbers = result.broker_order_numbers
         if result.status == "RESOLVED_PLACED":

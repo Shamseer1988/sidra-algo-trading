@@ -15,17 +15,17 @@ from sqlalchemy import delete, select
 
 from app.db.models import LiveActivation, LiveOrderSubmission
 from app.db.session import SessionLocal
-from app.services.firstock.orders import FirstockTransportUnknown
+from app.services.broker_adapter import UpstoxAdapter
 from app.services.live_execution import authorize_live_submission, submit_live_order
 from app.services.live_orders import LiveOrderRequest
+from app.services.upstox_orders import UpstoxTransportUnknown
 
 REQUEST = LiveOrderRequest(
-    exchange="NSE",
-    trading_symbol="IDEA-EQ",
-    product="I",
-    price_type="LMT",
-    transaction_type="B",
+    instrument_token="NSE_EQ|INE669E01016",
+    side="BUY",
     quantity=10,
+    order_type="LIMIT",
+    product="INTRADAY",
     price=Decimal("418"),
 )
 
@@ -42,21 +42,34 @@ class FakeRedis:
 
 
 class FakeClient:
-    """Read side answers margin; write side records placements."""
+    """Read side answers margin; write side records placements.
+
+    Shaped as an Upstox client and driven through the real ``UpstoxAdapter``,
+    rather than faking the adapter itself: the translation and the outcome
+    classification are the parts most worth not mocking, and Upstox's describe
+    step needs no symbol map, so these tests stay free of fixture rows.
+    """
 
     def __init__(self, place=None, place_raises: Exception | None = None) -> None:
-        self._place = place if place is not None else {"orderNumber": "24091500001"}
+        self._place = place if place is not None else ["24091500001"]
         self._place_raises = place_raises
         self.placements: list[dict] = []
 
     async def order_margin(self, **_kwargs: object) -> dict:
-        return {"availableMargin": "500000", "marginOnNewOrder": "4180"}
+        return {"final_margin": 4180.0, "required_margin": 4180.0}
+
+    async def funds_and_margin(self, _segment: str = "SEC") -> dict:
+        return {"equity": {"available_margin": 500000.0}}
 
     async def place_order(self, **kwargs: object) -> object:
         self.placements.append(dict(kwargs))
         if self._place_raises:
             raise self._place_raises
         return self._place
+
+
+def adapter_for(client: FakeClient) -> UpstoxAdapter:
+    return UpstoxAdapter(client)
 
 
 def readiness(ready: bool):
@@ -109,13 +122,16 @@ async def authorize(monkeypatch, **overrides):
             overrides.pop("armed_minutes", None)
         redis = overrides.pop("redis", None) or FakeRedis()
         client = overrides.pop("client", None) or FakeClient()
+        request = overrides.pop("request", REQUEST)
         decision = await authorize_live_submission(
             session,
             SimpleNamespace(),
-            client,
+            adapter_for(client),
             redis,
             approval_mode=overrides.pop("approval_mode", "AUTOMATIC"),
-            request=overrides.pop("request", REQUEST),
+            request=request,
+            description=await adapter_for(client).describe(request.to_broker_order("sidra-test")),
+            client_order_id="sidra-test",
             operator_approved=overrides.pop("operator_approved", None),
         )
         await clean(session)
@@ -196,10 +212,12 @@ async def test_a_failing_live_risk_engine_refuses(monkeypatch: pytest.MonkeyPatc
         decision = await authorize_live_submission(
             session,
             SimpleNamespace(),
-            FakeClient(),
+            adapter_for(FakeClient()),
             FakeRedis(),
             approval_mode="AUTOMATIC",
             request=REQUEST,
+            description=await adapter_for(FakeClient()).describe(REQUEST.to_broker_order("sidra-test")),
+            client_order_id="sidra-test",
         )
         await clean(session)
     assert decision.authorized is False
@@ -234,10 +252,12 @@ async def test_an_unresolved_submission_blocks_the_whole_live_path(
         decision = await authorize_live_submission(
             session,
             SimpleNamespace(),
-            FakeClient(),
+            adapter_for(FakeClient()),
             FakeRedis(),
             approval_mode="AUTOMATIC",
             request=REQUEST,
+            description=await adapter_for(FakeClient()).describe(REQUEST.to_broker_order("sidra-test")),
+            client_order_id="sidra-test",
         )
         await clean(session)
     assert decision.authorized is False
@@ -255,7 +275,7 @@ async def test_a_refused_order_writes_no_submission_and_sends_nothing(
     async with SessionLocal() as session:
         await clean(session)
         decision, record = await submit_live_order(
-            session, SimpleNamespace(), client, FakeRedis(), approval_mode="AUTOMATIC", request=REQUEST
+            session, SimpleNamespace(), adapter_for(client), FakeRedis(), approval_mode="AUTOMATIC", request=REQUEST
         )
         rows = list((await session.scalars(select(LiveOrderSubmission))).all())
         await clean(session)
@@ -273,7 +293,12 @@ async def test_an_accepted_order_is_recorded_with_its_broker_numbers(
         await clean(session)
         await arm(session)
         _, record = await submit_live_order(
-            session, SimpleNamespace(), FakeClient(), FakeRedis(), approval_mode="AUTOMATIC", request=REQUEST
+            session,
+            SimpleNamespace(),
+            adapter_for(FakeClient()),
+            FakeRedis(),
+            approval_mode="AUTOMATIC",
+            request=REQUEST,
         )
         assert record is not None
         assert record.status == "ACCEPTED"
@@ -287,12 +312,12 @@ async def test_a_lost_response_leaves_a_durable_unknown_record(
 ) -> None:
     """The record exists precisely because the outcome does not."""
     patch_everything_green(monkeypatch)
-    client = FakeClient(place_raises=FirstockTransportUnknown("placeOrder timed out"))
+    client = FakeClient(place_raises=UpstoxTransportUnknown("placeOrder timed out"))
     async with SessionLocal() as session:
         await clean(session)
         await arm(session)
         _, record = await submit_live_order(
-            session, SimpleNamespace(), client, FakeRedis(), approval_mode="AUTOMATIC", request=REQUEST
+            session, SimpleNamespace(), adapter_for(client), FakeRedis(), approval_mode="AUTOMATIC", request=REQUEST
         )
         assert record is not None
         assert record.status == "UNKNOWN"
@@ -318,7 +343,12 @@ async def test_the_intent_survives_a_failure_inside_our_own_code(
         await clean(session)
         await arm(session)
         _, record = await submit_live_order(
-            session, SimpleNamespace(), Exploding(), FakeRedis(), approval_mode="AUTOMATIC", request=REQUEST
+            session,
+            SimpleNamespace(),
+            adapter_for(Exploding()),
+            FakeRedis(),
+            approval_mode="AUTOMATIC",
+            request=REQUEST,
         )
         assert record is not None
         assert record.status == "UNKNOWN"
@@ -336,14 +366,19 @@ async def test_a_second_order_is_refused_while_the_first_is_unknown(
         await submit_live_order(
             session,
             SimpleNamespace(),
-            FakeClient(place_raises=FirstockTransportUnknown("timeout")),
+            adapter_for(FakeClient(place_raises=UpstoxTransportUnknown("timeout"))),
             FakeRedis(),
             approval_mode="AUTOMATIC",
             request=REQUEST,
         )
         second_client = FakeClient()
         decision, record = await submit_live_order(
-            session, SimpleNamespace(), second_client, FakeRedis(), approval_mode="AUTOMATIC", request=REQUEST
+            session,
+            SimpleNamespace(),
+            adapter_for(second_client),
+            FakeRedis(),
+            approval_mode="AUTOMATIC",
+            request=REQUEST,
         )
         await clean(session)
     assert decision.authorized is False

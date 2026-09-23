@@ -19,6 +19,7 @@ from sqlalchemy import delete, select
 
 from app.db.models import LiveShadowDecision, PaperSignal
 from app.db.session import SessionLocal
+from app.services.broker_adapter import FirstockAdapter
 from app.services.firstock.orders import FirstockTransportUnknown
 from app.services.live_shadow import (
     build_shadow_payload,
@@ -43,6 +44,16 @@ class FakeClient:
         if self._raises:
             raise self._raises
         return self._margin
+
+
+def adapter_for(client: FakeClient, session) -> FirstockAdapter:  # noqa: ANN001
+    """The real Firstock adapter, so the symbol map is genuinely consulted.
+
+    These tests already run against the real database, and the naming step is
+    the one the shadow exists to exercise: a symbol the scanner trades happily
+    but the broker has never heard of is exactly the finding this module is for.
+    """
+    return FirstockAdapter(client, session)
 
 
 def readiness(ready: bool):
@@ -90,14 +101,15 @@ async def cleanup(session, signal: PaperSignal) -> None:
 
 
 def test_product_follows_the_leverage_control_rather_than_a_constant() -> None:
-    assert product_for(True) == "I"
-    assert product_for(False) == "C"
+    """Canonical, not a broker's code: the adapter decides what I and C mean."""
+    assert product_for(True) == "INTRADAY"
+    assert product_for(False) == "DELIVERY"
 
 
-def test_sides_map_to_the_documented_transaction_types() -> None:
-    assert transaction_type_for("LONG") == "B"
-    assert transaction_type_for("SHORT") == "S"
-    assert transaction_type_for("short") == "S"
+def test_sides_map_to_the_canonical_transaction_types() -> None:
+    assert transaction_type_for("LONG") == "BUY"
+    assert transaction_type_for("SHORT") == "SELL"
+    assert transaction_type_for("short") == "SELL"
 
 
 def test_an_unknown_side_raises_rather_than_defaulting_to_buy() -> None:
@@ -105,31 +117,46 @@ def test_an_unknown_side_raises_rather_than_defaulting_to_buy() -> None:
         transaction_type_for("SIDEWAYS")
 
 
-async def test_payload_addresses_the_order_as_the_broker_expects() -> None:
+async def test_the_payload_states_the_signal_canonically() -> None:
+    """No broker vocabulary here: that is the adapter's half of the job."""
     async with SessionLocal() as session:
         signal = await make_signal(session)
         try:
-            payload, translation = await build_shadow_payload(session, signal, intraday_leverage_enabled=True)
-            assert translation.resolved is True
-            assert payload is not None
-            assert payload.trading_symbol == "RELIANCE-EQ"
-            assert payload.exchange == "NSE"
-            assert payload.product == "I"
-            assert payload.price_type == "LMT"
-            assert payload.transaction_type == "B"
-            assert payload.price == "418.0000"
-            assert payload.quantity == "10"
+            order = await build_shadow_payload(signal, intraday_leverage_enabled=True)
+            assert order is not None
+            assert order.instrument_token == "NSE_EQ|INE002A01018"
+            assert order.side == "BUY"
+            assert order.order_type == "LIMIT"
+            assert order.product == "INTRADAY"
+            assert order.price == Decimal("418.0000")
+            assert order.quantity == 10
         finally:
             await cleanup(session, signal)
 
 
-async def test_an_unresolvable_symbol_yields_no_payload() -> None:
+async def test_the_adapter_names_the_order_at_the_broker() -> None:
+    async with SessionLocal() as session:
+        signal = await make_signal(session)
+        try:
+            order = await build_shadow_payload(signal, intraday_leverage_enabled=True)
+            description = await adapter_for(FakeClient(), session).describe(order)
+            assert description.resolved is True
+            assert description.symbol == "RELIANCE-EQ"
+            assert description.exchange == "NSE"
+            assert description.product == "I"
+            assert description.order_type == "LMT"
+            assert description.side == "B"
+        finally:
+            await cleanup(session, signal)
+
+
+async def test_an_unresolvable_symbol_is_refused_by_the_adapter() -> None:
     async with SessionLocal() as session:
         signal = await make_signal(session, token="NSE_EQ|INE999Z01099")
         try:
-            payload, translation = await build_shadow_payload(session, signal, intraday_leverage_enabled=True)
-            assert payload is None
-            assert translation.resolved is False
+            order = await build_shadow_payload(signal, intraday_leverage_enabled=True)
+            description = await adapter_for(FakeClient(), session).describe(order)
+            assert description.resolved is False
         finally:
             await cleanup(session, signal)
 
@@ -139,9 +166,7 @@ async def test_an_unsupported_side_is_a_refusal_not_an_exception() -> None:
     async with SessionLocal() as session:
         signal = await make_signal(session, side="FLAT")
         try:
-            payload, translation = await build_shadow_payload(session, signal, intraday_leverage_enabled=True)
-            assert payload is None
-            assert "Unsupported signal side" in translation.reason
+            assert await build_shadow_payload(signal, intraday_leverage_enabled=True) is None
         finally:
             await cleanup(session, signal)
 
@@ -159,7 +184,7 @@ async def test_an_unresolvable_symbol_never_reaches_the_broker(monkeypatch: pyte
             record = await evaluate_live_shadow(
                 session,
                 SimpleNamespace(),
-                client,
+                adapter_for(client, session),
                 signal=signal,
                 oms_order_id=None,
                 approval_mode="AUTOMATIC",
@@ -182,7 +207,7 @@ async def test_a_resolvable_symbol_records_the_full_decision(monkeypatch: pytest
             record = await evaluate_live_shadow(
                 session,
                 SimpleNamespace(),
-                FakeClient(),
+                adapter_for(FakeClient(), session),
                 signal=signal,
                 oms_order_id=None,
                 approval_mode="TELEGRAM_APPROVAL",
@@ -208,7 +233,7 @@ async def test_broker_margin_numbers_are_stored_as_numbers(monkeypatch: pytest.M
             record = await evaluate_live_shadow(
                 session,
                 SimpleNamespace(),
-                FakeClient({"availableMargin": "50000", "marginOnNewOrder": "4180"}),
+                adapter_for(FakeClient({"availableMargin": "50000", "marginOnNewOrder": "4180"}), session),
                 signal=signal,
                 oms_order_id=None,
                 approval_mode="AUTOMATIC",
@@ -228,7 +253,7 @@ async def test_a_broker_outage_is_recorded_not_raised(monkeypatch: pytest.Monkey
             record = await evaluate_live_shadow(
                 session,
                 SimpleNamespace(),
-                FakeClient(raises=FirstockTransportUnknown("orderMargin timed out")),
+                adapter_for(FakeClient(raises=FirstockTransportUnknown("orderMargin timed out")), session),
                 signal=signal,
                 oms_order_id=None,
                 approval_mode="AUTOMATIC",
@@ -258,7 +283,7 @@ async def test_shadow_paper_signal_swallows_a_failure_in_this_module(
             result = await shadow_paper_signal(
                 session,
                 SimpleNamespace(),
-                FakeClient(),
+                adapter_for(FakeClient(), session),
                 signal=signal,
                 oms_order_id=None,
                 approval_mode="AUTOMATIC",
@@ -278,7 +303,7 @@ async def test_the_same_signal_is_never_evaluated_twice(monkeypatch: pytest.Monk
             first = await shadow_paper_signal(
                 session,
                 SimpleNamespace(),
-                FakeClient(),
+                adapter_for(FakeClient(), session),
                 signal=signal,
                 oms_order_id=None,
                 approval_mode="AUTOMATIC",
@@ -288,7 +313,7 @@ async def test_the_same_signal_is_never_evaluated_twice(monkeypatch: pytest.Monk
             second = await shadow_paper_signal(
                 session,
                 SimpleNamespace(),
-                FakeClient(),
+                adapter_for(FakeClient(), session),
                 signal=signal,
                 oms_order_id=None,
                 approval_mode="AUTOMATIC",
@@ -319,7 +344,7 @@ async def test_summary_reports_the_authorisation_rate_and_why_not(monkeypatch: p
                 await shadow_paper_signal(
                     session,
                     SimpleNamespace(),
-                    FakeClient(),
+                    adapter_for(FakeClient(), session),
                     signal=signal,
                     oms_order_id=None,
                     approval_mode="AUTOMATIC",

@@ -16,18 +16,29 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.api.routes.settings import DEFAULT_TRADING_CONTROLS
 from app.db.models import ExecutionReconciliation, LiveActivation
 from app.services import live_readiness
 
 
 class FakeSession:
-    """Answers the two scalar queries readiness makes, by entity rather than order."""
+    """Answers the two scalar queries readiness makes, by entity rather than order.
 
-    def __init__(self, reconciliation: object | None = None, activation: object | None = None) -> None:
+    Plus the primary-key get that resolves the selected broker out of the
+    trading controls.
+    """
+
+    def __init__(
+        self,
+        reconciliation: object | None = None,
+        activation: object | None = None,
+        broker: str = "UPSTOX",
+    ) -> None:
         self._by_entity = {
             ExecutionReconciliation: reconciliation,
             LiveActivation: activation,
         }
+        self._broker = broker
         self.added: list[object] = []
 
     async def execute(self, _query: object) -> object:
@@ -36,6 +47,11 @@ class FakeSession:
     async def scalar(self, query: object) -> object | None:
         entity = query.column_descriptions[0]["entity"]
         return self._by_entity.get(entity)
+
+    async def get(self, _entity: object, _key: object) -> object | None:
+        if self._broker is None:
+            return None
+        return SimpleNamespace(value={**DEFAULT_TRADING_CONTROLS, "live_broker": self._broker})
 
     def add(self, value: object) -> None:
         self.added.append(value)
@@ -83,10 +99,11 @@ async def inspect(
     recon: object | None = None,
     armed: object | None = None,
     live: bool = True,
+    broker: str = "UPSTOX",
 ):
     monkeypatch.setattr(live_readiness.Redis, "from_url", lambda *_args, **_kwargs: FakeRedis())
     report = await live_readiness.inspect_live_readiness(
-        FakeSession(recon, armed),  # type: ignore[arg-type]
+        FakeSession(recon, armed, broker),  # type: ignore[arg-type]
         settings(live=live),
     )
     return report, {gate.key: gate for gate in report.gates}
@@ -115,6 +132,30 @@ async def test_overall_readiness_is_derived_from_the_gates(monkeypatch: pytest.M
     """Derived, so a gate nobody wired in cannot leave the report claiming readiness."""
     report, gates = await inspect(monkeypatch, recon=reconciliation(), armed=activation())
     assert report.overall_ready == all(gate.passed for gate in gates.values())
+
+
+# --- broker selection -----------------------------------------------------
+
+
+@pytest.mark.parametrize("broker", ["NONE", None])
+async def test_no_selected_broker_blocks_activation(monkeypatch: pytest.MonkeyPatch, broker: str | None) -> None:
+    """An operator reading this report should be told what is still missing.
+
+    ``None`` stands for trading controls that have never been saved, which
+    defaults to NONE — a refusal, not a hint to pick whichever broker happens to
+    have credentials.
+    """
+    report, gates = await inspect(monkeypatch, recon=reconciliation(), armed=activation(), broker=broker)
+    assert report.overall_ready is False
+    assert gates["broker_selected"].passed is False
+    assert "admin settings" in gates["broker_selected"].detail
+
+
+@pytest.mark.parametrize("broker", ["UPSTOX", "FIRSTOCK"])
+async def test_a_selected_broker_passes_and_is_named(monkeypatch: pytest.MonkeyPatch, broker: str) -> None:
+    _, gates = await inspect(monkeypatch, recon=reconciliation(), armed=activation(), broker=broker)
+    assert gates["broker_selected"].passed is True
+    assert broker in gates["broker_selected"].detail
 
 
 # --- runtime configuration ------------------------------------------------

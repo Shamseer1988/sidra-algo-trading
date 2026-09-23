@@ -738,10 +738,11 @@ class LiveOrderSubmission(Base):
     record of, and the next reconciliation would find an untracked broker order
     it cannot explain — or worse, the strategy would place the same order again.
 
-    ``client_order_id`` is carried to the broker in the documented ``remarks``
-    field, which makes it the key that resolves an UNKNOWN: an attempt whose
-    outcome was never learned can be searched for in the order book by the
-    identifier we chose, rather than guessed at by symbol and quantity.
+    ``client_order_id`` is carried to the broker in a client-chosen field —
+    ``remarks`` at Firstock, ``tag`` at Upstox — which makes it the key that
+    resolves an UNKNOWN: an attempt whose outcome was never learned can be
+    searched for in the order book by the identifier we chose, rather than
+    guessed at by symbol and quantity.
 
     ``broker_order_numbers`` is a list because the broker slices an order that
     exceeds the exchange freeze quantity, and one submission then corresponds to
@@ -764,6 +765,14 @@ class LiveOrderSubmission(Base):
     )
     approval_reference: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
 
+    # Which broker this went to. Recorded rather than inferred: once an operator
+    # can choose, a row that does not say where it was sent cannot be reconciled
+    # against anything, and the order book it belongs to is the one question an
+    # operator resolving it has to answer first.
+    broker: Mapped[str] = mapped_column(String(20), default="", index=True)
+    # The next five are what the broker was asked for, in the broker's own words,
+    # as resolved before the row was written. The canonical form this system
+    # decided on is kept in request_snapshot["canonical"].
     exchange: Mapped[str] = mapped_column(String(20))
     trading_symbol: Mapped[str] = mapped_column(String(64), index=True)
     product: Mapped[str] = mapped_column(String(10))
@@ -814,8 +823,17 @@ class LiveOrderApproval(Base):
         ForeignKey("paper_signals.id", ondelete="SET NULL"), nullable=True, index=True
     )
     instrument_token: Mapped[str] = mapped_column(String(64))
+    # Which broker this order would go to. An operator approving a live order is
+    # approving it at a particular broker, and the selection can change between
+    # the question and the answer — so it is recorded with the question and
+    # checked again before anything is sent.
+    broker: Mapped[str] = mapped_column(String(20), default="")
+    # The broker-facing name, for the operator to read.
     trading_symbol: Mapped[str] = mapped_column(String(64))
     exchange: Mapped[str] = mapped_column(String(20))
+    # Canonical, because this is what the order is rebuilt from when the
+    # operator answers. Storing the broker's own codes here would mean
+    # translating back, and a reverse mapping is a second place to be wrong.
     product: Mapped[str] = mapped_column(String(10))
     price_type: Mapped[str] = mapped_column(String(10))
     transaction_type: Mapped[str] = mapped_column(String(5))

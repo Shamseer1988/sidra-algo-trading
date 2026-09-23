@@ -22,7 +22,6 @@ and the answer defaults to no.
 
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import select
@@ -30,8 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import ExecutionReconciliation
-from app.services.firstock.client import FirstockError
-from app.services.firstock.orders import FirstockReportClient
+from app.services.broker_adapter import BrokerAdapter, BrokerOrder, BrokerOrderDescription
 from app.services.live_readiness import inspect_live_readiness
 
 # A reconciliation older than this tells us about an account that may since have
@@ -72,19 +70,6 @@ class LiveRiskDecision:
         }
 
 
-def _decimal(value: Any) -> Decimal | None:
-    """Parse a broker-supplied number. Unreadable is None, never zero.
-
-    Treating an unparseable margin as zero would be safe; treating it as zero when
-    the caller then compares "required <= available" would not. Returning None
-    forces the caller to fail the check explicitly.
-    """
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, TypeError, ValueError):
-        return None
-
-
 async def _reconciliation_check(session: AsyncSession) -> LiveRiskCheck:
     """Require a recent live reconciliation that cleared the account for trading."""
     record = await session.scalar(
@@ -112,63 +97,48 @@ async def _reconciliation_check(session: AsyncSession) -> LiveRiskCheck:
 
 
 async def _margin_check(
-    client: FirstockReportClient,
-    *,
-    exchange: str,
-    product: str,
-    price_type: str,
-    trading_symbol: str,
-    transaction_type: str,
-    price: str,
-    quantity: str,
+    adapter: BrokerAdapter,
+    order: BrokerOrder,
+    description: BrokerOrderDescription,
 ) -> LiveRiskCheck:
     """Ask the broker whether this specific order is affordable.
 
-    A successful API call is not permission to trade: the documented response can
-    report insufficient balance in ``remarks`` while the envelope still says
-    success, so the numbers are compared rather than the status.
+    The two brokers answer this differently — Firstock in one call that can
+    refuse inside a success envelope, Upstox in two — so the quote is obtained
+    through the adapter and only compared here. What stays in this module is the
+    part that must not vary: unreadable is a refusal, and a quote that was never
+    obtained is never treated as one that passed.
     """
-    try:
-        data = await client.order_margin(
-            exchange=exchange,
-            product=product,
-            price_type=price_type,
-            trading_symbol=trading_symbol,
-            transaction_type=transaction_type,
-            price=price,
-            quantity=quantity,
+    quote = await adapter.order_margin(order, description)
+    numbers = {
+        "required": str(quote.required) if quote.required is not None else "",
+        "available": str(quote.available) if quote.available is not None else "",
+    }
+    return LiveRiskCheck("broker_margin", quote.affordable, quote.detail, numbers)
+
+
+async def _symbol_check(description: BrokerOrderDescription) -> LiveRiskCheck:
+    """Can this instrument be named at this broker at all.
+
+    Separate from the margin check so a refusal says which of the two failed.
+    Folded together, an unmappable symbol would be reported as a margin problem
+    and somebody would go and look at the account balance.
+    """
+    if description.resolved:
+        return LiveRiskCheck(
+            "instrument", True, f"Instrument resolves to {description.symbol} on {description.exchange}."
         )
-    except FirstockError as exc:
-        return LiveRiskCheck("broker_margin", False, f"Margin check failed: {exc}")
-
-    required = _decimal(data.get("marginOnNewOrder"))
-    available = _decimal(data.get("availableMargin"))
-    if required is None or available is None:
-        return LiveRiskCheck("broker_margin", False, "Broker margin response was not readable.")
-
-    numbers = {"required": str(required), "available": str(available)}
-    if required > available:
-        return LiveRiskCheck("broker_margin", False, f"Order needs {required} against {available} available.", numbers)
-
-    remarks = str(data.get("remarks") or "").strip()
-    if remarks and "insufficient" in remarks.lower():
-        return LiveRiskCheck("broker_margin", False, f"Broker reported: {remarks}", numbers)
-    return LiveRiskCheck("broker_margin", True, f"Broker margin {available} covers {required}.", numbers)
+    return LiveRiskCheck("instrument", False, description.detail or "Instrument could not be named at this broker.")
 
 
 async def authorize_live_order(
     session: AsyncSession,
     settings: Settings,
-    client: FirstockReportClient,
+    adapter: BrokerAdapter,
     *,
     approval_mode: str,
-    exchange: str,
-    product: str,
-    price_type: str,
-    trading_symbol: str,
-    transaction_type: str,
-    price: str,
-    quantity: str,
+    order: BrokerOrder,
+    description: BrokerOrderDescription,
 ) -> LiveRiskDecision:
     """Decide whether one specific order may be submitted right now.
 
@@ -204,23 +174,15 @@ async def authorize_live_order(
 
     # Parsed defensively: this engine exists to refuse, so it must not raise.
     try:
-        parsed_quantity = int(str(quantity).strip())
+        parsed_quantity = int(str(order.quantity).strip())
     except (TypeError, ValueError):
         parsed_quantity = 0
-    checks.append(LiveRiskCheck("quantity", parsed_quantity > 0, f"Quantity {quantity!r} parsed as {parsed_quantity}."))
-
     checks.append(
-        await _margin_check(
-            client,
-            exchange=exchange,
-            product=product,
-            price_type=price_type,
-            trading_symbol=trading_symbol,
-            transaction_type=transaction_type,
-            price=price,
-            quantity=quantity,
-        )
+        LiveRiskCheck("quantity", parsed_quantity > 0, f"Quantity {order.quantity!r} parsed as {parsed_quantity}.")
     )
+
+    checks.append(await _symbol_check(description))
+    checks.append(await _margin_check(adapter, order, description))
 
     failures = [check for check in checks if not check.passed]
     return LiveRiskDecision(

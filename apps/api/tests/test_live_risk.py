@@ -5,23 +5,39 @@ refused. These tests are weighted accordingly — the happy path is a single cas
 and every other test proves a refusal.
 """
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
+from app.services.broker_adapter import BrokerOrder, BrokerOrderDescription, FirstockAdapter
 from app.services.firstock.orders import FirstockApiError, FirstockTransportUnknown
 from app.services.live_risk import RECONCILIATION_MAX_AGE, authorize_live_order
 
-ORDER = {
-    "exchange": "NSE",
-    "product": "C",
-    "price_type": "LMT",
-    "trading_symbol": "IDEA-EQ",
-    "transaction_type": "B",
-    "price": "418",
-    "quantity": "1",
-}
+ORDER = BrokerOrder(
+    instrument_token="NSE_EQ|INE669E01016",
+    side="BUY",
+    quantity=1,
+    order_type="LIMIT",
+    product="DELIVERY",
+    price=Decimal("418"),
+    client_order_id="sidra-test",
+)
+
+# Supplied rather than resolved: the risk engine is handed a description by the
+# execution path, and resolving one here would drag the symbol map into tests
+# about margin and reconciliation.
+DESCRIPTION = BrokerOrderDescription(
+    True,
+    exchange="NSE",
+    symbol="IDEA-EQ",
+    side="B",
+    order_type="LMT",
+    product="C",
+    validity="DAY",
+)
 
 
 class FakeSession:
@@ -75,15 +91,27 @@ def check(decision, key: str):
 _UNSET = object()
 
 
-async def authorize(monkeypatch, *, ready=True, mode="AUTOMATIC", recon=_UNSET, client=None, **overrides):
+async def authorize(
+    monkeypatch,
+    *,
+    ready=True,
+    mode="AUTOMATIC",
+    recon=_UNSET,
+    client=None,
+    description=DESCRIPTION,
+    **overrides,
+):
     monkeypatch.setattr("app.services.live_risk.inspect_live_readiness", readiness(ready))
-    payload = {**ORDER, **overrides}
     return await authorize_live_order(
         FakeSession(reconciliation() if recon is _UNSET else recon),
         SimpleNamespace(),
-        client or FakeClient(),
+        # The real adapter over a fake client: the margin comparison is the part
+        # worth not mocking. Its session argument is only used for symbol
+        # translation, which a supplied description has already done.
+        FirstockAdapter(client or FakeClient(), None),
         approval_mode=mode,
-        **payload,
+        order=dataclasses.replace(ORDER, **overrides) if overrides else ORDER,
+        description=description,
     )
 
 
@@ -185,6 +213,23 @@ async def test_non_positive_or_unparseable_quantity_refuses(monkeypatch: pytest.
     decision = await authorize(monkeypatch, quantity=quantity)
     assert decision.authorized is False
     assert check(decision, "quantity").passed is False
+
+
+async def test_an_instrument_that_cannot_be_named_refuses_as_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reported as an instrument problem, not folded into the margin check.
+
+    Folded together, somebody would go and look at the account balance for a
+    symbol the broker has simply never heard of.
+    """
+    decision = await authorize(
+        monkeypatch,
+        description=BrokerOrderDescription(False, detail="No verified mapping for NSE_EQ|INE669E01016"),
+    )
+    assert decision.authorized is False
+    assert check(decision, "instrument").passed is False
+    assert check(decision, "broker_margin").passed is False
 
 
 async def test_all_checks_run_so_an_operator_sees_every_objection(

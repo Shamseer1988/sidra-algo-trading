@@ -26,7 +26,8 @@ The gates, in the order they are checked and with the reason each exists:
 
 ``live_risk``
     The per-order engine from Phase 2: readiness, reconciliation freshness,
-    quantity, broker margin. It is called here rather than reimplemented.
+    quantity, whether the instrument can be named at this broker at all, and
+    broker margin. It is called here rather than reimplemented.
 
 ``operator_approval``
     Under TELEGRAM_APPROVAL, a human said yes and the risk was revalidated at
@@ -48,7 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import LiveActivation, LiveOrderSubmission
-from app.services.firstock.orders import FirstockOrderClient
+from app.services.broker_adapter import BrokerAdapter, BrokerOrderDescription
 from app.services.live_orders import (
     LiveOrderRequest,
     SubmissionOutcome,
@@ -147,11 +148,13 @@ async def _activation_gate(session: AsyncSession) -> Gate:
 async def authorize_live_submission(
     session: AsyncSession,
     settings: Settings,
-    client: FirstockOrderClient,
+    adapter: BrokerAdapter,
     redis: Redis,
     *,
     approval_mode: str,
     request: LiveOrderRequest,
+    description: BrokerOrderDescription,
+    client_order_id: str,
     operator_approved: bool | None = None,
 ) -> LiveExecutionDecision:
     """Every gate, every time, in one place.
@@ -179,15 +182,10 @@ async def authorize_live_submission(
     risk = await authorize_live_order(
         session,
         settings,
-        client,
+        adapter,
         approval_mode=normalized_mode,
-        exchange=request.exchange,
-        product=request.product,
-        price_type=request.price_type,
-        trading_symbol=request.trading_symbol,
-        transaction_type=request.transaction_type,
-        price=str(request.price),
-        quantity=str(request.quantity),
+        order=request.to_broker_order(client_order_id),
+        description=description,
     )
     gates.append(
         Gate(
@@ -220,7 +218,7 @@ async def authorize_live_submission(
 async def submit_live_order(
     session: AsyncSession,
     settings: Settings,
-    client: FirstockOrderClient,
+    adapter: BrokerAdapter,
     redis: Redis,
     *,
     approval_mode: str,
@@ -236,14 +234,27 @@ async def submit_live_order(
     this function owns the transaction rather than accepting one: a caller that
     wrapped the send in an outer transaction would silently undo the guarantee,
     because the intent would not be durable at the moment the request leaves.
+
+    The client order id is minted before authorisation rather than at the point
+    of writing, because the margin check inside the risk engine asks the broker
+    about *this* order, and an order identified by one id in the question and
+    another in the answer is two orders as far as recovery is concerned.
     """
+    client_order_id = new_client_order_id()
+    # Resolved once, before anything is authorised or written. The broker-facing
+    # names are then identical in the margin question, the audit row and the
+    # placement — which is what makes the row usable to resolve an UNKNOWN.
+    description = await adapter.describe(request.to_broker_order(client_order_id))
+
     decision = await authorize_live_submission(
         session,
         settings,
-        client,
+        adapter,
         redis,
         approval_mode=approval_mode,
         request=request,
+        description=description,
+        client_order_id=client_order_id,
         operator_approved=operator_approved,
     )
     if not decision.authorized:
@@ -252,7 +263,9 @@ async def submit_live_order(
     record = await prepare_submission(
         session,
         request,
-        client_order_id=new_client_order_id(),
+        description,
+        broker=adapter.name,
+        client_order_id=client_order_id,
         paper_signal_id=paper_signal_id,
         oms_order_id=oms_order_id,
         approval_reference=approval_reference,
@@ -262,7 +275,7 @@ async def submit_live_order(
     await session.refresh(record)
 
     try:
-        outcome = await send_prepared_order(client, record, request)
+        outcome = await send_prepared_order(adapter, record, request, description)
     except Exception as exc:
         # An unexpected failure in our own code after the send may still have
         # sent it. Unknown is the only honest classification.

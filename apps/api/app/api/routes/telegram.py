@@ -22,7 +22,7 @@ from app.db.models import (
 )
 from app.services.assisted_trading import decide_approval
 from app.services.live_approval import APPROVE_ACTION, CALLBACK_PREFIX, REJECT_ACTION, decide_live_approval
-from app.services.live_execution_gateway import live_order_client
+from app.services.live_execution_gateway import live_order_adapter
 from app.services.safety import emergency_stop
 from app.services.telegram import TelegramError, TelegramNotificationService
 from app.services.telegram_config import save_telegram_config
@@ -164,8 +164,8 @@ async def _handle_live_decision(
     controls = TradingControls.model_validate(trading.value if trading else DEFAULT_TRADING_CONTROLS)
 
     try:
-        client = await live_order_client(settings)
-    except Exception as exc:  # broker unreachable, credentials missing, TOTP wrong
+        adapter = await live_order_adapter(settings, session, controls.live_broker)
+    except Exception as exc:  # no broker selected, unreachable, credentials missing
         return f"Could not reach the broker; nothing was sent. ({exc})"
 
     redis = Redis.from_url(str(settings.redis_url), decode_responses=True)
@@ -173,7 +173,7 @@ async def _handle_live_decision(
         result = await decide_live_approval(
             session,
             settings,
-            client,
+            adapter,
             redis,
             reference_id=reference_id,
             action=action,

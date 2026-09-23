@@ -34,6 +34,8 @@ Contracts, from the Upstox developer documentation:
     DELETE https://api-hft.upstox.com/v3/order/cancel     -> data.order_id
     GET    https://api.upstox.com/v2/order/retrieve-all   -> order records incl. tag
     GET    https://api.upstox.com/v2/portfolio/short-term-positions
+    POST   https://api.upstox.com/v2/charges/margin          -> data.final_margin
+    GET    https://api.upstox.com/v2/user/get-funds-and-margin -> data.equity.available_margin
 
 Order placement is rate limited to 10 requests per second for unregistered
 algos, against 50 for everything else. The limiter here runs under the tighter
@@ -207,6 +209,57 @@ class UpstoxReportClient:
         """Net intraday exposure per instrument."""
         data = await self._request("GET", f"{UPSTOX_API_BASE_URL}/v2/portfolio/short-term-positions")
         return data if isinstance(data, list) else []
+
+    async def order_margin(
+        self,
+        *,
+        instrument_token: str,
+        quantity: int,
+        product: str,
+        transaction_type: str,
+        price: float,
+    ) -> dict[str, Any]:
+        """What this one order would cost in margin.
+
+        Upstox splits the question the live risk engine asks in two: this call
+        says what the order requires, ``funds_and_margin`` says what the account
+        has. Firstock answers both in one response, which is why the comparison
+        lives above this class rather than inside it.
+
+        Documented response: ``data.required_margin`` and ``data.final_margin``,
+        plus a per-instrument ``margins[]`` breakdown. ``final_margin`` is the
+        figure after margin benefit, so it is the one that has to be affordable.
+        """
+        if quantity <= 0:
+            raise UpstoxError("quantity must be positive")
+        payload = {
+            "instruments": [
+                {
+                    "instrument_key": instrument_token,
+                    "quantity": quantity,
+                    "transaction_type": transaction_type,
+                    "product": product,
+                    "price": price,
+                }
+            ]
+        }
+        data = await self._request("POST", f"{UPSTOX_API_BASE_URL}/v2/charges/margin", json=payload)
+        return data if isinstance(data, dict) else {}
+
+    async def funds_and_margin(self, segment: str = "SEC") -> dict[str, Any]:
+        """Available margin for a segment. ``SEC`` is equity, ``COM`` commodity.
+
+        The segment is passed explicitly rather than omitted: without it the
+        response carries both segments, and a caller reading ``available_margin``
+        off the wrong one would authorise an equity order against commodity
+        funds.
+        """
+        data = await self._request(
+            "GET",
+            f"{UPSTOX_API_BASE_URL}/v2/user/get-funds-and-margin",
+            params={"segment": segment},
+        )
+        return data if isinstance(data, dict) else {}
 
     async def order_details(self, order_id: str) -> dict[str, Any]:
         """One order's current state, once an order_id is held."""

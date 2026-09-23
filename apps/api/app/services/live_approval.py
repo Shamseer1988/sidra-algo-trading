@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import LiveOrderApproval, LiveOrderSubmission
-from app.services.firstock.orders import FirstockOrderClient
+from app.services.broker_adapter import BrokerAdapter, BrokerOrderDescription
 from app.services.live_execution import submit_live_order
 from app.services.live_orders import LiveOrderRequest
 from app.services.telegram import TelegramError, TelegramNotificationService
@@ -80,11 +80,12 @@ def approval_message(approval: LiveOrderApproval) -> str:
     States the instrument, the side, the size and the money at stake, because an
     approval button with only a symbol on it trains people to tap yes.
     """
-    side = "BUY" if approval.transaction_type == "B" else "SELL"
     notional = Decimal(approval.quantity) * approval.price
     return (
         "<b>LIVE ORDER — approval required</b>\n"
-        f"{side} <b>{approval.quantity}</b> × <b>{approval.trading_symbol}</b> ({approval.exchange})\n"
+        f"{approval.transaction_type} <b>{approval.quantity}</b> × "
+        f"<b>{approval.trading_symbol}</b> ({approval.exchange})\n"
+        f"Broker <b>{approval.broker or 'unset'}</b>\n"
         f"Limit {approval.price} · notional ≈ {notional}\n"
         f"Product {approval.product} · type {approval.price_type}\n"
         f"Expires {approval.expires_at.strftime('%H:%M:%S')} UTC\n"
@@ -112,7 +113,8 @@ async def request_live_approval(
     settings: Settings,
     *,
     request: LiveOrderRequest,
-    instrument_token: str,
+    description: BrokerOrderDescription,
+    broker: str,
     paper_signal_id=None,  # noqa: ANN001
 ) -> LiveOrderApproval:
     """Record the pending decision, then ask. In that order.
@@ -120,16 +122,21 @@ async def request_live_approval(
     The row is committed before the message goes out so that a reply cannot
     arrive referencing an approval this system has not yet stored — the same
     write-ahead reasoning that governs submission, for the same reason.
+
+    Two vocabularies again, for two audiences: the operator reads the broker's
+    own symbol, because that is what their contract note and the broker's app
+    will show them, while the order is rebuilt from the canonical fields.
     """
     approval = LiveOrderApproval(
         reference_id=new_reference_id(),
         paper_signal_id=paper_signal_id,
-        instrument_token=instrument_token,
-        trading_symbol=request.trading_symbol,
-        exchange=request.exchange,
+        instrument_token=request.instrument_token,
+        broker=broker,
+        trading_symbol=description.symbol or request.instrument_token,
+        exchange=description.exchange,
         product=request.product,
-        price_type=request.price_type,
-        transaction_type=request.transaction_type,
+        price_type=request.order_type,
+        transaction_type=request.side,
         quantity=request.quantity,
         price=request.price,
         status=PENDING,
@@ -155,13 +162,18 @@ async def request_live_approval(
 
 
 def _request_from(approval: LiveOrderApproval) -> LiveOrderRequest:
+    """Rebuild the order from the approval, in the terms it was recorded in.
+
+    Rebuilt rather than carried in memory because the operator's answer may
+    arrive in a different process, minutes later. The row is the only thing both
+    sides of that gap agree on.
+    """
     return LiveOrderRequest(
-        exchange=approval.exchange,
-        trading_symbol=approval.trading_symbol,
-        product=approval.product,
-        price_type=approval.price_type,
-        transaction_type=approval.transaction_type,
+        instrument_token=approval.instrument_token,
+        side=approval.transaction_type,
         quantity=approval.quantity,
+        order_type=approval.price_type,
+        product=approval.product,
         price=approval.price,
     )
 
@@ -169,7 +181,7 @@ def _request_from(approval: LiveOrderApproval) -> LiveOrderRequest:
 async def decide_live_approval(
     session: AsyncSession,
     settings: Settings,
-    client: FirstockOrderClient,
+    adapter: BrokerAdapter,
     redis: Redis,
     *,
     reference_id: str,
@@ -213,6 +225,18 @@ async def decide_live_approval(
         await session.commit()
         return ApprovalDecisionResult(BLOCKED, "Unrecognised decision; nothing was sent.")
 
+    # The broker may have been changed in settings between the question and the
+    # answer. An approval is for an order at a particular broker, so sending it
+    # somewhere else is not the thing that was approved — even though the symbol,
+    # side, size and price are all still what the operator read.
+    if approval.broker and approval.broker != adapter.name:
+        approval.status = BLOCKED
+        approval.block_reason = (
+            f"Approved for {approval.broker} but the selected broker is now {adapter.name}; nothing was sent."
+        )
+        await session.commit()
+        return ApprovalDecisionResult(BLOCKED, approval.block_reason)
+
     approval.decision = "APPROVE"
     # Mark it used before submitting. If the submission raises, the approval is
     # still spent: a retry must go through a fresh approval rather than reuse
@@ -223,7 +247,7 @@ async def decide_live_approval(
     decision, submission = await submit_live_order(
         session,
         settings,
-        client,
+        adapter,
         redis,
         approval_mode=approval_mode,
         request=_request_from(approval),

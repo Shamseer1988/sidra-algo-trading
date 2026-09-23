@@ -15,14 +15,13 @@ from sqlalchemy import select
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import AuditLog, LiveOrderSubmission, LiveShadowDecision, User, UserRole
-from app.services.firstock.client import FirstockClient, FirstockError
-from app.services.firstock.orders import FirstockReportClient
 from app.services.live_activation import (
     LiveActivationError,
     activate_live_trading,
     current_activation,
     revoke_live_activation,
 )
+from app.services.live_execution_gateway import BrokerNotSelectedError, live_report_adapter
 from app.services.live_order_recovery import resolve_submission, unresolved_submissions
 from app.services.live_readiness import inspect_live_readiness
 from app.services.live_reconciliation import persist_live_reconciliation, reconcile_live_execution
@@ -118,20 +117,17 @@ async def reconcile(
 
     Reads only. A broker failure is not an error here — it produces a blocked
     reconciliation, because being unable to check is itself a reason not to
-    trade. Only an unconfigured broker is rejected, since there is nothing to
-    compare against and a recorded verdict would be misleading.
+    trade. Only an unselected or unreachable broker is rejected, since there is
+    nothing to compare against and a recorded verdict would be misleading.
     """
-    if not settings.firstock_is_configured:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Firstock credentials are not configured; there is no broker state to reconcile.",
-        )
     try:
-        broker_session = await FirstockClient(settings).login()
-    except FirstockError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Firstock login failed: {exc}") from exc
+        adapter = await live_report_adapter(settings, session)
+    except BrokerNotSelectedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Broker login failed: {exc}") from exc
 
-    report = await reconcile_live_execution(session, FirstockReportClient(settings, broker_session))
+    report = await reconcile_live_execution(session, adapter)
     record = await persist_live_reconciliation(session, report)
     session.add(
         AuditLog(
@@ -320,14 +316,17 @@ async def resolve_unknown_submission(
     )
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such submission")
-    if not settings.firstock_is_configured:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Firstock credentials are not configured")
     try:
-        broker_session = await FirstockClient(settings).login()
-    except FirstockError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Firstock login failed: {exc}") from exc
+        adapter = await live_report_adapter(settings, session, record.broker or None)
+    except BrokerNotSelectedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Broker login failed: {exc}") from exc
 
-    result = await resolve_submission(FirstockReportClient(settings, broker_session), record)
+    # Resolved against the broker the order was sent to, which is not necessarily
+    # the one currently selected. Looking for it in the wrong order book would
+    # find nothing and escalate an order that is sitting there plainly visible.
+    result = await resolve_submission(adapter, record)
     session.add(
         AuditLog(
             user_id=user.id,

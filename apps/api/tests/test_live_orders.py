@@ -11,6 +11,7 @@ from decimal import Decimal
 
 import pytest
 
+from app.services.broker_adapter import BrokerOrderDescription, FirstockAdapter
 from app.services.firstock.client import FirstockError
 from app.services.firstock.orders import (
     FirstockApiError,
@@ -49,14 +50,36 @@ class FakeClient:
 
 
 REQUEST = LiveOrderRequest(
-    exchange="NSE",
-    trading_symbol="IDEA-EQ",
-    product="I",
-    price_type="LMT",
-    transaction_type="B",
+    instrument_token="NSE_EQ|INE669E01016",
+    side="BUY",
     quantity=10,
+    order_type="LIMIT",
+    product="INTRADAY",
     price=Decimal("418"),
 )
+
+# What the adapter resolved before the record was written. Supplied directly
+# rather than obtained from ``describe`` so these tests cover classification
+# without also depending on the symbol map.
+DESCRIPTION = BrokerOrderDescription(
+    True,
+    exchange="NSE",
+    symbol="IDEA-EQ",
+    side="B",
+    order_type="LMT",
+    product="I",
+    validity="DAY",
+)
+
+
+def adapter_for(client: FakeClient) -> FirstockAdapter:
+    """The real adapter over a fake client.
+
+    Real, because the classification under test lives in the adapter now, and a
+    fake adapter would be testing the test. The session argument is only used
+    for symbol translation, which a pre-resolved description has already done.
+    """
+    return FirstockAdapter(client, None)
 
 
 # --- identity -------------------------------------------------------------
@@ -73,7 +96,7 @@ def test_client_order_ids_are_unique_and_fit_a_telegram_callback() -> None:
 
 async def test_an_order_number_means_accepted() -> None:
     client = FakeClient({"orderNumber": "24091500001"})
-    outcome = await send_prepared_order(client, FakeRecord(), REQUEST)
+    outcome = await send_prepared_order(adapter_for(client), FakeRecord(), REQUEST, DESCRIPTION)
     assert outcome.status == ACCEPTED
     assert outcome.broker_order_numbers == ["24091500001"]
 
@@ -81,14 +104,14 @@ async def test_an_order_number_means_accepted() -> None:
 async def test_a_timeout_is_unknown_and_never_a_rejection() -> None:
     """The request body was sent. The order may exist."""
     client = FakeClient(raises=FirstockTransportUnknown("placeOrder timed out"))
-    outcome = await send_prepared_order(client, FakeRecord(), REQUEST)
+    outcome = await send_prepared_order(adapter_for(client), FakeRecord(), REQUEST, DESCRIPTION)
     assert outcome.status == UNKNOWN
     assert outcome.is_unknown is True
 
 
 async def test_a_documented_refusal_is_a_rejection_and_keeps_its_code() -> None:
     client = FakeClient(raises=FirstockApiError("insufficient funds", code="400", name="BAD_REQUEST", field="price"))
-    outcome = await send_prepared_order(client, FakeRecord(), REQUEST)
+    outcome = await send_prepared_order(adapter_for(client), FakeRecord(), REQUEST, DESCRIPTION)
     assert outcome.status == REJECTED
     assert outcome.failure_code == "400"
     assert outcome.failure_name == "BAD_REQUEST"
@@ -97,7 +120,7 @@ async def test_a_documented_refusal_is_a_rejection_and_keeps_its_code() -> None:
 async def test_a_rejected_session_token_is_a_rejection_not_an_unknown() -> None:
     """The broker answers this before an order exists, so nothing was placed."""
     client = FakeClient(raises=FirstockAuthError("session token rejected"))
-    outcome = await send_prepared_order(client, FakeRecord(), REQUEST)
+    outcome = await send_prepared_order(adapter_for(client), FakeRecord(), REQUEST, DESCRIPTION)
     assert outcome.status == REJECTED
     assert outcome.failure_name == "INVALID_JKEY"
 
@@ -105,22 +128,36 @@ async def test_a_rejected_session_token_is_a_rejection_not_an_unknown() -> None:
 async def test_success_without_an_order_number_is_unknown() -> None:
     """An order we cannot name is an order we cannot cancel."""
     client = FakeClient({"requestTime": "10:15:00"})
-    outcome = await send_prepared_order(client, FakeRecord(), REQUEST)
+    outcome = await send_prepared_order(adapter_for(client), FakeRecord(), REQUEST, DESCRIPTION)
     assert outcome.status == UNKNOWN
 
 
 async def test_the_send_never_retries_on_its_own() -> None:
     """A retry is a second order whenever the first one may already be live."""
     client = FakeClient(raises=FirstockTransportUnknown("timeout"))
-    await send_prepared_order(client, FakeRecord(), REQUEST)
+    await send_prepared_order(adapter_for(client), FakeRecord(), REQUEST, DESCRIPTION)
     assert len(client.payloads) == 1
 
 
 async def test_the_client_order_id_travels_to_the_broker_as_remarks() -> None:
     """Without it, a lost response cannot be resolved against the order book."""
     client = FakeClient({"orderNumber": "1"})
-    await send_prepared_order(client, FakeRecord("sidra-deadbeef"), REQUEST)
+    await send_prepared_order(adapter_for(client), FakeRecord("sidra-deadbeef"), REQUEST, DESCRIPTION)
     assert client.payloads[0]["remarks"] == "sidra-deadbeef"
+
+
+async def test_an_unresolved_instrument_is_refused_without_reaching_the_broker() -> None:
+    """A symbol we cannot name is a refusal, and must not become a request."""
+    client = FakeClient({"orderNumber": "1"})
+    outcome = await send_prepared_order(
+        adapter_for(client),
+        FakeRecord(),
+        REQUEST,
+        BrokerOrderDescription(False, detail="No verified mapping for NSE_EQ|INE669E01016"),
+    )
+    assert outcome.status == REJECTED
+    assert outcome.failure_name == "SYMBOL_UNRESOLVED"
+    assert client.payloads == []
 
 
 # --- slicing --------------------------------------------------------------
@@ -143,7 +180,7 @@ def test_shapes_carrying_no_number_yield_none(data: object) -> None:
 
 async def test_a_sliced_response_is_accepted_with_all_its_numbers() -> None:
     client = FakeClient([{"orderNumber": "a"}, {"orderNumber": "b"}])
-    outcome = await send_prepared_order(client, FakeRecord(), REQUEST)
+    outcome = await send_prepared_order(adapter_for(client), FakeRecord(), REQUEST, DESCRIPTION)
     assert outcome.status == ACCEPTED
     assert outcome.broker_order_numbers == ["a", "b"]
 
