@@ -139,6 +139,19 @@ select width_bucket(s.score, 60, 101, 4)                         as band,
    and s.session_date >= :'since'::date
  group by 1 order by 1;
 
+\echo === EXCURSION BY OUTCOME (how far losers actually travelled) ===
+select o.status,
+       count(*)                                        as signals,
+       round(avg(o.mfe_r), 2)                          as avg_mfe_r,
+       count(*) filter (where o.mfe_r >= 0.5)          as reached_0_5r,
+       count(*) filter (where o.mfe_r >= 1.0)          as reached_1_0r,
+       count(*) filter (where o.mfe_r >= 1.25)         as reached_1_25r
+  from paper_signal_outcomes o
+  join paper_signals s on s.id = o.paper_signal_id
+ where o.status in ('TARGET', 'STOP')
+   and s.session_date >= :'since'::date
+ group by 1 order by 1;
+
 \echo === POSITION SIZE (paper sizing against the capital you intend to trade) ===
 select round(avg(s.entry_price * s.quantity), 0) as avg_notional_rs,
        round(avg(s.risk_amount), 2)              as avg_risk_rs,
