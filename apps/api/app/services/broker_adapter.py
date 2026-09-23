@@ -169,10 +169,15 @@ class BrokerPositionRecord:
     zero. Zero means flat, which means safe; unreadable means the exposure is
     unknown, which is the opposite, and collapsing the two would turn a reason
     to stop into a reason to continue.
+
+    ``day_pnl`` is realised plus unrealised for this position, and follows the
+    same rule for the same reason: the daily stop is computed from it, and a
+    position whose P&L we cannot read is a day whose P&L we cannot bound.
     """
 
     symbol: str
     net_quantity: Decimal | None
+    day_pnl: Decimal | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -206,6 +211,33 @@ def _decimal_or_none(value: Any) -> Decimal | None:
         return Decimal(str(value).strip())
     except (InvalidOperation, TypeError, ValueError):
         return None
+
+
+def _combined_pnl(raw: dict[str, Any], *, total_keys: tuple[str, ...], parts: tuple[str, ...]) -> Decimal | None:
+    """A position's P&L: a single total if the broker gives one, else its parts.
+
+    Falls back to summing rather than to zero, and to None rather than to a
+    partial sum. A missing half would understate the day by exactly the amount
+    nobody noticed, which on the losing side is the amount that matters.
+
+    ``parts`` is read as "realised, then whichever unrealised spelling exists",
+    so a broker documenting two names for the same field costs a lookup rather
+    than a wrong number.
+    """
+    for key in total_keys:
+        total = _decimal_or_none(raw.get(key))
+        if total is not None:
+            return total
+    if not parts:
+        return None
+    realised = _decimal_or_none(raw.get(parts[0]))
+    if realised is None:
+        return None
+    for key in parts[1:]:
+        unrealised = _decimal_or_none(raw.get(key))
+        if unrealised is not None:
+            return realised + unrealised
+    return None
 
 
 class BrokerAdapter(Protocol):
@@ -416,6 +448,7 @@ class UpstoxAdapter:
                 BrokerPositionRecord(
                     symbol=str(raw.get("trading_symbol") or raw.get("instrument_token") or "unknown"),
                     net_quantity=_decimal_or_none(raw.get("quantity")),
+                    day_pnl=_combined_pnl(raw, total_keys=("pnl",), parts=("realised", "unrealised")),
                     raw=raw,
                 )
             )
@@ -600,6 +633,15 @@ class FirstockAdapter:
                 BrokerPositionRecord(
                     symbol=str(raw.get("tradingSymbol") or "unknown"),
                     net_quantity=_decimal_or_none(raw.get("netQuantity")),
+                    # Firstock's own reference contradicts itself here: the prose
+                    # names unrealizedMTOM and the sample response shows totalMTM.
+                    # Both spellings are tried rather than picking the one that
+                    # happened to be written down twice.
+                    day_pnl=_combined_pnl(
+                        raw,
+                        total_keys=("totalPNL",),
+                        parts=("RealizedPNL", "unrealizedMTOM", "totalMTM"),
+                    ),
                     raw=raw,
                 )
             )

@@ -91,7 +91,26 @@ class PaperRiskEngine:
             # about what "the limit was reached" means, and latched so that a
             # day which has finished cannot un-finish when an open winner gives
             # back its gains.
-            verdict = await daily_limits.verdict_for(session, signal.session_date, controls)
+            # The paper day's P&L, from the paper ledger. Live reads the broker
+            # instead; the two sources never meet, which is the point.
+            session_pnl = sum(
+                (
+                    _decimal(item.total_pnl)
+                    for item in (
+                        await session.scalars(
+                            select(PaperPosition).where(PaperPosition.session_date == signal.session_date)
+                        )
+                    ).all()
+                ),
+                start=Decimal("0"),
+            )
+            verdict = await daily_limits.verdict_for(
+                session,
+                signal.session_date,
+                daily_limits.PAPER,
+                session_pnl=session_pnl,
+                controls=controls,
+            )
 
             reason = "Paper risk reserved"
             if verdict.halted:
@@ -99,7 +118,7 @@ class PaperRiskEngine:
                 # Written here as well as in paper execution because a limit can
                 # first be crossed by a signal arriving rather than by a price
                 # moving, and whichever notices first owns recording it.
-                await daily_limits.record_halt(session, signal.session_date, verdict)
+                await daily_limits.record_halt(session, signal.session_date, daily_limits.PAPER, verdict)
             elif reserved + risk_amount > daily_limit:
                 reason = "Daily paper-risk allocation limit reached"
             elif active_reservations >= controls.maximum_open_positions:

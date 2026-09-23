@@ -22,9 +22,9 @@ from app.db.models import (
     ApplicationSetting,
     PaperOrder,
     PaperPosition,
-    PaperSessionHalt,
     PaperSignal,
     RiskReservation,
+    SessionHalt,
 )
 from app.db.session import SessionLocal
 from app.services.market_calculations import CompletedCandle
@@ -75,7 +75,7 @@ async def set_controls(**overrides) -> None:
 
 async def clean() -> None:
     async with SessionLocal() as session:
-        await session.execute(delete(PaperSessionHalt).where(PaperSessionHalt.session_date == SESSION))
+        await session.execute(delete(SessionHalt).where(SessionHalt.session_date == SESSION))
         await session.execute(delete(RiskReservation).where(RiskReservation.instrument_token == TOKEN))
         await session.execute(delete(PaperPosition).where(PaperPosition.instrument_token == TOKEN))
         await session.execute(delete(PaperOrder).where(PaperOrder.instrument_token == TOKEN))
@@ -135,9 +135,11 @@ async def position() -> PaperPosition | None:
         return await session.scalar(select(PaperPosition).where(PaperPosition.instrument_token == TOKEN))
 
 
-async def halt() -> PaperSessionHalt | None:
+async def halt() -> SessionHalt | None:
     async with SessionLocal() as session:
-        return await session.scalar(select(PaperSessionHalt).where(PaperSessionHalt.session_date == SESSION))
+        return await session.scalar(
+            select(SessionHalt).where(SessionHalt.session_date == SESSION, SessionHalt.mode == "PAPER")
+        )
 
 
 # --- the loss limit -------------------------------------------------------
@@ -234,7 +236,11 @@ async def test_the_day_is_flattened_once_not_on_every_later_candle() -> None:
 
     async with SessionLocal() as session:
         halts = list(
-            (await session.scalars(select(PaperSessionHalt).where(PaperSessionHalt.session_date == SESSION))).all()
+            (
+                await session.scalars(
+                    select(SessionHalt).where(SessionHalt.session_date == SESSION, SessionHalt.mode == "PAPER")
+                )
+            ).all()
         )
         exits = list(
             (

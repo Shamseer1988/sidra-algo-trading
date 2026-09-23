@@ -22,9 +22,9 @@ from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, Tradi
 from app.db.models import (
     ApplicationSetting,
     PaperPosition,
-    PaperSessionHalt,
     PaperSignal,
     RiskReservation,
+    SessionHalt,
 )
 from app.db.session import SessionLocal
 from app.services.risk_engine import PaperRiskEngine
@@ -49,7 +49,7 @@ async def clean() -> None:
     async with SessionLocal() as session:
         # The halt is keyed on the session date alone, and it latches — leaving
         # one behind would silently stop every later test's day.
-        await session.execute(delete(PaperSessionHalt).where(PaperSessionHalt.session_date == SESSION))
+        await session.execute(delete(SessionHalt).where(SessionHalt.session_date == SESSION))
         await session.execute(delete(RiskReservation).where(RiskReservation.instrument_token == TOKEN))
         await session.execute(delete(PaperPosition).where(PaperPosition.instrument_token == TOKEN))
         await session.execute(delete(PaperSignal).where(PaperSignal.instrument_token == TOKEN))
@@ -272,7 +272,9 @@ async def test_the_halt_records_the_figure_that_tripped_it() -> None:
     await book(realized="2400", status="CLOSED")
     await decide()
     async with SessionLocal() as session:
-        halt = await session.scalar(select(PaperSessionHalt).where(PaperSessionHalt.session_date == SESSION))
+        halt = await session.scalar(
+            select(SessionHalt).where(SessionHalt.session_date == SESSION, SessionHalt.mode == "PAPER")
+        )
     assert halt is not None
     assert halt.reason == "Daily profit target reached"
     assert Decimal(str(halt.session_pnl)) == Decimal("2400")
@@ -285,7 +287,11 @@ async def test_one_halt_per_session_however_many_signals_arrive() -> None:
         assert await decide() == "Daily loss limit reached"
     async with SessionLocal() as session:
         halts = list(
-            (await session.scalars(select(PaperSessionHalt).where(PaperSessionHalt.session_date == SESSION))).all()
+            (
+                await session.scalars(
+                    select(SessionHalt).where(SessionHalt.session_date == SESSION, SessionHalt.mode == "PAPER")
+                )
+            ).all()
         )
     assert len(halts) == 1
 
@@ -295,4 +301,9 @@ async def test_a_day_that_never_reaches_a_limit_records_no_halt() -> None:
     await book(realized="300")
     assert await decide() == "Paper risk reserved"
     async with SessionLocal() as session:
-        assert await session.scalar(select(PaperSessionHalt).where(PaperSessionHalt.session_date == SESSION)) is None
+        assert (
+            await session.scalar(
+                select(SessionHalt).where(SessionHalt.session_date == SESSION, SessionHalt.mode == "PAPER")
+            )
+            is None
+        )

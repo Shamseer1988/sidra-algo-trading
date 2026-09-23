@@ -18,17 +18,25 @@ result all produce a refusal rather than an approval.
 What it deliberately does not do: size the order, choose a price, or submit
 anything. It answers one question — may this specific order be sent right now —
 and the answer defaults to no.
+
+The daily profit target and loss limit are checked here too, against the
+broker's own position book rather than the paper ledger. They are the same two
+numbers an operator set for paper, and they are deliberately measured from a
+different source: paper P&L is a simulation, and refusing a real order because a
+simulation had a good morning is a refusal nobody could act on.
 """
 
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.db.models import ExecutionReconciliation
+from app.db.models import ApplicationSetting, ExecutionReconciliation
+from app.services import daily_limits
 from app.services.broker_adapter import BrokerAdapter, BrokerOrder, BrokerOrderDescription
 from app.services.live_readiness import inspect_live_readiness
 
@@ -131,6 +139,83 @@ async def _symbol_check(description: BrokerOrderDescription) -> LiveRiskCheck:
     return LiveRiskCheck("instrument", False, description.detail or "Instrument could not be named at this broker.")
 
 
+async def _daily_limit_check(
+    session: AsyncSession,
+    adapter: BrokerAdapter,
+    *,
+    record: bool,
+) -> LiveRiskCheck:
+    """Has the broker account already made or lost what the operator allowed.
+
+    The P&L comes from the broker's own position book, never from the paper
+    ledger. They are different numbers about different money, and a live order
+    refused because a simulation had a good morning is a refusal nobody could
+    act on.
+
+    Unreadable P&L refuses. This is the same rule the margin check follows and
+    it matters more here: a position whose P&L cannot be parsed is a day whose
+    total cannot be bounded, and the limit exists precisely to bound it. A
+    broker that will not tell us is indistinguishable, from here, from a broker
+    telling us we have lost too much.
+
+    ``record`` is False for the shadow evaluator, which submits nothing. It
+    still reads the latch, so its evidence shows the gate that would have
+    refused, but a path that cannot place an order must not be able to close the
+    live day either.
+    """
+    # Imported inside the function: the settings route imports live modules for
+    # its own types, and a module-level import here would close the cycle.
+    from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
+
+    setting = await session.get(ApplicationSetting, TRADING_KEY)
+    controls = TradingControls.model_validate(setting.value if setting else DEFAULT_TRADING_CONTROLS)
+    if not (controls.daily_loss_limit or controls.daily_profit_target):
+        return LiveRiskCheck("daily_limit", True, "No daily profit target or loss limit is configured.")
+
+    session_date = datetime.now(UTC).date()
+    halt = await daily_limits.existing_halt(session, session_date, daily_limits.LIVE)
+    if halt is not None:
+        # Read before the broker is asked: the day is already over, and a
+        # network call cannot change that.
+        return LiveRiskCheck(
+            "daily_limit",
+            False,
+            f"{halt.reason} at {halt.session_pnl}; live trading is finished for {session_date}.",
+            {"session_pnl": str(halt.session_pnl), "reason": halt.reason},
+        )
+
+    try:
+        positions = await adapter.normalised_positions()
+    except Exception as exc:
+        return LiveRiskCheck("daily_limit", False, f"Broker positions could not be read: {exc}")
+
+    unreadable = [item.symbol for item in positions if item.day_pnl is None]
+    if unreadable:
+        return LiveRiskCheck(
+            "daily_limit",
+            False,
+            f"Broker reported unreadable P&L for {', '.join(sorted(unreadable))}; "
+            "the day's total cannot be established.",
+        )
+
+    session_pnl = sum((item.day_pnl or Decimal("0") for item in positions), start=Decimal("0"))
+    verdict = await daily_limits.verdict_for(
+        session,
+        session_date,
+        daily_limits.LIVE,
+        session_pnl=session_pnl,
+        controls=controls,
+    )
+    numbers = {"session_pnl": str(session_pnl)}
+    if not verdict.halted:
+        return LiveRiskCheck("daily_limit", True, f"Broker P&L {session_pnl} is inside the day's limits.", numbers)
+
+    if record:
+        await daily_limits.record_halt(session, session_date, daily_limits.LIVE, verdict)
+        await session.commit()
+    return LiveRiskCheck("daily_limit", False, f"{verdict.reason} at {session_pnl}.", numbers)
+
+
 async def authorize_live_order(
     session: AsyncSession,
     settings: Settings,
@@ -139,6 +224,7 @@ async def authorize_live_order(
     approval_mode: str,
     order: BrokerOrder,
     description: BrokerOrderDescription,
+    record_halt: bool = False,
 ) -> LiveRiskDecision:
     """Decide whether one specific order may be submitted right now.
 
@@ -182,6 +268,7 @@ async def authorize_live_order(
     )
 
     checks.append(await _symbol_check(description))
+    checks.append(await _daily_limit_check(session, adapter, record=record_halt))
     checks.append(await _margin_check(adapter, order, description))
 
     failures = [check for check in checks if not check.passed]

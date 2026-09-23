@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.api.routes.settings import DEFAULT_TRADING_CONTROLS
+from app.db.models import ExecutionReconciliation, SessionHalt
 from app.services.broker_adapter import BrokerOrder, BrokerOrderDescription, FirstockAdapter
 from app.services.firstock.orders import FirstockApiError, FirstockTransportUnknown
 from app.services.live_risk import RECONCILIATION_MAX_AGE, authorize_live_order
@@ -41,14 +43,40 @@ DESCRIPTION = BrokerOrderDescription(
 
 
 class FakeSession:
-    def __init__(self, reconciliation: object | None = None) -> None:
-        self._reconciliation = reconciliation
+    """Answers by entity, not by call order.
 
-    async def scalar(self, _query: object) -> object | None:
-        return self._reconciliation
+    A fake that returned the same object to every ``scalar`` handed the
+    reconciliation record back when the daily-limit gate asked for a halt, and
+    the gate then refused every order with a reason taken from the wrong table.
+    Dispatching on the queried entity makes that impossible rather than unlikely.
+    """
+
+    def __init__(self, reconciliation: object | None = None, halt: object | None = None, controls=None) -> None:  # noqa: ANN001
+        self._by_entity = {ExecutionReconciliation: reconciliation, SessionHalt: halt}
+        self._controls = controls
+        self.added: list[object] = []
+        self.commits = 0
+
+    async def scalar(self, query: object) -> object | None:
+        entity = query.column_descriptions[0]["entity"]
+        return self._by_entity.get(entity)
+
+    async def get(self, _entity: object, _key: object) -> object | None:
+        if self._controls is None:
+            return None
+        return SimpleNamespace(value=self._controls)
 
     async def execute(self, _query: object) -> object:
         return object()
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    async def flush(self) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.commits += 1
 
 
 def reconciliation(*, safe: bool = True, age: timedelta = timedelta(minutes=1)) -> SimpleNamespace:
@@ -60,14 +88,27 @@ def reconciliation(*, safe: bool = True, age: timedelta = timedelta(minutes=1)) 
 
 
 class FakeClient:
-    def __init__(self, margin: dict | None = None, raises: Exception | None = None) -> None:
+    def __init__(
+        self,
+        margin: dict | None = None,
+        raises: Exception | None = None,
+        positions: list[dict] | None = None,
+        positions_raise: Exception | None = None,
+    ) -> None:
         self._margin = margin if margin is not None else {"availableMargin": "50000", "marginOnNewOrder": "418"}
         self._raises = raises
+        self._positions = positions if positions is not None else []
+        self._positions_raise = positions_raise
 
     async def order_margin(self, **_kwargs: object) -> dict:
         if self._raises:
             raise self._raises
         return self._margin
+
+    async def position_book(self) -> list[dict]:
+        if self._positions_raise:
+            raise self._positions_raise
+        return self._positions
 
 
 def readiness(ready: bool):
@@ -91,6 +132,11 @@ def check(decision, key: str):
 _UNSET = object()
 
 
+def limits(**overrides) -> dict:
+    """Trading controls with the daily limits off unless a test turns them on."""
+    return {**DEFAULT_TRADING_CONTROLS, "daily_loss_limit": 0.0, "daily_profit_target": 0.0, **overrides}
+
+
 async def authorize(
     monkeypatch,
     *,
@@ -99,11 +145,15 @@ async def authorize(
     recon=_UNSET,
     client=None,
     description=DESCRIPTION,
+    halt=None,
+    controls=None,
+    record_halt=False,
+    session=None,
     **overrides,
 ):
     monkeypatch.setattr("app.services.live_risk.inspect_live_readiness", readiness(ready))
     return await authorize_live_order(
-        FakeSession(reconciliation() if recon is _UNSET else recon),
+        session or FakeSession(reconciliation() if recon is _UNSET else recon, halt, controls or limits()),
         SimpleNamespace(),
         # The real adapter over a fake client: the margin comparison is the part
         # worth not mocking. Its session argument is only used for symbol
@@ -112,6 +162,7 @@ async def authorize(
         approval_mode=mode,
         order=dataclasses.replace(ORDER, **overrides) if overrides else ORDER,
         description=description,
+        record_halt=record_halt,
     )
 
 
@@ -258,3 +309,134 @@ async def test_snapshot_is_serialisable_for_the_audit_trail(monkeypatch: pytest.
 
     decision = await authorize(monkeypatch, ready=False)
     assert json.loads(json.dumps(decision.snapshot()))["authorized"] is False
+
+
+# --- the daily limit, measured at the broker -----------------------------
+#
+# The same two numbers the operator set for paper, read from a different source.
+# Paper P&L is a simulation, and a real order refused because a simulation had a
+# good morning is a refusal nobody could act on.
+
+
+def position(symbol: str = "IDEA-EQ", *, total: str | None = None, **extra) -> dict:
+    record = {"tradingSymbol": symbol, "netQuantity": "10", **extra}
+    if total is not None:
+        record["totalPNL"] = total
+    return record
+
+
+async def test_no_configured_limit_leaves_the_gate_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero disables it, exactly as it does for paper."""
+    decision = await authorize(monkeypatch, controls=limits())
+    assert check(decision, "daily_limit").passed is True
+    assert decision.authorized is True
+
+
+async def test_a_day_inside_its_limits_authorises(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeClient(positions=[position(total="500")])
+    decision = await authorize(monkeypatch, client=client, controls=limits(daily_profit_target=2000.0))
+    assert check(decision, "daily_limit").passed is True
+
+
+async def test_the_brokers_profit_reaching_the_target_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeClient(positions=[position(total="2000")])
+    decision = await authorize(monkeypatch, client=client, controls=limits(daily_profit_target=2000.0))
+    assert decision.authorized is False
+    assert "Daily profit target reached" in check(decision, "daily_limit").detail
+
+
+async def test_the_brokers_loss_reaching_the_limit_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeClient(positions=[position(total="-1000")])
+    decision = await authorize(monkeypatch, client=client, controls=limits(daily_loss_limit=1000.0))
+    assert decision.authorized is False
+    assert "Daily loss limit reached" in check(decision, "daily_limit").detail
+
+
+async def test_every_position_counts_towards_the_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One winner does not cancel the day; the account's total does."""
+    client = FakeClient(positions=[position("A", total="-1400"), position("B", total="300")])
+    decision = await authorize(monkeypatch, client=client, controls=limits(daily_loss_limit=1000.0))
+    assert decision.authorized is False
+    assert check(decision, "daily_limit").data["session_pnl"] == "-1100"
+
+
+async def test_realised_and_unrealised_are_summed_when_there_is_no_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Firstock's reference names two spellings for the unrealised half."""
+    client = FakeClient(positions=[position(RealizedPNL="-600", unrealizedMTOM="-500")])
+    decision = await authorize(monkeypatch, client=client, controls=limits(daily_loss_limit=1000.0))
+    assert decision.authorized is False
+    assert check(decision, "daily_limit").data["session_pnl"] == "-1100"
+
+
+async def test_the_other_unrealised_spelling_is_read_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeClient(positions=[position(RealizedPNL="-600", totalMTM="-500")])
+    decision = await authorize(monkeypatch, client=client, controls=limits(daily_loss_limit=1000.0))
+    assert check(decision, "daily_limit").data["session_pnl"] == "-1100"
+
+
+# --- fail closed ----------------------------------------------------------
+
+
+async def test_unreadable_position_pnl_refuses_rather_than_counting_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A day whose total cannot be established is a day that cannot be bounded.
+
+    Counting it as zero would let the limit pass on exactly the position it
+    could not see.
+    """
+    client = FakeClient(positions=[position(total="-200"), position("MYSTERY")])
+    decision = await authorize(monkeypatch, client=client, controls=limits(daily_loss_limit=1000.0))
+    assert decision.authorized is False
+    assert "MYSTERY" in check(decision, "daily_limit").detail
+
+
+async def test_a_broker_that_will_not_answer_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeClient(positions_raise=FirstockTransportUnknown("positionBook timed out"))
+    decision = await authorize(monkeypatch, client=client, controls=limits(daily_loss_limit=1000.0))
+    assert decision.authorized is False
+    assert check(decision, "daily_limit").passed is False
+
+
+# --- the latch ------------------------------------------------------------
+
+
+async def test_a_recorded_halt_refuses_without_asking_the_broker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The day is already over; a network call cannot change that.
+
+    And it must refuse even though the account has since recovered — which is
+    the whole point of latching.
+    """
+    recovered = FakeClient(positions=[position(total="0")])
+    halt = SimpleNamespace(reason="Daily loss limit reached", session_pnl=Decimal("-1200"))
+    decision = await authorize(monkeypatch, client=recovered, halt=halt, controls=limits(daily_loss_limit=1000.0))
+    assert decision.authorized is False
+    assert "-1200" in check(decision, "daily_limit").detail
+
+
+async def test_the_submission_path_records_the_halt(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession(reconciliation(), None, limits(daily_loss_limit=1000.0))
+    client = FakeClient(positions=[position(total="-1500")])
+    await authorize(monkeypatch, client=client, session=session, record_halt=True)
+    assert [type(item).__name__ for item in session.added] == ["SessionHalt"]
+    assert session.added[0].mode == "LIVE"
+    assert session.added[0].reason == "Daily loss limit reached"
+
+
+async def test_a_path_that_cannot_submit_does_not_close_the_live_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shadow evaluator calls this engine and submits nothing.
+
+    It still sees the refusal, so its evidence is honest, but it must not be
+    able to halt live trading on the strength of an evaluation.
+    """
+    session = FakeSession(reconciliation(), None, limits(daily_loss_limit=1000.0))
+    client = FakeClient(positions=[position(total="-1500")])
+    decision = await authorize(monkeypatch, client=client, session=session)
+    assert check(decision, "daily_limit").passed is False
+    assert session.added == []

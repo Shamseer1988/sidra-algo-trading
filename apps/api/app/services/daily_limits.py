@@ -15,12 +15,21 @@ The losing side does not need the latch for the same reason — losses do not
 un-lose — but it gets one anyway, because a rule with an exception is a rule
 somebody has to remember.
 
-**Two places evaluate this, and they must agree.** The risk engine checks it
-when a signal wants to open a position; paper execution checks it on every
-completed candle, because a limit is usually breached by a price moving rather
-than by a trade being taken, and nothing would notice until the next signal
-arrived — which on a halted day never comes. The evaluation lives here so there
-is one implementation rather than two that drift.
+**Paper and live are separate days.** They halt independently, under the same
+two numbers, from different sources: paper from its own position ledger, live
+from the broker's. ``mode`` keeps them apart, because a paper day that hits its
+target says nothing about the money in the Upstox account, and stopping real
+trading on the strength of a simulation would be a refusal nobody could explain.
+
+**This module deliberately contains no P&L computation.** ``live_risk`` has a
+standing rule against sharing code with the paper risk engine — a bug in paper
+sizing that merely writes a wrong journal entry becomes a wrong live order the
+moment the path is shared. What is shared here is narrower than that and does
+not carry the same risk: the operator's two numbers, the comparison against
+them, and the record of the verdict. Each caller works out its own P&L from its
+own source and passes the figure in. Duplicating "is 2,000 at least 2,000" would
+not make anything safer; it would only create two places for the two modes to
+start disagreeing about what the operator asked for.
 """
 
 from dataclasses import dataclass
@@ -31,10 +40,13 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import PaperPosition, PaperSessionHalt
+from app.db.models import SessionHalt
 
 LOSS_LIMIT_REACHED = "Daily loss limit reached"
 PROFIT_TARGET_REACHED = "Daily profit target reached"
+
+PAPER = "PAPER"
+LIVE = "LIVE"
 
 
 def _decimal(value: Any) -> Decimal:
@@ -56,17 +68,6 @@ class DailyVerdict:
         return self.reason is not None
 
 
-def session_pnl_of(positions: list[PaperPosition]) -> Decimal:
-    """Realised plus unrealised minus costs, across every position of the day.
-
-    Open positions count. A session sitting on a large unrealised loss has lost
-    the money whether or not the trade has closed, and a limit that waits for
-    the booking is a limit that lets the next trade through at exactly the wrong
-    moment.
-    """
-    return sum((_decimal(item.total_pnl) for item in positions), start=Decimal("0"))
-
-
 def evaluate(session_pnl: Decimal, controls: Any) -> str | None:
     """Which limit, if either, this P&L has reached.
 
@@ -83,29 +84,36 @@ def evaluate(session_pnl: Decimal, controls: Any) -> str | None:
     return None
 
 
-async def existing_halt(session: AsyncSession, session_date: date) -> PaperSessionHalt | None:
-    return await session.scalar(select(PaperSessionHalt).where(PaperSessionHalt.session_date == session_date))
+async def existing_halt(session: AsyncSession, session_date: date, mode: str) -> SessionHalt | None:
+    return await session.scalar(
+        select(SessionHalt).where(SessionHalt.session_date == session_date, SessionHalt.mode == mode)
+    )
 
 
-async def positions_for(session: AsyncSession, session_date: date) -> list[PaperPosition]:
-    """Every position the session produced, closed ones included."""
-    rows = await session.scalars(select(PaperPosition).where(PaperPosition.session_date == session_date))
-    return list(rows.all())
-
-
-async def verdict_for(session: AsyncSession, session_date: date, controls: Any) -> DailyVerdict:
+async def verdict_for(
+    session: AsyncSession,
+    session_date: date,
+    mode: str,
+    *,
+    session_pnl: Decimal,
+    controls: Any,
+) -> DailyVerdict:
     """The day's standing: a recorded halt if there is one, else a fresh look.
 
-    A recorded halt wins over the current numbers. That is the latch.
+    A recorded halt wins over the figure passed in. That is the latch.
     """
-    halt = await existing_halt(session, session_date)
+    halt = await existing_halt(session, session_date, mode)
     if halt is not None:
         return DailyVerdict(session_pnl=_decimal(halt.session_pnl), reason=halt.reason)
-    pnl = session_pnl_of(await positions_for(session, session_date))
-    return DailyVerdict(session_pnl=pnl, reason=evaluate(pnl, controls))
+    return DailyVerdict(session_pnl=session_pnl, reason=evaluate(session_pnl, controls))
 
 
-async def record_halt(session: AsyncSession, session_date: date, verdict: DailyVerdict) -> PaperSessionHalt | None:
+async def record_halt(
+    session: AsyncSession,
+    session_date: date,
+    mode: str,
+    verdict: DailyVerdict,
+) -> SessionHalt | None:
     """Write the latch once. The caller commits.
 
     Returns None when the day was already halted, so a caller can tell the
@@ -114,10 +122,11 @@ async def record_halt(session: AsyncSession, session_date: date, verdict: DailyV
     """
     if verdict.reason is None:
         return None
-    if await existing_halt(session, session_date) is not None:
+    if await existing_halt(session, session_date, mode) is not None:
         return None
-    halt = PaperSessionHalt(
+    halt = SessionHalt(
         session_date=session_date,
+        mode=mode,
         reason=verdict.reason,
         session_pnl=verdict.session_pnl,
     )

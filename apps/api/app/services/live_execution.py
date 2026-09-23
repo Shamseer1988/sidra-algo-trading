@@ -26,8 +26,9 @@ The gates, in the order they are checked and with the reason each exists:
 
 ``live_risk``
     The per-order engine from Phase 2: readiness, reconciliation freshness,
-    quantity, whether the instrument can be named at this broker at all, and
-    broker margin. It is called here rather than reimplemented.
+    quantity, whether the instrument can be named at this broker at all, the
+    day's profit target and loss limit measured against the broker's own P&L,
+    and broker margin. It is called here rather than reimplemented.
 
 ``operator_approval``
     Under TELEGRAM_APPROVAL, a human said yes and the risk was revalidated at
@@ -186,6 +187,10 @@ async def authorize_live_submission(
         approval_mode=normalized_mode,
         order=request.to_broker_order(client_order_id),
         description=description,
+        # The submission path, so a day that has reached its limit is closed
+        # here rather than re-decided on the next order. The shadow evaluator
+        # calls the same engine and deliberately does not pass this.
+        record_halt=True,
     )
     gates.append(
         Gate(

@@ -245,21 +245,23 @@ select count(*)                        as fills,
 select status, count(*) from paper_positions group by 1 order by 2 desc;
 SQL
 
-  if table_exists paper_session_halts; then
+  if table_exists session_halts; then
     cat <<'SQL'
 
 \echo === DAILY STOPS (the day the money said stop, and at what) ===
 select session_date,
+       mode,
        reason,
        round(session_pnl, 2) as pnl_when_it_tripped
-  from paper_session_halts
+  from session_halts
  where session_date >= :'since'::date
- order by session_date;
+ order by session_date, mode;
 
 \echo === WHAT A HALTED DAY GAVE UP (signals refused after the stop) ===
 select r.session_date, r.decision_reason, count(*)
   from risk_reservations r
-  join paper_session_halts h on h.session_date = r.session_date
+  join session_halts h
+    on h.session_date = r.session_date and h.mode = 'PAPER'
  where r.session_date >= :'since'::date
    and r.decision_reason in ('Daily loss limit reached', 'Daily profit target reached')
  group by 1, 2 order by 1;

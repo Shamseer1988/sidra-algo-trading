@@ -353,8 +353,23 @@ class PaperOrderManager:
         setting = await session.get(ApplicationSetting, TRADING_KEY)
         trading = TradingControls.model_validate(setting.value if setting else DEFAULT_TRADING_CONTROLS)
 
-        verdict = await daily_limits.verdict_for(session, session_date, trading)
-        if await daily_limits.record_halt(session, session_date, verdict) is None:
+        session_pnl = sum(
+            (
+                Decimal(str(item.total_pnl or 0))
+                for item in (
+                    await session.scalars(select(PaperPosition).where(PaperPosition.session_date == session_date))
+                ).all()
+            ),
+            start=Decimal("0"),
+        )
+        verdict = await daily_limits.verdict_for(
+            session,
+            session_date,
+            daily_limits.PAPER,
+            session_pnl=session_pnl,
+            controls=trading,
+        )
+        if await daily_limits.record_halt(session, session_date, daily_limits.PAPER, verdict) is None:
             # Either nothing was reached, or the day halted on an earlier candle
             # and the positions were flattened then.
             return

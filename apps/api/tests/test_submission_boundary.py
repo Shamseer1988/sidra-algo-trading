@@ -235,3 +235,30 @@ def test_the_live_approval_path_does_not_import_the_paper_approval_path() -> Non
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert "app.services.assisted_trading" not in imported
+
+
+# --- paper and live must not share a P&L source --------------------------
+
+
+def test_the_shared_limit_module_reads_no_paper_ledger() -> None:
+    """live_risk imports this. It must not reach the paper ledger through it.
+
+    The standing rule is that live shares no risk code with paper, because a bug
+    in paper sizing that merely writes a wrong journal entry becomes a wrong
+    live order the moment the path is shared. What daily_limits shares is
+    narrower — the operator's two numbers, the comparison, the record of the
+    verdict — and it stays narrow only while it computes no P&L of its own.
+    Each mode works out its own figure from its own source and passes it in.
+    """
+    tree = parse("services/daily_limits.py")
+    names = referenced_names(tree) | imported_names(tree)
+    assert "PaperPosition" not in names
+    assert "PaperOrder" not in names
+    assert "PaperFill" not in names
+
+
+def test_live_risk_reaches_no_paper_model_and_no_paper_engine() -> None:
+    tree = parse("services/live_risk.py")
+    imported = imported_names(tree)
+    assert "PaperRiskEngine" not in imported
+    assert not {"PaperPosition", "PaperOrder", "PaperFill", "PaperSignal"} & imported
