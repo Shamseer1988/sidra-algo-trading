@@ -14,12 +14,13 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.api.deps import CurrentUser, DbSession
-from app.services import trade_history
+from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
+from app.db.models import AuditLog, User, UserRole
+from app.services import broker_day_figures, trade_history
 from app.services.trading_calendar import MARKET_TIMEZONE
 
 router = APIRouter(prefix="/history", tags=["History"])
@@ -528,4 +529,87 @@ async def export_xlsx(
         buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="trade-history-{begin}-to-{end}.xlsx"'},
+    )
+
+
+# --- the broker's own figures --------------------------------------------
+
+
+class BrokerFetchResponse(BaseModel):
+    session_date: str
+    broker: str
+    realized_pnl: Decimal | None
+    charges: Decimal | None
+    turnover: Decimal | None
+    trade_count: int | None
+    fetched_at: str
+    note: str
+
+
+@router.post("/broker-figures/{session_date}", response_model=BrokerFetchResponse)
+async def fetch_broker_figures(
+    session_date: date,
+    session: DbSession,
+    settings: AppSettings,
+    user: User = Depends(require_roles(UserRole.ADMIN, UserRole.TRADER)),
+) -> BrokerFetchResponse:
+    """Ask the broker what one session was worth, and record it beside our own.
+
+    Read-only at the broker: this goes through the report client, which has no
+    method that can place, modify or cancel an order. The result is appended to
+    ``broker_day_snapshots``; nothing is written back into the local record.
+
+    Re-running it on a day already fetched is normal and expected. A broker's
+    own figures settle over hours, and each fetch is kept so that a day which
+    moves from MISMATCH to MATCHED leaves evidence of having moved.
+    """
+    if session_date > _today():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That session has not happened yet.")
+
+    from app.services.upstox_oauth import load_access_token
+    from app.services.upstox_orders import UpstoxError, UpstoxReportClient, UpstoxSession
+
+    token = await load_access_token(settings)
+    if not token:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Upstox has no stored access token. Authorise it in the Upstox console first.",
+        )
+
+    client = UpstoxReportClient(settings, UpstoxSession(access_token=token))
+    try:
+        figures = await broker_day_figures.fetch_upstox_day(client, session_date)
+    except UpstoxError as error:
+        # Relayed rather than swallowed: "the token expired" and "that financial
+        # year has no data" need different actions from the operator, and a
+        # generic failure message would send them looking in the wrong place.
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Upstox refused the report request: {error}") from error
+
+    snapshot = await broker_day_figures.record(session, session_date, figures)
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            event_type="history.broker_figures_fetched",
+            metadata_json={
+                "session_date": session_date.isoformat(),
+                "broker": snapshot.broker,
+                "trade_count": figures.trade_count,
+            },
+        )
+    )
+    await session.commit()
+    await session.refresh(snapshot)
+
+    return BrokerFetchResponse(
+        session_date=session_date.isoformat(),
+        broker=snapshot.broker,
+        realized_pnl=figures.realized_pnl,
+        charges=figures.charges,
+        turnover=figures.turnover,
+        trade_count=figures.trade_count,
+        fetched_at=snapshot.fetched_at.isoformat(),
+        note=(
+            "Recorded beside the local figures, not over them. Charges from this report are the day's "
+            "total; the broker publishes no per-trade charge, so per-trade costs stay locally estimated."
+        ),
     )

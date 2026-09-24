@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, FileSpreadsheet, Info, RefreshCw } from "lucide-react";
+import { CloudDownload, Download, FileSpreadsheet, Info, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
@@ -36,7 +36,13 @@ function defaultRange(): { from: string; to: string } {
   return { from: isoDate(back), to: isoDate(today) };
 }
 
-export function HistoryWorkspace({ onMessage }: { onMessage: (message: string) => void }) {
+export function HistoryWorkspace({
+  canOperate = true,
+  onMessage,
+}: {
+  canOperate?: boolean;
+  onMessage: (message: string) => void;
+}) {
   const initial = useMemo(defaultRange, []);
   const [from, setFrom] = useState(initial.from);
   const [to, setTo] = useState(initial.to);
@@ -72,6 +78,23 @@ export function HistoryWorkspace({ onMessage }: { onMessage: (message: string) =
   }, [load]);
 
   const shown = dayFilter ? trades.filter((trade) => trade.session_date === dayFilter) : trades;
+  const [fetching, setFetching] = useState<string | null>(null);
+
+  async function fetchBroker(sessionDate: string) {
+    setFetching(sessionDate);
+    try {
+      const result = await api.fetchBrokerFigures(sessionDate);
+      onMessage(
+        `${result.broker} reported ${rupees(result.realized_pnl, { signed: true })} realised and ` +
+          `${rupees(result.charges)} charges for ${sessionDate}. Recorded beside the local figures.`,
+      );
+      await load();
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "Could not fetch the broker figures");
+    } finally {
+      setFetching(null);
+    }
+  }
 
   function openDay(sessionDate: string) {
     setDayFilter(sessionDate);
@@ -137,7 +160,14 @@ export function HistoryWorkspace({ onMessage }: { onMessage: (message: string) =
       </div>
 
       {tab === "days" ? (
-        <DaysTable days={days} loading={loading} onOpenDay={openDay} />
+        <DaysTable
+          days={days}
+          loading={loading}
+          onOpenDay={openDay}
+          canOperate={canOperate}
+          fetching={fetching}
+          onFetchBroker={fetchBroker}
+        />
       ) : (
         <TradesTable trades={shown} loading={loading} onOpen={setOpenTrade} />
       )}
@@ -239,10 +269,16 @@ function DaysTable({
   days,
   loading,
   onOpenDay,
+  canOperate,
+  fetching,
+  onFetchBroker,
 }: {
   days: HistoryDay[];
   loading: boolean;
   onOpenDay: (sessionDate: string) => void;
+  canOperate: boolean;
+  fetching: string | null;
+  onFetchBroker: (sessionDate: string) => void;
 }) {
   if (loading) return <p className="mt-6 text-sm text-slate-500">Loading…</p>;
   if (!days.length) return <p className="mt-6 text-sm text-slate-500">No trading in this range.</p>;
@@ -260,6 +296,7 @@ function DaysTable({
               <th>Charges</th>
               <th>Net</th>
               <th>Reconciliation</th>
+              <th>Broker</th>
               <th>Day ended by</th>
             </tr>
           </thead>
@@ -300,6 +337,22 @@ function DaysTable({
                     label={day.reconciliation_label}
                     title={day.reconciliation_note}
                   />
+                </td>
+                <td onClick={(event) => event.stopPropagation()}>
+                  {day.live_trades > 0 && canOperate ? (
+                    <button
+                      className="secondary-button whitespace-nowrap px-2 py-1 text-xs"
+                      disabled={fetching === day.session_date}
+                      onClick={() => onFetchBroker(day.session_date)}
+                    >
+                      <CloudDownload className={`h-3.5 w-3.5 ${fetching === day.session_date ? "animate-pulse" : ""}`} />
+                      {day.broker_fetched_at ? "Re-fetch" : "Fetch"}
+                    </button>
+                  ) : (
+                    // A paper day has nothing at a broker to ask about, so the
+                    // button would only ever return an empty report.
+                    <span className="muted-cell text-xs">—</span>
+                  )}
                 </td>
                 <td className="muted-cell text-xs">{day.halt_reason ?? "—"}</td>
               </tr>

@@ -46,6 +46,7 @@ budget a cancel will need.
 import asyncio
 import time
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import httpx
@@ -274,6 +275,71 @@ class UpstoxReportClient:
         if not order_id:
             raise UpstoxError("order_id is required")
         data = await self._request("GET", f"{UPSTOX_API_BASE_URL}/v2/order/details", params={"order_id": order_id})
+        return data if isinstance(data, dict) else {}
+
+    # --- the trade reports -------------------------------------------------
+    #
+    # These two answer "what did the broker say this day was worth", which is
+    # the only authoritative source for realised P&L and charges. Both are
+    # read-only and both belong on this client rather than the order client.
+    #
+    # Two properties of the Upstox reports shape everything built on them:
+    #
+    #   charges are returned aggregated for a date range, never per trade, so a
+    #   per-trade cost in this system is always a local estimate;
+    #
+    #   the P&L report carries no order identifiers and is matched-pair shaped,
+    #   so it cannot be joined to our rows by identity — only compared in total.
+    #
+    # The request parameters below follow the documented contract. The date
+    # format in particular (dd-mm-yyyy, not ISO) is the kind of detail that is
+    # worth confirming against a real account before relying on it, which is
+    # what stage 1 of scripts/verify_upstox_orders.py is for.
+
+    async def trade_profit_loss(
+        self,
+        *,
+        from_date: date,
+        to_date: date,
+        financial_year: str,
+        segment: str = "EQ",
+        page_number: int = 1,
+        page_size: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Matched buy/sell pairs for a date range, one page at a time."""
+        data = await self._request(
+            "GET",
+            f"{UPSTOX_API_BASE_URL}/v2/trade/profit-loss/data",
+            params={
+                "segment": segment,
+                "financial_year": financial_year,
+                "from_date": from_date.strftime("%d-%m-%Y"),
+                "to_date": to_date.strftime("%d-%m-%Y"),
+                "page_number": page_number,
+                "page_size": page_size,
+            },
+        )
+        return data if isinstance(data, list) else []
+
+    async def trade_charges(
+        self,
+        *,
+        from_date: date,
+        to_date: date,
+        financial_year: str,
+        segment: str = "EQ",
+    ) -> dict[str, Any]:
+        """Charges for a date range, aggregated. There is no per-trade figure."""
+        data = await self._request(
+            "GET",
+            f"{UPSTOX_API_BASE_URL}/v2/trade/profit-loss/charges",
+            params={
+                "segment": segment,
+                "financial_year": financial_year,
+                "from_date": from_date.strftime("%d-%m-%Y"),
+                "to_date": to_date.strftime("%d-%m-%Y"),
+            },
+        )
         return data if isinstance(data, dict) else {}
 
 

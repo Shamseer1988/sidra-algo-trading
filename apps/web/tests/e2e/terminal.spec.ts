@@ -589,6 +589,20 @@ export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" =
     await route.fulfill({ json: MOCK_AUDIT });
   });
 
+  await page.route("**/api/v1/history/broker-figures/*", async (route: Route) => {
+    await route.fulfill({
+      json: {
+        session_date: "2026-09-24",
+        broker: "UPSTOX",
+        realized_pnl: "380.00",
+        charges: "75.00",
+        turnover: "12000.00",
+        trade_count: 2,
+        fetched_at: new Date().toISOString(),
+        note: "Recorded beside the local figures, not over them.",
+      },
+    });
+  });
   await page.route("**/api/v1/history/overview*", async (route: Route) => {
     await route.fulfill({ json: MOCK_HISTORY_OVERVIEW });
   });
@@ -1302,5 +1316,21 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
 
     await page.getByLabel("Trailing").selectOption("BREAKEVEN_AT_R");
     await expect(page.getByLabel("Move at (R ahead)")).toBeVisible();
+  });
+  test("11. History: the broker figures can be fetched, and only where there is a broker", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await go(page, "History");
+
+    // The live day offers the fetch; the paper day has nothing at a broker to
+    // ask about, so the button would only ever return an empty report.
+    const live = page.locator("tr", { hasText: "2026-09-24" }).first();
+    const paper = page.locator("tr", { hasText: "2026-09-23" }).first();
+    await expect(live.getByRole("button", { name: "Re-fetch" })).toBeVisible();
+    await expect(paper.getByRole("button", { name: /fetch/i })).toHaveCount(0);
+
+    await live.getByRole("button", { name: "Re-fetch" }).click();
+    await expect(page.getByText(/UPSTOX reported \+₹380.00 realised/)).toBeVisible();
+    await expect(page.getByText(/Recorded beside the local figures/)).toBeVisible();
   });
 });

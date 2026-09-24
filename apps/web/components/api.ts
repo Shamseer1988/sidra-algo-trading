@@ -198,6 +198,16 @@ export type HistoryFill = {
   occurred_at: string;
 };
 export type HistoryTradeDetail = { trade: HistoryTrade; orders: HistoryOrder[]; fills: HistoryFill[] };
+export type BrokerFetchResult = {
+  session_date: string;
+  broker: string;
+  realized_pnl: string | null;
+  charges: string | null;
+  turnover: string | null;
+  trade_count: number | null;
+  fetched_at: string;
+  note: string;
+};
 export type HistoryRange = { from_date?: string; to_date?: string };
 export type RiskPreset = { key: string; label: string; description: string; controls: Record<string, number>; effective: EffectiveLimits };
 export type SettingRevision = { created_at: string; changed_keys: string[]; risk_increased: string[]; changed_by_user_id: string | null };
@@ -346,6 +356,8 @@ export const api = {
     request<HistoryTrade[]>(`/history/trades${historyQuery(range)}`),
   historyTrade: (positionId: string) => request<HistoryTradeDetail>(`/history/trades/${encodeURIComponent(positionId)}`),
   historyExportUrl: (kind: "csv" | "xlsx", range: HistoryRange) => `/api/v1/history/export.${kind}${historyQuery(range)}`,
+  fetchBrokerFigures: (sessionDate: string) =>
+    request<BrokerFetchResult>(`/history/broker-figures/${encodeURIComponent(sessionDate)}`, { method: "POST" }),
   safety: () => request<SafetyStatus>("/safety/status"), enablePaper: () => request<SafetyStatus>("/safety/paper/enable", { method: "POST" }), disablePaper: () => request<SafetyStatus>("/safety/paper/disable", { method: "POST" }), emergencyStop: (reason: string) => request<SafetyStatus>("/safety/emergency-stop", { method: "POST", body: JSON.stringify({ reason }) }), clearEmergencyStop: () => request<SafetyStatus>("/safety/emergency-stop/clear", { method: "POST" }), liveReadiness: () => request<LiveReadiness>("/live/readiness"), verifyLiveReadiness: () => request<LiveReadiness>("/live/readiness/verify", { method: "POST" }), liveReadinessHistory: () => request<LiveReadinessHistory[]>("/live/readiness/history"), telegram: () => request<TelegramStatus>("/telegram/status"), testTelegram: () => request<TelegramStatus>("/telegram/test", { method: "POST" }), brokerControls: () => request<BrokerControls>("/market-data/brokers"), updateBrokerControls: (controls: BrokerControls) => request<BrokerControls>("/market-data/brokers", { method: "PUT", body: JSON.stringify(controls) }), startUpstoxOAuth: () => request<UpstoxOAuthStart>("/market-data/upstox/authorize", { method: "POST" }),
   completeUpstoxOAuth: (code: string, state: string) => request<{ status: string; expires_at: string }>(`/market-data/upstox/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`),
   autoAuthStatus: () => request<AutoAuthStatus>("/market-data/upstox/auto-auth/status"),

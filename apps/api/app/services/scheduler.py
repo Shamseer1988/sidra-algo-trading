@@ -21,7 +21,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.core.config import Settings
 from app.db.models import AuditLog
 from app.db.session import SessionLocal
-from app.services.trading_calendar import TradingCalendar
+from app.services.trading_calendar import MARKET_TIMEZONE, TradingCalendar
 from app.services.upstox_auto_auth import UpstoxAutoAuthError, perform_auto_login
 
 logger = structlog.get_logger("scheduler")
@@ -202,39 +202,108 @@ def _make_job_func(settings: Settings, calendar: TradingCalendar):
     return _job
 
 
+def _make_broker_figures_job(settings: Settings):
+    """Fetch the broker's own figures for the session that just ended.
+
+    Skips itself on a day this system placed no live orders, which is what
+    makes it harmless on a paper-only deployment: there is nothing at the
+    broker to reconcile against, and asking would only produce an empty report
+    and an audit entry nobody needs.
+
+    Read-only at the broker. The client it uses has no method that can place,
+    modify or cancel an order.
+    """
+
+    async def _job() -> None:
+        from sqlalchemy import select
+
+        from app.db.models import LiveOrderSubmission
+        from app.db.session import SessionLocal
+        from app.services import broker_day_figures
+        from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
+        from app.services.upstox_oauth import load_access_token
+        from app.services.upstox_orders import UpstoxError, UpstoxReportClient, UpstoxSession
+
+        session_date = datetime.now(UTC).astimezone(MARKET_TIMEZONE).date()
+        start, end = session_bounds_utc(session_date)
+        async with SessionLocal() as db:
+            placed = await db.scalar(
+                select(LiveOrderSubmission.id)
+                .where(
+                    LiveOrderSubmission.created_at >= start,
+                    LiveOrderSubmission.created_at < end,
+                    LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
+                )
+                .limit(1)
+            )
+        if placed is None:
+            logger.info("scheduler.broker_figures_skipped", reason="no live orders today", date=str(session_date))
+            return
+
+        token = await load_access_token(settings)
+        if not token:
+            logger.warning("scheduler.broker_figures_skipped", reason="no upstox access token")
+            await _persist_audit("scheduler.broker_figures_skipped", {"reason": "no_access_token"})
+            return
+
+        client = UpstoxReportClient(settings, UpstoxSession(access_token=token))
+        try:
+            figures = await broker_day_figures.fetch_upstox_day(client, session_date)
+        except UpstoxError as error:
+            logger.warning("scheduler.broker_figures_failed", error=str(error))
+            await _persist_audit("scheduler.broker_figures_failed", {"error": str(error)})
+            return
+
+        async with SessionLocal() as db:
+            await broker_day_figures.record(db, session_date, figures)
+            await db.commit()
+        logger.info(
+            "scheduler.broker_figures_recorded",
+            date=str(session_date),
+            trades=figures.trade_count,
+            realized=str(figures.realized_pnl),
+        )
+
+    return _job
+
+
 def init_upstox_scheduler(settings: Settings) -> AsyncIOScheduler | None:
     """Create and configure the APScheduler instance.
 
     Returns ``None`` if auto-auth is not configured, so callers can skip start/stop.
     """
-    if not settings.upstox_auto_auth_is_configured:
-        logger.info("scheduler.auto_auth_disabled", reason="Not all UPSTOX_AUTO_AUTH fields are configured")
-        return None
-
     calendar = TradingCalendar.from_settings(settings)
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
 
-    # Primary job: 08:30 AM IST, Monday–Friday
-    trigger = CronTrigger(
-        day_of_week="mon-fri",
-        hour=8,
-        minute=30,
-        timezone="Asia/Kolkata",
-    )
+    if settings.upstox_auto_auth_is_configured:
+        # Primary job: 08:30 AM IST, Monday–Friday
+        scheduler.add_job(
+            _make_job_func(settings, calendar),
+            trigger=CronTrigger(day_of_week="mon-fri", hour=8, minute=30, timezone="Asia/Kolkata"),
+            id="upstox_morning_renewal",
+            name="Upstox Morning Token Renewal (08:30 IST)",
+            replace_existing=True,
+            misfire_grace_time=3600,  # allow up to 1 hour late if container was down
+        )
+    else:
+        logger.info("scheduler.auto_auth_disabled", reason="Not all UPSTOX_AUTO_AUTH fields are configured")
+
+    # After the close and after settlement has had time to happen. The job skips
+    # itself on a day with no live orders, so it costs a paper deployment one
+    # indexed query an evening.
     scheduler.add_job(
-        _make_job_func(settings, calendar),
-        trigger=trigger,
-        id="upstox_morning_renewal",
-        name="Upstox Morning Token Renewal (08:30 IST)",
+        _make_broker_figures_job(settings),
+        trigger=CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone="Asia/Kolkata"),
+        id="broker_day_figures",
+        name="Broker day figures (18:00 IST)",
         replace_existing=True,
-        misfire_grace_time=3600,  # allow up to 1 hour late if container was down
+        misfire_grace_time=7200,
     )
 
     logger.info(
         "scheduler.configured",
-        job="upstox_morning_renewal",
-        schedule="08:30 IST Mon–Fri",
-        auto_auth_enabled=True,
+        auto_auth_enabled=settings.upstox_auto_auth_is_configured,
+        jobs=[job.id for job in scheduler.get_jobs()],
     )
     return scheduler
 

@@ -185,7 +185,53 @@ async def stage_one(client: UpstoxOrderClient, *, instrument_key: str, price: fl
             print("  this blocks trading until it is fixed.")
             findings["margin"] = "failed"
 
-    heading("4. Failure envelope: does a bad request classify as documented?")
+    heading("4. Trade reports: do the History screen's two sources answer?")
+    # The History reconciliation compares our figures against these. The
+    # request parameters — the dd-mm-yyyy dates and the financial year in
+    # particular — are the kind of contract detail that is worth confirming
+    # against a real account rather than trusting from documentation.
+    from datetime import UTC, datetime, timedelta
+
+    from app.services.broker_day_figures import financial_year, read_charges, read_profit_loss
+
+    window_end = datetime.now(UTC).date()
+    window_start = window_end - timedelta(days=30)
+    year = financial_year(window_end)
+    print(f"  Asking for {window_start} to {window_end}, financial year {year}.")
+    try:
+        rows = await client.trade_profit_loss(
+            from_date=window_start, to_date=window_end, financial_year=year, page_number=1, page_size=100
+        )
+        realised, turnover, count = read_profit_loss(rows)
+        print(f"  [OK] profit-loss/data returned {len(rows)} row(s).")
+        if rows:
+            print(f"  fields: {', '.join(field_names(rows))}")
+            print(f"  realised: {realised!r}  turnover: {turnover!r}  matched pairs: {count}")
+        else:
+            print("  No rows. Either nothing traded in this window, or the")
+            print("  financial year or date format is not what this expects.")
+        findings["profit_loss"] = f"{len(rows)} rows"
+    except UpstoxError as exc:
+        print(f"  [PROBLEM] profit-loss/data failed: {exc}")
+        print("  The History screen will stay on BROKER DATA PENDING until this works.")
+        findings["profit_loss"] = "failed"
+
+    try:
+        charges_body = await client.trade_charges(from_date=window_start, to_date=window_end, financial_year=year)
+        total = read_charges(charges_body)
+        print(f"  [{'OK' if total is not None else 'WARN'}] profit-loss/charges total: {total!r}")
+        if total is None and charges_body:
+            print(f"  body keys: {', '.join(sorted(charges_body))}")
+            print("  The total could not be read from this shape; read_charges needs adjusting.")
+        print("  Note: this figure is for the whole window, not per trade. Upstox")
+        print("  publishes no per-trade charge, which is why per-trade costs in")
+        print("  this system are estimated locally and always will be.")
+        findings["charges"] = "readable" if total is not None else "unreadable"
+    except UpstoxError as exc:
+        print(f"  [PROBLEM] profit-loss/charges failed: {exc}")
+        findings["charges"] = "failed"
+
+    heading("5. Failure envelope: does a bad request classify as documented?")
     try:
         await client.order_details("definitely-not-an-order-id")
         print("  [WARN] A nonsense order id did not produce an error.")

@@ -146,7 +146,7 @@ export function AppShell() {
       content = <PaperExecutionPanel view={showing === "positions" ? "positions" : "orders"} />;
       break;
     case "history":
-      content = showing === "journal" ? <JournalPanel signals={signals} /> : <HistoryWorkspace onMessage={setMessage} />;
+      content = showing === "journal" ? <JournalPanel signals={signals} /> : <HistoryWorkspace canOperate={Boolean(canOperate)} onMessage={setMessage} />;
       break;
     case "risk":
       content = <RiskCenter safety={safety} canOperate={Boolean(canOperate)} isAdmin={Boolean(isAdmin)} onEmergency={() => void emergencyAction()} onClear={() => void emergencyAction(true)} onPaper={() => void paperAction()} />;
