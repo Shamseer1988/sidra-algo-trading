@@ -22,6 +22,7 @@ from app.db.models import (
 )
 from app.services.backtest_sweep import SWEEPABLE, run_parameter_sweep
 from app.services.backtesting import run_completed_candle_backtest
+from app.services.indicator_settings import effective as effective_settings
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_execution import DEFAULT_PAPER_EXECUTION_CONTROLS, PAPER_EXECUTION_KEY, PaperExecutionControls
 from app.services.strategy_registry import DEFAULT_STRATEGIES, STRATEGIES_KEY, StrategyConfiguration, StrategyRegistry
@@ -238,16 +239,20 @@ async def create_backtest(
             StrategyRegistry.definition(item.strategy_type)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    # The stored indicator periods, not the environment's. A backtest measured
+    # with a different ruler than the live scanner produces numbers nobody can
+    # act on, and the difference would be invisible in the result.
+    measured_with = await effective_settings(session, app_settings)
     by_instrument, benchmark = await _load_history(
         session,
-        app_settings,
+        measured_with,
         request.instrument_tokens,
         request.timeframe_seconds,
         request.start_date,
         request.end_date,
     )
     result = run_completed_candle_backtest(
-        by_instrument, benchmark, selected, controls, execution_controls, app_settings
+        by_instrument, benchmark, selected, controls, execution_controls, measured_with
     )
     run = BacktestRun(
         created_by_user_id=user.id,

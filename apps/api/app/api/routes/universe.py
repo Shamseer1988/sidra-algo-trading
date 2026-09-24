@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import ScanUniverseEntry, User, UserRole
+from app.services.indicator_settings import effective as effective_settings
 from app.services.trading_symbols import resolve_script_names
 from app.services.universe import refresh_universe
 
@@ -107,7 +108,9 @@ async def rebuild_universe(
     session_date: date | None = None,
 ) -> UniverseSummaryResponse:
     target = session_date or date.today()
-    await refresh_universe(settings, target)
+    # The stored indicator periods, so a universe refresh and the scanner
+    # that consumes it are measuring with the same ruler.
+    await refresh_universe(await effective_settings(session, settings), target)
     rows = await _entries(session, target)
     built_at = max((row.created_at for row in rows), default=None)
     return UniverseSummaryResponse(

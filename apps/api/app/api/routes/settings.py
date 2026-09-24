@@ -4,12 +4,19 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 
-from app.api.deps import CurrentUser, DbSession, require_roles
+from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import ApplicationSetting, AuditLog, ScannerEvaluation, User, UserRole
+from app.services.indicator_settings import (
+    INDICATOR_KEY,
+    IndicatorSettings,
+    from_environment,
+)
+from app.services.indicator_settings import load as load_indicators
 from app.services.risk_profile import RISK_PRESETS, effective_limits
 from app.services.settings_catalog import (
     GROUP_LABELS,
     GROUP_ORDER,
+    INDICATOR_SPECS,
     TRADING_CONTROL_SPECS,
 )
 from app.services.settings_history import last_changed_per_key, record_revision, revision_history, summarise
@@ -385,6 +392,85 @@ async def apply_preset(
             ),
         )
     return await _persist_controls(session, candidate, user)
+
+
+# --- indicator periods ----------------------------------------------------
+
+
+class IndicatorCatalogResponse(BaseModel):
+    settings: list[SettingSpecResponse]
+    source: str
+
+
+@router.get("/indicators", response_model=IndicatorSettings)
+async def get_indicator_settings(_: CurrentUser, session: DbSession, settings: AppSettings) -> IndicatorSettings:
+    return await load_indicators(session, settings)
+
+
+@router.get("/indicators/catalog", response_model=IndicatorCatalogResponse)
+async def indicator_catalog(_: CurrentUser, session: DbSession, settings: AppSettings) -> IndicatorCatalogResponse:
+    """The periods, described, plus where the current values came from.
+
+    ``source`` is worth showing: until somebody saves these through the UI the
+    deployment is still running on its ``.env``, and an operator who does not
+    know that will wonder why editing the file used to work and now does not.
+    """
+    stored = await session.get(ApplicationSetting, INDICATOR_KEY)
+    values = (await load_indicators(session, settings)).model_dump()
+    stamps = await last_changed_per_key(session, INDICATOR_KEY)
+    return IndicatorCatalogResponse(
+        settings=[
+            SettingSpecResponse(
+                **spec.describe(IndicatorSettings.model_fields, values.get(spec.key), stamps.get(spec.key))
+            )
+            for spec in INDICATOR_SPECS
+        ],
+        source="DATABASE" if stored is not None else "ENVIRONMENT",
+    )
+
+
+@router.put("/indicators", response_model=IndicatorSettings)
+async def update_indicator_settings(
+    indicators: IndicatorSettings,
+    session: DbSession,
+    settings: AppSettings,
+    user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> IndicatorSettings:
+    """Save the periods, versioned and audited like any other setting.
+
+    The first save is the moment this deployment stops reading ``.env`` for
+    these values, which the audit entry records so the change of source is not
+    something somebody has to infer later.
+    """
+    stored = await session.get(ApplicationSetting, INDICATOR_KEY)
+    previous = (
+        dict(stored.value)
+        if stored is not None and isinstance(stored.value, dict)
+        else from_environment(settings).model_dump()
+    )
+    payload = indicators.model_dump()
+    summary = summarise(previous, payload)
+
+    if stored is None:
+        stored = ApplicationSetting(key=INDICATOR_KEY, value=payload, updated_by_user_id=user.id)
+        session.add(stored)
+    else:
+        stored.value = payload
+        stored.updated_by_user_id = user.id
+
+    await record_revision(session, INDICATOR_KEY, payload, summary, changed_by_user_id=user.id)
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            event_type="settings.indicators_updated",
+            metadata_json={
+                "changed_keys": summary.changed_keys,
+                "previous_source": "DATABASE" if stored.created_at else "ENVIRONMENT",
+            },
+        )
+    )
+    await session.commit()
+    return indicators
 
 
 class StrategyDefinitionResponse(BaseModel):

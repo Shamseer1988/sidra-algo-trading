@@ -38,6 +38,7 @@ DAILY_RISK = "DAILY_RISK"
 SESSION = "TRADING_SESSION"
 SIGNAL_QUALITY = "SIGNAL_QUALITY"
 EXECUTION = "EXECUTION"
+INDICATORS = "INDICATORS"
 
 GROUP_LABELS = {
     ACCOUNT: "Account and broker",
@@ -45,6 +46,7 @@ GROUP_LABELS = {
     SESSION: "Trading session",
     SIGNAL_QUALITY: "Signal quality",
     EXECUTION: "Execution",
+    INDICATORS: "Indicator periods",
 }
 
 # When a saved change starts to matter. Spelled out per control because the
@@ -395,5 +397,117 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
     ),
 )
 
+# --- indicator periods ----------------------------------------------------
+#
+# These lived in .env, which made adjusting them a file edit and a restart and
+# made the current value invisible to anyone not on the NAS. They are described
+# here on the same terms as everything else, with one difference worth stating
+# in each help string: they change what an indicator *means*, so a session
+# measured before a change is not comparable with one measured after it.
+#
+# All of them are NEXT_SESSION, and that is not a limitation to apologise for.
+# An EMA period changed at 11:00 would have one meaning before the change and
+# another after it inside one day's data, with the strategy state machine
+# holding a breakout established under the old reading.
+
+INDICATOR_SPECS: tuple[SettingSpec, ...] = (
+    SettingSpec(
+        key="candle_timeframe_seconds",
+        group=INDICATORS,
+        label="Candle timeframe",
+        help=(
+            "Seconds per candle. Every indicator, the opening range and the strategy state machine all "
+            "work on these, so this is the most consequential number here. Changing it does not "
+            "reinterpret the day's data — it is what ticks are bucketed into, so a change mid-session "
+            "would corrupt the session rather than re-measure it."
+        ),
+        unit=COUNT,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
+        key="opening_range_minutes",
+        group=INDICATORS,
+        label="Opening range length",
+        help=(
+            "Minutes from the open that form the range the breakout strategy trades around. Longer "
+            "ranges are wider and break out less often; shorter ones break out on noise."
+        ),
+        unit=COUNT,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
+        key="ema_fast_period",
+        group=INDICATORS,
+        label="Fast EMA period",
+        help=(
+            "Candles in the fast moving average. Must stay below the slow period — a fast average that "
+            "is slower than the slow one inverts every trend signal rather than producing an error."
+        ),
+        unit=COUNT,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
+        key="ema_slow_period",
+        group=INDICATORS,
+        label="Slow EMA period",
+        help=(
+            "Candles in the slow moving average. The gap between the two is what the EMA separation "
+            "threshold measures, so widening this makes the choppy-market refusal fire less often."
+        ),
+        unit=COUNT,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
+        key="atr_period",
+        group=INDICATORS,
+        label="ATR period",
+        help=(
+            "Candles in the average true range. ATR sets the stop distance and scales the breakout "
+            "score, so this indirectly changes position size on every trade."
+        ),
+        unit=COUNT,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
+        key="volume_lookback_candles",
+        group=INDICATORS,
+        label="Volume lookback",
+        help=(
+            "Candles averaged for the intraday volume comparison. Short lookbacks make relative volume "
+            "jumpy; long ones blunt the confirmation the strategy is asking for."
+        ),
+        unit=COUNT,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
+        key="rvol_baseline_sessions",
+        group=INDICATORS,
+        label="Relative-volume baseline sessions",
+        help=(
+            "Past sessions needed before relative volume can be computed at all. Until that many exist "
+            "the input is missing, and a strategy that requires volume refuses its signals outright "
+            "rather than scoring them. Lowering it produces a number sooner and a worse one."
+        ),
+        unit=COUNT,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
+        key="daily_history_sessions",
+        group=INDICATORS,
+        label="Daily history sessions",
+        help=(
+            "Past daily candles kept for the daily ATR, the universe filters and relative strength. "
+            "More history is steadier and slower to backfill."
+        ),
+        unit=COUNT,
+        effect=NEXT_SESSION,
+    ),
+)
+
 SPECS_BY_KEY: dict[str, SettingSpec] = {spec.key: spec for spec in TRADING_CONTROL_SPECS}
+INDICATOR_SPECS_BY_KEY: dict[str, SettingSpec] = {spec.key: spec for spec in INDICATOR_SPECS}
+# The indicator group is deliberately absent from the trading-controls order:
+# those settings live under a different key and are served by their own
+# endpoint, so listing the group here would promise a section the trading
+# catalogue cannot fill.
 GROUP_ORDER: tuple[str, ...] = (ACCOUNT, DAILY_RISK, SESSION, SIGNAL_QUALITY, EXECUTION)

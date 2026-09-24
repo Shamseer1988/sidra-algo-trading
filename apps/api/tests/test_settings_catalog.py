@@ -13,10 +13,14 @@ else can be re-derived by reading; those two cannot be satisfied by care.
 import pytest
 
 from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TradingControls
+from app.services.indicator_settings import IndicatorSettings
 from app.services.settings_catalog import (
     EFFECT_LABELS,
     GROUP_LABELS,
     GROUP_ORDER,
+    INDICATOR_SPECS,
+    INDICATOR_SPECS_BY_KEY,
+    INDICATORS,
     SPECS_BY_KEY,
     TRADING_CONTROL_SPECS,
 )
@@ -130,9 +134,63 @@ def test_the_score_control_warns_that_scores_are_not_comparable_with_old_ones() 
 
 
 def test_every_group_is_used_and_ordered() -> None:
-    used = {spec.group for spec in TRADING_CONTROL_SPECS}
-    assert used == set(GROUP_ORDER) == set(GROUP_LABELS)
+    """Two catalogues share one set of group labels.
+
+    GROUP_ORDER covers only the trading controls, because that is the order the
+    trading catalogue renders. Listing the indicator group there would promise a
+    section that endpoint cannot fill — those settings live under a different
+    key and are served separately.
+    """
+    trading = {spec.group for spec in TRADING_CONTROL_SPECS}
+    indicators = {spec.group for spec in INDICATOR_SPECS}
+    assert trading == set(GROUP_ORDER)
+    assert indicators == {INDICATORS}
+    assert trading | indicators == set(GROUP_LABELS)
     assert len(GROUP_ORDER) == len(set(GROUP_ORDER))
+
+
+# --- indicator periods ----------------------------------------------------
+
+
+def test_every_indicator_period_is_described() -> None:
+    """Same rule as the trading controls: no undescribed control ships."""
+    assert set(INDICATOR_SPECS_BY_KEY) == set(IndicatorSettings.model_fields)
+
+
+@pytest.mark.parametrize("spec", INDICATOR_SPECS, ids=lambda spec: spec.key)
+def test_every_indicator_period_explains_what_it_changes(spec) -> None:
+    assert len(spec.help) > 60, spec.key
+    assert spec.unit
+    assert spec.group in GROUP_LABELS
+
+
+@pytest.mark.parametrize("spec", INDICATOR_SPECS, ids=lambda spec: spec.key)
+def test_no_indicator_period_claims_to_apply_immediately(spec) -> None:
+    """An EMA period changed at 11:00 would mean one thing before the change and
+    another after it, inside one day's data."""
+    assert spec.effect == "NEXT_SESSION", spec.key
+
+
+def test_the_candle_timeframe_says_a_mid_session_change_would_corrupt_not_re_measure() -> None:
+    """It is what ticks are bucketed into, not something recomputed from them."""
+    assert "corrupt" in INDICATOR_SPECS_BY_KEY["candle_timeframe_seconds"].help
+
+
+def test_the_fast_ema_warns_that_inverting_the_pair_does_not_raise() -> None:
+    assert "inverts every trend signal" in INDICATOR_SPECS_BY_KEY["ema_fast_period"].help
+
+
+def test_the_rvol_baseline_explains_why_signals_are_refused_without_it() -> None:
+    """This is the control that explains the refusals the September scoring fix
+    introduced, so it has to say so where an operator will look."""
+    assert "refuses its signals" in INDICATOR_SPECS_BY_KEY["rvol_baseline_sessions"].help
+
+
+def test_indicator_bounds_are_read_from_the_indicator_schema() -> None:
+    described = INDICATOR_SPECS_BY_KEY["opening_range_minutes"].describe(IndicatorSettings.model_fields, 15, None)
+    assert described["minimum"] == 5
+    assert described["maximum"] == 60
+    assert described["kind"] == "integer"
 
 
 # --- change detection -----------------------------------------------------

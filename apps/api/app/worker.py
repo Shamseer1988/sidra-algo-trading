@@ -6,13 +6,14 @@ Handles continuous market-data streaming, candle aggregation, and paper strategy
 import asyncio
 import contextlib
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import structlog
 from redis.asyncio import Redis
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.db.session import SessionLocal
 from app.services.broker_controls import load_broker_controls
 from app.services.candle_aggregation import (
     CandleAggregationService,
@@ -20,6 +21,8 @@ from app.services.candle_aggregation import (
 )
 from app.services.data_quality import MarketDataQualityService
 from app.services.firstock.market_data import FirstockMarketDataService
+from app.services.indicator_settings import IndicatorSettings, overlay
+from app.services.indicator_settings import load as load_indicators
 from app.services.scanner_orchestration import PaperScannerOrchestrator
 from app.services.trading_calendar import MARKET_TIMEZONE, TradingCalendar
 from app.services.universe import refresh_universe
@@ -43,7 +46,10 @@ async def _publish_worker_state(redis: Redis, status: str, detail: str, restart_
 
 
 async def run() -> None:
-    settings = get_settings()
+    # ``settings`` is rebound each session to an overlay carrying the stored
+    # indicator periods; ``base_settings`` stays the environment underneath it.
+    base_settings = get_settings()
+    settings = base_settings
     configure_logging(settings.log_level)
     logger = structlog.get_logger("scanner")
     redis = Redis.from_url(str(settings.redis_url), decode_responses=True)
@@ -57,6 +63,13 @@ async def run() -> None:
     active_benchmark: str | None = None
     last_heartbeat = 0.0
     last_heartbeat_log = 0.0
+    # The indicator periods now live in the database with the environment as a
+    # fallback. Resolved per session rather than per loop: changing an EMA
+    # period mid-session would give one day's data two meanings, and the candle
+    # timeframe is what ticks are bucketed into, so changing that mid-session
+    # corrupts the session instead of re-measuring it.
+    indicators: IndicatorSettings | None = None
+    indicators_session: date | None = None
     last_instrument_check = 0.0
     last_universe_refresh: object = None
     market_data_backoff = RestartBackoff()
@@ -75,6 +88,27 @@ async def run() -> None:
                 requested_state = await redis.get("scanner:control_state") or "STOPPED"
                 broker_controls = await load_broker_controls(redis)
                 selected_broker = broker_controls.active_broker
+
+                session_today = datetime.now(UTC).astimezone(MARKET_TIMEZONE).date()
+                if indicators is None or indicators_session != session_today:
+                    async with SessionLocal() as db:
+                        resolved = await load_indicators(db, base_settings)
+                    if indicators is not None and resolved != indicators:
+                        # Saved during the previous session and taking effect
+                        # now. Logged rather than silent: an operator comparing
+                        # two sessions needs to know the measurement changed.
+                        logger.info(
+                            "scanner.indicator_settings_changed",
+                            session=session_today.isoformat(),
+                            **resolved.model_dump(),
+                        )
+                        # Rebuilt below, because the aggregator buckets ticks by
+                        # the timeframe it was constructed with.
+                        aggregation = None
+                        active_broker = None
+                    indicators = resolved
+                    indicators_session = session_today
+                    settings = overlay(base_settings, indicators)
 
                 if market_data_task and market_data_task.done():
                     detail = completed_task_detail(market_data_task)
