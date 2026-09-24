@@ -1,10 +1,12 @@
 "use client";
 
-import { Plus, Save, SlidersHorizontal } from "lucide-react";
+import { FileText, Plus, Save, SlidersHorizontal } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api, type PaperStrategy, type StrategyDefinition, type StrategyMetric } from "../../components/api";
 import { randomId } from "../../lib/formatting";
+import { ExitRulesFields } from "./exit-rules-fields";
+import { StrategyDetailView } from "./strategy-detail";
 
 const editable = [
   "minimum_score",
@@ -19,6 +21,7 @@ export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMe
   const [metrics, setMetrics] = useState<StrategyMetric[]>([]);
   const [definitions, setDefinitions] = useState<StrategyDefinition[]>([]);
   const [loading, setLoading] = useState(true);
+  const [opened, setOpened] = useState<string | null>(null);
 
   useEffect(() => {
     void api.strategies()
@@ -52,6 +55,8 @@ export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMe
     }
   };
 
+  if (opened) return <StrategyDetailView strategyId={opened} onBack={() => setOpened(null)} onMessage={onMessage} />;
+
   return (
     <section>
       <div className="page-toolbar">
@@ -77,7 +82,10 @@ export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMe
                 <span>version {item.version}</span>
               </div>
             </div>
-            <label className="toggle-row"><input disabled={!isAdmin} type="checkbox" checked={item.enabled} onChange={(event) => change(item.id, "enabled", event.target.checked)} /><span>{item.enabled ? "Enabled" : "Paused"}</span></label>
+            <div className="flex items-center gap-3">
+              <button className="secondary-button" onClick={() => setOpened(item.id)}><FileText className="h-4 w-4" />Details</button>
+              <label className="toggle-row"><input disabled={!isAdmin} type="checkbox" checked={item.enabled} onChange={(event) => change(item.id, "enabled", event.target.checked)} /><span>{item.enabled ? "Enabled" : "Paused"}</span></label>
+            </div>
           </div>
           <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{editable.map((key) => <label key={key} className="field-label">{key.replaceAll("_", " ")}<input disabled={!isAdmin} className="field-input mt-2" type="number" step="any" value={item[key]} onChange={(event) => change(item.id, key, event.target.value)} /></label>)}</div>
           <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
@@ -90,6 +98,11 @@ export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMe
             <label className="field-label">Cooldown minutes<input disabled={!isAdmin} className="field-input mt-2" type="number" value={item.cooldown_minutes} onChange={(event) => change(item.id, "cooldown_minutes", event.target.value)} /></label>
             {item.strategy_type === "rs-pullback-v1" && <label className="field-label">RS threshold % (blank = default)<input disabled={!isAdmin} className="field-input mt-2" type="number" min="0" max="10" step="0.05" value={item.rs_threshold_percent ?? ""} onChange={(event) => setItems((current) => current.map((value) => value.id === item.id ? { ...value, rs_threshold_percent: event.target.value === "" ? null : Number(event.target.value) } : value))} /></label>}
           </div>
+          <ExitRulesFields
+            rules={item.exit_rules}
+            disabled={!isAdmin}
+            onChange={(next) => setItems((current) => current.map((value) => (value.id === item.id ? { ...value, exit_rules: next } : value)))}
+          />
         </article>)}
         {!loading && !items.length && <article className="empty-inset mt-6 text-center"><SlidersHorizontal className="mx-auto h-6 w-6 text-slate-500" /><p className="mt-3 text-sm text-slate-400">No persisted paper strategies are available.</p></article>}
       </div>

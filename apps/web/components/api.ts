@@ -202,7 +202,71 @@ export type HistoryRange = { from_date?: string; to_date?: string };
 export type RiskPreset = { key: string; label: string; description: string; controls: Record<string, number>; effective: EffectiveLimits };
 export type SettingRevision = { created_at: string; changed_keys: string[]; risk_increased: string[]; changed_by_user_id: string | null };
 export type TradingControls = { account_capital: number; risk_per_trade_percent: number; maximum_daily_risk_percent: number; maximum_open_positions: number; maximum_open_exposure_percent: number; maximum_daily_trades: number; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number; stop_atr_multiple: number; min_stop_distance_percent: number; trade_start_time: string; trade_cutoff_time: string; intraday_leverage_enabled?: boolean; intraday_leverage_multiplier?: number; execution_approval_mode?: ExecutionApprovalMode; live_broker?: LiveBroker };
-export type PaperStrategy = { id: string; name: string; enabled: boolean; strategy_type: string; version: number; universe: string[]; allowed_sides: string[]; allowed_sessions: string[]; max_trades_per_day: number; max_trades_per_side: number | null; cooldown_minutes: number; risk_per_trade_percent: number | null; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number; rs_threshold_percent: number | null };
+export type ExitRules = {
+  stop_rule: "WIDEST_OF_STRUCTURE_ATR_PERCENT";
+  stop_atr_multiple: number | null;
+  min_stop_distance_percent: number | null;
+  target_rule: "RR_MULTIPLE" | "ATR_MULTIPLE";
+  target_rr: number | null;
+  target_atr_multiple: number;
+  trailing_rule: "NONE" | "BREAKEVEN_AT_R" | "ATR_TRAIL";
+  trailing_trigger_r: number;
+  trailing_atr_multiple: number;
+  time_exit_minutes: number | null;
+  square_off_time: string | null;
+};
+export type StrategyEvidence = {
+  source: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate_percent: string | null;
+  net_pnl: string;
+  gross_pnl: string;
+  charges: string;
+  average_r: string | null;
+  from_date: string | null;
+  to_date: string | null;
+  out_of_sample: boolean;
+  sufficient: boolean;
+  shortfall: number;
+};
+export type StrategyVersionChange = { at: string; version: number; changed_keys: string[]; risk_increased: string[] };
+export type StrategyRecentSignal = {
+  id: string;
+  session_date: string;
+  instrument_token: string;
+  side: string;
+  status: string;
+  score: number;
+  entry_price: string;
+  stop_price: string;
+  target_price: string;
+  created_at: string;
+};
+export type StrategyDetail = {
+  configuration: PaperStrategy;
+  strategy_name: string;
+  prerequisites: string[];
+  purpose: string;
+  regime: string;
+  entry: string;
+  does_not: string;
+  required_inputs: string[];
+  exit_plan: string[];
+  limits: Record<string, unknown>;
+  signals_last_30_days: number;
+  last_signal_on: string | null;
+  backtest: StrategyEvidence;
+  forward: StrategyEvidence;
+  verdict: "NOT_ENOUGH_EVIDENCE" | "NEGATIVE" | "INCONCLUSIVE" | "PROMISING";
+  verdict_label: string;
+  verdict_headline: string;
+  verdict_caveats: string[];
+  version_history: StrategyVersionChange[];
+  recent_signals: StrategyRecentSignal[];
+};
+export type PaperStrategy = { id: string; name: string; enabled: boolean; strategy_type: string; version: number; universe: string[]; allowed_sides: string[]; allowed_sessions: string[]; max_trades_per_day: number; max_trades_per_side: number | null; cooldown_minutes: number; risk_per_trade_percent: number | null; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number; rs_threshold_percent: number | null; exit_rules: ExitRules };
 export type UniverseEntry = { instrument_token: string; script_name: string; session_date: string; rank: number; score: number; selected: boolean; eligible: boolean; rejection_reason: string | null; liquidity_score: number; volatility_score: number; gap_score: number; trend_score: number; metrics: Record<string, number> };
 export type UniverseSummary = { session_date: string; enabled: boolean; universe_size: number; total_candidates: number; eligible: number; selected: number; last_built_at: string | null };
 export type ScoreBucket = { samples: number; win_rate_percent: number; average_realized_r: number };
@@ -274,7 +338,7 @@ function historyQuery(range: Record<string, string | undefined>): string {
 }
 
 export const api = {
-  me: () => request<User>("/auth/me"), login: (email: string, password: string) => request<{ email: string; role: string }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }), refresh: () => request<{ email: string; role: string }>("/auth/refresh", { method: "POST" }), logout: () => request<void>("/auth/logout", { method: "POST" }), sessions: () => request<UserSession[]>("/auth/sessions"), revokeSession: (id: string) => request<void>(`/auth/sessions/${id}`, { method: "DELETE" }), auditLogs: () => request<AuditLog[]>("/auth/audit-logs"), overview: () => request<Overview>("/system/overview"), marketSession: () => request<MarketSession>("/system/market-session"), scanner: () => request<ScannerStatus>("/scanner/status"), dataQuality: () => request<DataQuality[]>("/scanner/data-quality"), evaluations: (limit = 100) => request<ScannerEvaluation[]>(`/scanner/evaluations?limit=${limit}`), signals: () => request<PaperSignal[]>("/scanner/signals"), paperSummary: () => request<PaperExecutionSummary>("/paper/summary"), paperOrders: () => request<PaperOrder[]>("/paper/orders"), paperPositions: () => request<PaperPosition[]>("/paper/positions"), paperRiskSummary: () => request<PaperRiskSummary>("/risk/summary"), shadowOrders: () => request<ShadowOrder[]>("/shadow/orders"), shadowSummary: () => request<ShadowSummary>("/shadow/summary"), omsOrders: () => request<OmsOrder[]>("/oms/orders"), omsReconciliations: () => request<OmsReconciliation[]>("/oms/reconciliations"), runOmsReconciliation: () => request<OmsReconciliation>("/oms/reconciliations/run", { method: "POST" }), backtests: () => request<BacktestRun[]>("/backtests"), runBacktest: (input: { start_date: string; end_date: string; instrument_tokens: string[]; strategy_ids: string[]; timeframe_seconds: number }) => request<BacktestRunDetail>("/backtests/run", { method: "POST", body: JSON.stringify(input) }), sweeps: () => request<BacktestSweep[]>("/backtests/sweeps"), createSweep: (input: { strategy_id: string; start_date: string; end_date: string; instrument_tokens: string[]; validation_fraction: number; parameter_grid: Record<string, number[]> }) => request<BacktestSweep>("/backtests/sweeps", { method: "POST", body: JSON.stringify(input) }), promoteSweepCombination: (id: string, index: number) => request<PaperStrategy[]>(`/backtests/sweeps/${id}/promote?combination_index=${index}`, { method: "POST" }), candles: (instrument: string, sessionDate: string) => request<MarketCandle[]>(`/market-data/candles/${encodeURIComponent(instrument)}?session_date=${encodeURIComponent(sessionDate)}`), strategies: () => request<PaperStrategy[]>("/settings/strategies"), strategyMetrics: () => request<StrategyMetric[]>("/settings/strategies/metrics"), strategyDefinitions: () => request<StrategyDefinition[]>("/settings/strategies/definitions"), updateStrategies: (items: PaperStrategy[]) => request<PaperStrategy[]>("/settings/strategies", { method: "PUT", body: JSON.stringify(items) }), startScanner: () => request<ScannerStatus>("/scanner/start", { method: "POST" }), stopScanner: () => request<ScannerStatus>("/scanner/stop", { method: "POST" }), universe: () => request<UniverseEntry[]>("/universe"), universeSummary: () => request<UniverseSummary>("/universe/summary"), refreshUniverse: () => request<UniverseSummary>("/universe/refresh", { method: "POST" }), marketRegime: () => request<MarketRegime>("/market-data/regime"), scoreAnalysis: () => request<ScoreAnalysis>("/journal/score-analysis"), controls: () => request<TradingControls>("/settings/trading"), updateControls: (controls: TradingControls) => request<TradingControls>("/settings/trading", { method: "PUT", body: JSON.stringify(controls) }), settingsCatalog: () => request<SettingsCatalog>("/settings/trading/catalog"), indicatorCatalog: () => request<IndicatorCatalog>("/settings/indicators/catalog"), updateIndicators: (indicators: IndicatorSettings) => request<IndicatorSettings>("/settings/indicators", { method: "PUT", body: JSON.stringify(indicators) }), settingsHistory: () => request<SettingRevision[]>("/settings/trading/history"), riskPresets: () => request<RiskPreset[]>("/settings/trading/presets"), applyRiskPreset: (preset: string, confirmRiskIncrease: boolean) => request<TradingControls>(`/settings/trading/presets/${encodeURIComponent(preset)}`, { method: "POST", body: JSON.stringify({ preset, confirm_risk_increase: confirmRiskIncrease }) }),
+  me: () => request<User>("/auth/me"), login: (email: string, password: string) => request<{ email: string; role: string }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }), refresh: () => request<{ email: string; role: string }>("/auth/refresh", { method: "POST" }), logout: () => request<void>("/auth/logout", { method: "POST" }), sessions: () => request<UserSession[]>("/auth/sessions"), revokeSession: (id: string) => request<void>(`/auth/sessions/${id}`, { method: "DELETE" }), auditLogs: () => request<AuditLog[]>("/auth/audit-logs"), overview: () => request<Overview>("/system/overview"), marketSession: () => request<MarketSession>("/system/market-session"), scanner: () => request<ScannerStatus>("/scanner/status"), dataQuality: () => request<DataQuality[]>("/scanner/data-quality"), evaluations: (limit = 100) => request<ScannerEvaluation[]>(`/scanner/evaluations?limit=${limit}`), signals: () => request<PaperSignal[]>("/scanner/signals"), paperSummary: () => request<PaperExecutionSummary>("/paper/summary"), paperOrders: () => request<PaperOrder[]>("/paper/orders"), paperPositions: () => request<PaperPosition[]>("/paper/positions"), paperRiskSummary: () => request<PaperRiskSummary>("/risk/summary"), shadowOrders: () => request<ShadowOrder[]>("/shadow/orders"), shadowSummary: () => request<ShadowSummary>("/shadow/summary"), omsOrders: () => request<OmsOrder[]>("/oms/orders"), omsReconciliations: () => request<OmsReconciliation[]>("/oms/reconciliations"), runOmsReconciliation: () => request<OmsReconciliation>("/oms/reconciliations/run", { method: "POST" }), backtests: () => request<BacktestRun[]>("/backtests"), runBacktest: (input: { start_date: string; end_date: string; instrument_tokens: string[]; strategy_ids: string[]; timeframe_seconds: number }) => request<BacktestRunDetail>("/backtests/run", { method: "POST", body: JSON.stringify(input) }), sweeps: () => request<BacktestSweep[]>("/backtests/sweeps"), createSweep: (input: { strategy_id: string; start_date: string; end_date: string; instrument_tokens: string[]; validation_fraction: number; parameter_grid: Record<string, number[]> }) => request<BacktestSweep>("/backtests/sweeps", { method: "POST", body: JSON.stringify(input) }), promoteSweepCombination: (id: string, index: number) => request<PaperStrategy[]>(`/backtests/sweeps/${id}/promote?combination_index=${index}`, { method: "POST" }), candles: (instrument: string, sessionDate: string) => request<MarketCandle[]>(`/market-data/candles/${encodeURIComponent(instrument)}?session_date=${encodeURIComponent(sessionDate)}`), strategies: () => request<PaperStrategy[]>("/settings/strategies"), strategyMetrics: () => request<StrategyMetric[]>("/settings/strategies/metrics"), strategyDefinitions: () => request<StrategyDefinition[]>("/settings/strategies/definitions"), strategyDetail: (id: string) => request<StrategyDetail>(`/settings/strategies/${encodeURIComponent(id)}/detail`), updateStrategies: (items: PaperStrategy[]) => request<PaperStrategy[]>("/settings/strategies", { method: "PUT", body: JSON.stringify(items) }), startScanner: () => request<ScannerStatus>("/scanner/start", { method: "POST" }), stopScanner: () => request<ScannerStatus>("/scanner/stop", { method: "POST" }), universe: () => request<UniverseEntry[]>("/universe"), universeSummary: () => request<UniverseSummary>("/universe/summary"), refreshUniverse: () => request<UniverseSummary>("/universe/refresh", { method: "POST" }), marketRegime: () => request<MarketRegime>("/market-data/regime"), scoreAnalysis: () => request<ScoreAnalysis>("/journal/score-analysis"), controls: () => request<TradingControls>("/settings/trading"), updateControls: (controls: TradingControls) => request<TradingControls>("/settings/trading", { method: "PUT", body: JSON.stringify(controls) }), settingsCatalog: () => request<SettingsCatalog>("/settings/trading/catalog"), indicatorCatalog: () => request<IndicatorCatalog>("/settings/indicators/catalog"), updateIndicators: (indicators: IndicatorSettings) => request<IndicatorSettings>("/settings/indicators", { method: "PUT", body: JSON.stringify(indicators) }), settingsHistory: () => request<SettingRevision[]>("/settings/trading/history"), riskPresets: () => request<RiskPreset[]>("/settings/trading/presets"), applyRiskPreset: (preset: string, confirmRiskIncrease: boolean) => request<TradingControls>(`/settings/trading/presets/${encodeURIComponent(preset)}`, { method: "POST", body: JSON.stringify({ preset, confirm_risk_increase: confirmRiskIncrease }) }),
 
   historyOverview: (range: HistoryRange) => request<HistoryOverview>(`/history/overview${historyQuery(range)}`),
   historyDaily: (range: HistoryRange) => request<HistoryDay[]>(`/history/daily${historyQuery(range)}`),

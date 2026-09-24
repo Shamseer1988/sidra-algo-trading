@@ -132,3 +132,57 @@ async def revision_history(session: AsyncSession, key: str, limit: int = 50) -> 
         .limit(limit)
     )
     return list(rows.all())
+
+
+# The per-strategy controls that make a strategy trade more, or risk more per
+# trade. Separate from RISK_CEILINGS because the account-level names do not all
+# exist on a strategy, and "max_trades_per_day" means something different when
+# it is one strategy's allowance rather than the account's.
+STRATEGY_RISK_CEILINGS = (
+    "max_trades_per_day",
+    "max_trades_per_side",
+    "risk_per_trade_percent",
+)
+
+
+def flatten_strategies(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """A list of strategies as one flat dict keyed ``<strategy id>.<field>``.
+
+    The revisions table stores one row per save of the whole list, so without
+    this the only honest summary of a save would be "the strategies changed".
+    Flattening is what lets a strategy's own screen show its own history.
+    """
+    flat: dict[str, Any] = {}
+    for item in items:
+        identifier = item.get("id")
+        if not identifier:
+            continue
+        for field_name, value in item.items():
+            if field_name in {"id", "version"}:
+                continue
+            # Nested settings — the exit rules — are flattened one level further
+            # so that "target_rr changed" is visible rather than "exit_rules
+            # changed", which would be true of every edit to any of them.
+            if isinstance(value, dict):
+                for inner, inner_value in value.items():
+                    flat[f"{identifier}.{field_name}.{inner}"] = inner_value
+            else:
+                flat[f"{identifier}.{field_name}"] = value
+    return flat
+
+
+def summarise_strategies(previous: list[dict[str, Any]], current: list[dict[str, Any]]) -> ChangeSummary:
+    """Which strategy fields moved, and which of those loosened a limit."""
+    before, after = flatten_strategies(previous), flatten_strategies(current)
+    changed = sorted(key for key in set(before) | set(after) if not _same(before.get(key), after.get(key)))
+    increased = []
+    for key in changed:
+        field_name = key.rsplit(".", 1)[-1]
+        if field_name not in STRATEGY_RISK_CEILINGS:
+            continue
+        old, new = before.get(key), after.get(key)
+        if isinstance(old, bool) or isinstance(new, bool):
+            continue
+        if isinstance(old, int | float) and isinstance(new, int | float) and new > old:
+            increased.append(f"{key}: {old} -> {new}")
+    return ChangeSummary(changed_keys=changed, risk_increased=increased)

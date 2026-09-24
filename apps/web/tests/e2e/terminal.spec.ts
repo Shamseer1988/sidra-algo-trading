@@ -295,7 +295,108 @@ const MOCK_STRATEGIES = [{
   volume_multiplier: 1.3,
   retest_tolerance_percent: 0.15,
   minimum_ema_spread_percent: 0.05,
+  rs_threshold_percent: null,
+  max_trades_per_side: null,
+  exit_rules: {
+    stop_rule: "WIDEST_OF_STRUCTURE_ATR_PERCENT",
+    stop_atr_multiple: null,
+    min_stop_distance_percent: null,
+    target_rule: "RR_MULTIPLE",
+    target_rr: null,
+    target_atr_multiple: 2.0,
+    trailing_rule: "NONE",
+    trailing_trigger_r: 1.0,
+    trailing_atr_multiple: 2.0,
+    time_exit_minutes: null,
+    square_off_time: null,
+  },
 }];
+
+const MOCK_STRATEGY_DETAIL = {
+  configuration: MOCK_STRATEGIES[0],
+  strategy_name: "Opening Range Breakout Retest",
+  prerequisites: ["completed candle", "opening range", "VWAP"],
+  purpose: "Trades the first genuine break of the opening range, but only after price comes back.",
+  regime: "Wants a directional morning with real volume.",
+  entry: "Price breaks the opening range, returns to the broken level, and closes back in the direction.",
+  does_not: "It does not predict the direction of the day.",
+  required_inputs: ["atr", "ema", "rvol"],
+  exit_plan: [
+    "Stop: the widest of the structural level, 1.5× ATR (the account's multiple), and 0.4% of the entry price (the account's floor).",
+    "Target: 1.5× the risk taken (the strategy's minimum reward:risk).",
+    "Trailing: none. The stop stays where it was placed.",
+    "Time exit: none. The position is held until the stop or target is hit, or the day's limit flattens it. Nothing closes it because the session is ending.",
+  ],
+  limits: {
+    max_trades_per_day: 2,
+    max_trades_per_side: null,
+    cooldown_minutes: 5,
+    allowed_sides: ["LONG", "SHORT"],
+    allowed_sessions: ["REGULAR"],
+    universe_size: 2,
+    minimum_score: 90,
+    minimum_rr: 1.5,
+  },
+  signals_last_30_days: 4,
+  last_signal_on: "2026-09-22",
+  backtest: {
+    source: "BACKTEST",
+    trades: 12,
+    wins: 5,
+    losses: 7,
+    win_rate_percent: "41.67",
+    net_pnl: "-320.00",
+    gross_pnl: "-100.00",
+    charges: "220.00",
+    average_r: "-0.21",
+    from_date: "2026-08-01",
+    to_date: "2026-08-31",
+    out_of_sample: false,
+    sufficient: false,
+    shortfall: 18,
+  },
+  forward: {
+    source: "PAPER_FORWARD",
+    trades: 6,
+    wins: 2,
+    losses: 4,
+    win_rate_percent: "33.33",
+    net_pnl: "-180.00",
+    gross_pnl: "-40.00",
+    charges: "140.00",
+    average_r: null,
+    from_date: "2026-09-10",
+    to_date: "2026-09-22",
+    out_of_sample: true,
+    sufficient: false,
+    shortfall: 24,
+  },
+  verdict: "NEGATIVE",
+  verdict_label: "Losing money",
+  verdict_headline: "Losing money forward: ₹-180.00 net over 6 trades.",
+  verdict_caveats: [
+    "The backtest evidence is in-sample: the parameters were chosen knowing how this period turned out.",
+    "Backtest needs 18 more resolved trades to reach 30.",
+    "Paper-forward needs 24 more resolved trades to reach 30.",
+  ],
+  version_history: [
+    { at: "2026-09-20T05:00:00Z", version: 2, changed_keys: ["minimum_score"], risk_increased: [] },
+  ],
+  recent_signals: [
+    {
+      id: "sig-detail-1",
+      session_date: "2026-09-22",
+      instrument_token: "NSE:RELIANCE",
+      side: "LONG",
+      status: "PAPER_RECORDED",
+      score: 92,
+      entry_price: "2850.0000",
+      stop_price: "2835.0000",
+      target_price: "2880.0000",
+      created_at: "2026-09-22T04:30:00Z",
+    },
+  ],
+};
 
 const MOCK_STRATEGY_METRICS = [{
   strategy_id: "orb-default",
@@ -439,6 +540,9 @@ export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" =
     }
   });
 
+  await page.route("**/api/v1/settings/strategies/*/detail", async (route: Route) => {
+    await route.fulfill({ json: MOCK_STRATEGY_DETAIL });
+  });
   await page.route("**/api/v1/settings/strategies/metrics", async (route: Route) => {
     await route.fulfill({ json: MOCK_STRATEGY_METRICS });
   });
@@ -1145,5 +1249,58 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText("LIVE_TRADING_ENABLED")).toBeVisible();
     await expect(page.getByRole("button", { name: "Enable live trading" })).toBeDisabled();
     await expect(page.getByRole("button", { name: "Emergency stop", exact: true })).toBeVisible();
+  });
+  test("10. Strategy detail: says what it is for and how the trade is left", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await go(page, "Strategies");
+    await page.getByRole("button", { name: "Details" }).first().click();
+
+    await expect(page.getByRole("heading", { name: "ORB Retest — Default" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Exit plan" })).toBeVisible();
+    await expect(page.getByText(/Nothing closes it because the session is ending/)).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Required inputs" })).toBeVisible();
+  });
+
+  test("10b. Strategy detail: never calls a strategy profitable, and names what is missing", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await go(page, "Strategies");
+    await page.getByRole("button", { name: "Details" }).first().click();
+
+    // The verdict is the part of this screen that could do harm. It reports
+    // what the evidence supports and what is absent, and the word "profitable"
+    // appears nowhere.
+    await expect(page.getByText("Losing money", { exact: true })).toBeVisible();
+    await expect(page.getByText(/Backtest needs 18 more resolved trades/)).toBeVisible();
+    await expect(page.getByText(/in-sample/).first()).toBeVisible();
+    await expect(page.getByText(/profitable/i)).toHaveCount(0);
+  });
+
+  test("10c. Strategy detail: both bodies of evidence are shown, net of charges", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await go(page, "Strategies");
+    await page.getByRole("button", { name: "Details" }).first().click();
+
+    const backtest = page.locator(".glass-inset").filter({ hasText: "Backtest" }).first();
+    await expect(backtest).toContainText("−₹320.00");
+    await expect(backtest).toContainText("less ₹220.00 charges");
+    const forward = page.locator(".glass-inset").filter({ hasText: "Paper forward" }).first();
+    await expect(forward).toContainText("−₹180.00");
+  });
+
+  test("10d. Strategies: the exit rules are editable, and the missing square-off is flagged", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await go(page, "Strategies");
+
+    // No trading or strategy setting should need a Python file or a .env edit.
+    await expect(page.getByLabel("Trailing")).toBeVisible();
+    await expect(page.getByLabel(/Square off at/)).toBeVisible();
+    await expect(page.getByText(/Nothing closes this strategy.s positions when the session ends/)).toBeVisible();
+
+    await page.getByLabel("Trailing").selectOption("BREAKEVEN_AT_R");
+    await expect(page.getByLabel("Move at (R ahead)")).toBeVisible();
   });
 });

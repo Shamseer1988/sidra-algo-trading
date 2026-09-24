@@ -1,4 +1,6 @@
 from datetime import datetime
+from decimal import Decimal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -6,6 +8,7 @@ from sqlalchemy import select
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import ApplicationSetting, AuditLog, ScannerEvaluation, User, UserRole
+from app.services import strategy_detail
 from app.services.indicator_settings import (
     INDICATOR_KEY,
     IndicatorSettings,
@@ -19,7 +22,13 @@ from app.services.settings_catalog import (
     INDICATOR_SPECS,
     TRADING_CONTROL_SPECS,
 )
-from app.services.settings_history import last_changed_per_key, record_revision, revision_history, summarise
+from app.services.settings_history import (
+    last_changed_per_key,
+    record_revision,
+    revision_history,
+    summarise,
+    summarise_strategies,
+)
 from app.services.strategy_registry import (
     DEFAULT_STRATEGIES,
     STRATEGIES_KEY,
@@ -530,12 +539,25 @@ async def update_strategies(
         version = old.version + 1 if old and new_payload != old_payload else old.version if old else 1
         normalized.append(item.model_copy(update={"version": version}))
     value = [item.model_dump() for item in normalized]
+    # Versioned the same way the trading controls are. Without this the only
+    # record of a strategy change was the version counter going up, which says
+    # that something moved and never what.
+    summary = summarise_strategies([item.model_dump() for item in previous.values()], value)
     if setting is None:
         session.add(ApplicationSetting(key=STRATEGIES_KEY, value=value, updated_by_user_id=user.id))
     else:
         setting.value, setting.updated_by_user_id = value, user.id
+    await record_revision(session, STRATEGIES_KEY, value, summary, changed_by_user_id=user.id)
     session.add(
-        AuditLog(user_id=user.id, event_type="settings.strategies_updated", metadata_json={"count": len(strategies)})
+        AuditLog(
+            user_id=user.id,
+            event_type="settings.strategies_updated",
+            metadata_json={
+                "count": len(strategies),
+                "changed_keys": summary.changed_keys,
+                "risk_increased": summary.risk_increased,
+            },
+        )
     )
     await session.commit()
     return normalized
@@ -569,3 +591,164 @@ async def strategy_metrics(_: CurrentUser, session: DbSession) -> list[StrategyM
         )
         for (strategy_id, strategy_name, strategy_version), values in metrics.items()
     ]
+
+
+# --- one strategy, in full ------------------------------------------------
+
+
+class EvidenceResponse(BaseModel):
+    source: str
+    trades: int
+    wins: int
+    losses: int
+    win_rate_percent: Decimal | None
+    net_pnl: Decimal
+    gross_pnl: Decimal
+    charges: Decimal
+    average_r: Decimal | None
+    from_date: str | None
+    to_date: str | None
+    out_of_sample: bool
+    sufficient: bool
+    shortfall: int
+
+
+class VersionChangeResponse(BaseModel):
+    at: str
+    version: int
+    changed_keys: list[str]
+    risk_increased: list[str]
+
+
+class RecentSignalResponse(BaseModel):
+    id: UUID
+    session_date: str
+    instrument_token: str
+    side: str
+    status: str
+    score: int
+    entry_price: Decimal
+    stop_price: Decimal
+    target_price: Decimal
+    created_at: str
+
+
+class StrategyDetailResponse(BaseModel):
+    configuration: StrategyConfiguration
+    strategy_name: str
+    prerequisites: list[str]
+    purpose: str
+    regime: str
+    entry: str
+    does_not: str
+    required_inputs: list[str]
+    exit_plan: list[str]
+    limits: dict
+    signals_last_30_days: int
+    last_signal_on: str | None
+    backtest: EvidenceResponse
+    forward: EvidenceResponse
+    verdict: str
+    verdict_label: str
+    verdict_headline: str
+    verdict_caveats: list[str]
+    version_history: list[VersionChangeResponse]
+    recent_signals: list[RecentSignalResponse]
+
+
+def _evidence(value: strategy_detail.Evidence) -> EvidenceResponse:
+    return EvidenceResponse(
+        source=value.source,
+        trades=value.trades,
+        wins=value.wins,
+        losses=value.losses,
+        win_rate_percent=value.win_rate_percent,
+        net_pnl=value.net_pnl,
+        gross_pnl=value.gross_pnl,
+        charges=value.charges,
+        average_r=value.average_r,
+        from_date=value.from_date.isoformat() if value.from_date else None,
+        to_date=value.to_date.isoformat() if value.to_date else None,
+        out_of_sample=value.out_of_sample,
+        sufficient=value.sufficient,
+        shortfall=value.shortfall,
+    )
+
+
+@router.get("/strategies/{strategy_id}/detail", response_model=StrategyDetailResponse)
+async def strategy_detail_page(strategy_id: str, _: CurrentUser, session: DbSession) -> StrategyDetailResponse:
+    """One strategy: what it is for, how it trades, what it changed, and whether it works.
+
+    The last part is the one that has to stay honest. It reports what the
+    evidence supports and names what is missing, and its strongest available
+    verdict is "promising, not proven" — there is no code path here that calls
+    a strategy profitable.
+    """
+    setting = await session.get(ApplicationSetting, STRATEGIES_KEY)
+    stored = [StrategyConfiguration.model_validate(item) for item in (setting.value if setting else DEFAULT_STRATEGIES)]
+    configuration = next((item for item in stored if item.id == strategy_id), None)
+    if configuration is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such strategy.")
+
+    metadata = next(
+        (item for item in StrategyRegistry.metadata() if item.identifier == configuration.strategy_type), None
+    )
+    controls_row = await session.get(ApplicationSetting, TRADING_KEY)
+    controls = TradingControls.model_validate(controls_row.value if controls_row else DEFAULT_TRADING_CONTROLS)
+    profile = strategy_detail.profile_for(configuration.strategy_type)
+    version_tag = f"{configuration.strategy_type}@{configuration.version}"
+
+    backtest = await strategy_detail.backtest_evidence(session, configuration.strategy_type)
+    forward = await strategy_detail.forward_evidence(session, version_tag)
+    assessment = strategy_detail.assess(backtest, forward)
+    signals_30, last_signal = await strategy_detail.signal_activity(session, version_tag)
+
+    return StrategyDetailResponse(
+        configuration=configuration,
+        strategy_name=metadata.name if metadata else configuration.strategy_type,
+        prerequisites=list(metadata.prerequisites) if metadata else [],
+        purpose=profile.purpose,
+        regime=profile.regime,
+        entry=profile.entry,
+        does_not=profile.does_not,
+        required_inputs=configuration.effective_required_inputs(),
+        exit_plan=strategy_detail.describe_exit(
+            configuration.exit_rules,
+            minimum_rr=configuration.minimum_rr,
+            account_atr=controls.stop_atr_multiple,
+            account_percent=controls.min_stop_distance_percent,
+        ),
+        limits=strategy_detail.configured_limits(configuration),
+        signals_last_30_days=signals_30,
+        last_signal_on=last_signal.isoformat() if last_signal else None,
+        backtest=_evidence(backtest),
+        forward=_evidence(forward),
+        verdict=assessment.verdict,
+        verdict_label=strategy_detail.VERDICT_LABELS[assessment.verdict],
+        verdict_headline=assessment.headline,
+        verdict_caveats=assessment.caveats,
+        version_history=[
+            VersionChangeResponse(
+                at=change.at.isoformat(),
+                version=change.version,
+                changed_keys=change.changed_keys,
+                risk_increased=change.risk_increased,
+            )
+            for change in await strategy_detail.version_history(session, STRATEGIES_KEY, strategy_id)
+        ],
+        recent_signals=[
+            RecentSignalResponse(
+                id=row.id,
+                session_date=row.session_date.isoformat(),
+                instrument_token=row.instrument_token,
+                side=row.side,
+                status=row.status,
+                score=row.score,
+                entry_price=row.entry_price,
+                stop_price=row.stop_price,
+                target_price=row.target_price,
+                created_at=row.created_at.isoformat(),
+            )
+            for row in await strategy_detail.recent_signals(session, version_tag)
+        ],
+    )
