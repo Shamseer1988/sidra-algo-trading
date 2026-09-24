@@ -1,10 +1,18 @@
-from fastapi import APIRouter, Depends
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession, require_roles
 from app.db.models import ApplicationSetting, AuditLog, ScannerEvaluation, User, UserRole
 from app.services.risk_profile import RISK_PRESETS, effective_limits
+from app.services.settings_catalog import (
+    GROUP_LABELS,
+    GROUP_ORDER,
+    TRADING_CONTROL_SPECS,
+)
+from app.services.settings_history import last_changed_per_key, record_revision, revision_history, summarise
 from app.services.strategy_registry import (
     DEFAULT_STRATEGIES,
     STRATEGIES_KEY,
@@ -220,38 +228,26 @@ async def trading_presets(_: CurrentUser) -> list[RiskPresetResponse]:
     ]
 
 
-def _risk_increases(before: dict, after: dict) -> list[str]:
-    """Which controls were loosened, for the confirmation and the audit record.
-
-    Only one direction is reported. Tightening a limit needs no ceremony;
-    raising one is the change somebody may want to explain later.
-    """
-    loosened = []
-    for key in (
-        "risk_per_trade_percent",
-        "maximum_daily_risk_percent",
-        "maximum_daily_trades",
-        "maximum_open_positions",
-        "maximum_open_exposure_percent",
-        "daily_loss_limit",
-        "intraday_leverage_multiplier",
-    ):
-        old_value, new_value = before.get(key), after.get(key)
-        if isinstance(old_value, int | float) and isinstance(new_value, int | float) and new_value > old_value:
-            loosened.append(f"{key}: {old_value} -> {new_value}")
-    return loosened
-
-
 @router.put("/trading", response_model=TradingControls)
 async def update_trading_controls(
     controls: TradingControls,
     session: DbSession,
     user: User = Depends(require_roles(UserRole.ADMIN)),
 ) -> TradingControls:
+    return await _persist_controls(session, controls, user)
+
+
+async def _persist_controls(session: DbSession, controls: TradingControls, user: User) -> TradingControls:
+    """Save, version and audit one settings change. The one write path.
+
+    Applying a preset goes through here too, so a preset is validated, recorded
+    and audited exactly as a hand edit is. A second path that skipped any of
+    that would be a way to change risk limits without leaving a trace.
+    """
     setting = await session.get(ApplicationSetting, TRADING_KEY)
     previous = dict(setting.value) if setting else dict(DEFAULT_TRADING_CONTROLS)
     payload = controls.model_dump()
-    loosened = _risk_increases(previous, payload)
+    summary = summarise(previous, payload)
 
     if setting is None:
         setting = ApplicationSetting(key=TRADING_KEY, value=payload, updated_by_user_id=user.id)
@@ -259,22 +255,136 @@ async def update_trading_controls(
     else:
         setting.value = payload
         setting.updated_by_user_id = user.id
+
+    await record_revision(session, TRADING_KEY, payload, summary, changed_by_user_id=user.id)
     session.add(
         AuditLog(
             user_id=user.id,
             event_type="settings.trading_updated",
             metadata_json={
-                "keys": sorted(payload),
+                "changed_keys": summary.changed_keys,
                 # Recorded whether or not the UI asked for confirmation: the
                 # audit record is what somebody reads afterwards, and it should
                 # not depend on a client having behaved.
-                "risk_increased": loosened,
+                "risk_increased": summary.risk_increased,
                 "effective": effective_limits(controls).snapshot(),
             },
         )
     )
     await session.commit()
     return controls
+
+
+class SettingSpecResponse(BaseModel):
+    """One control, described well enough for a form to be generated from it."""
+
+    key: str
+    group: str
+    group_label: str
+    label: str
+    help: str
+    unit: str
+    kind: str
+    choices: list[str]
+    is_ceiling: bool
+    effect: str
+    effect_label: str
+    value: object
+    minimum: float | None
+    maximum: float | None
+    exclusive_minimum: float | None
+    exclusive_maximum: float | None
+    last_changed_at: str | None
+
+
+class SettingsCatalogResponse(BaseModel):
+    group_order: list[str]
+    group_labels: dict[str, str]
+    settings: list[SettingSpecResponse]
+    effective: EffectiveLimitsResponse
+
+
+@router.get("/trading/catalog", response_model=SettingsCatalogResponse)
+async def trading_catalog(_: CurrentUser, session: DbSession) -> SettingsCatalogResponse:
+    """Everything a settings form needs, so none of it is hard-coded in the UI.
+
+    Bounds come from the schema rather than from the catalogue, so a form can
+    never offer a range the server will then refuse.
+    """
+    controls = await _get_controls(session)
+    values = controls.model_dump()
+    stamps = await last_changed_per_key(session, TRADING_KEY)
+    return SettingsCatalogResponse(
+        group_order=list(GROUP_ORDER),
+        group_labels=dict(GROUP_LABELS),
+        settings=[
+            SettingSpecResponse(
+                **spec.describe(TradingControls.model_fields, values.get(spec.key), stamps.get(spec.key))
+            )
+            for spec in TRADING_CONTROL_SPECS
+        ],
+        effective=EffectiveLimitsResponse(**effective_limits(controls).snapshot()),
+    )
+
+
+class SettingRevisionResponse(BaseModel):
+    created_at: datetime
+    changed_keys: list[str]
+    risk_increased: list[str]
+    changed_by_user_id: str | None
+
+
+@router.get("/trading/history", response_model=list[SettingRevisionResponse])
+async def trading_history(_: CurrentUser, session: DbSession) -> list[SettingRevisionResponse]:
+    return [
+        SettingRevisionResponse(
+            created_at=revision.created_at,
+            changed_keys=list(revision.changed_keys or []),
+            risk_increased=list(revision.risk_increased or []),
+            changed_by_user_id=str(revision.changed_by_user_id) if revision.changed_by_user_id else None,
+        )
+        for revision in await revision_history(session, TRADING_KEY)
+    ]
+
+
+class ApplyPresetRequest(BaseModel):
+    preset: str
+    # The operator's acknowledgement, required when the preset loosens a limit.
+    # Checked server-side because a confirmation a client can skip is not one.
+    confirm_risk_increase: bool = False
+
+
+@router.post("/trading/presets/{preset}", response_model=TradingControls)
+async def apply_preset(
+    preset: str,
+    request: ApplyPresetRequest,
+    session: DbSession,
+    user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> TradingControls:
+    """Apply a named risk profile, through the same path as any other edit.
+
+    A preset that loosens a limit needs the same acknowledgement a hand edit
+    does. Enforced here rather than in the UI: a confirmation that lives only in
+    a client is a confirmation that can be skipped by calling the API.
+    """
+    if preset not in RISK_PRESETS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unknown preset {preset!r}; expected one of {sorted(RISK_PRESETS)}",
+        )
+    current = await _get_controls(session)
+    candidate = TradingControls.model_validate({**current.model_dump(), **RISK_PRESETS[preset]["controls"]})
+    summary = summarise(current.model_dump(), candidate.model_dump())
+    if summary.risk_increased and not request.confirm_risk_increase:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This preset raises a risk limit: "
+                + "; ".join(summary.risk_increased)
+                + ". Re-send with confirm_risk_increase to apply it."
+            ),
+        )
+    return await _persist_controls(session, candidate, user)
 
 
 class StrategyDefinitionResponse(BaseModel):

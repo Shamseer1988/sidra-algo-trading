@@ -95,6 +95,40 @@ class ApplicationSetting(TimestampMixin, Base):
     updated_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
 
+class SettingRevision(Base):
+    """Every saved version of a settings row, and which keys the save changed.
+
+    Two things need this and neither is served by ``application_settings``
+    alone, which holds only the current value and a row-level ``updated_at``.
+
+    An operator asking "when did I last change the daily loss stop" is asking
+    about one key, not about the row. ``changed_keys`` is what answers it.
+
+    And a trade has to be explicable by the settings that produced it. The full
+    ``value`` snapshot is kept rather than a diff, because reconstructing a
+    historical configuration by replaying diffs is the kind of thing that works
+    until the one time it matters.
+
+    Append-only by intent: nothing updates or deletes a revision. A settings
+    history that can be edited is not a history.
+    """
+
+    __tablename__ = "setting_revisions"
+    __table_args__ = (Index("ix_setting_revisions_key_created", "key", "created_at"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    key: Mapped[str] = mapped_column(String(120), index=True)
+    value: Mapped[dict] = mapped_column(JSON, default=dict)
+    # The keys whose values differ from the previous revision. Empty on the
+    # first one, where everything is new and nothing has changed.
+    changed_keys: Mapped[list] = mapped_column(JSON, default=list)
+    # Loosened limits, named. Tightening needs no explanation later; raising a
+    # ceiling is the change somebody may have to account for.
+    risk_increased: Mapped[list] = mapped_column(JSON, default=list)
+    changed_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 class BrokerCredential(TimestampMixin, Base):
     """Encrypted server-side connector credential; never serialized by an API route."""
 
