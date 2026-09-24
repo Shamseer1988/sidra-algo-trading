@@ -190,7 +190,7 @@ async def test_signal_and_alert_deduplication_idempotency():
         "account_capital": 100000.0,
         "risk_per_trade_percent": 0.5,
         "maximum_daily_risk_percent": 1.0,
-        "maximum_signals": 2,
+        "maximum_daily_trades": 2,
         "minimum_score": 80,
         "minimum_rr": 1.5,
         "volume_multiplier": 1.2,

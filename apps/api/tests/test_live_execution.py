@@ -61,6 +61,11 @@ class FakeClient:
     async def funds_and_margin(self, _segment: str = "SEC") -> dict:
         return {"equity": {"available_margin": 500000.0}}
 
+    async def positions(self) -> list[dict]:
+        """A flat account. The daily-limit gate reads this to work out the
+        day's P&L, and an empty book is a day that has neither made nor lost."""
+        return []
+
     async def place_order(self, **kwargs: object) -> object:
         self.placements.append(dict(kwargs))
         if self._place_raises:

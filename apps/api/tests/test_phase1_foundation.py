@@ -151,9 +151,9 @@ async def test_signal_block_reason_handles_zero_cooldown_per_side_and_daily_ceil
     """P0 regression: a zero cooldown must not raise, and per-side / ceiling caps must apply."""
     from types import SimpleNamespace
 
-    from sqlalchemy import delete
+    from sqlalchemy import delete, select
 
-    from app.db.models import PaperSignal, ScannerEvaluation
+    from app.db.models import PaperOrder, PaperSignal, ScannerEvaluation
     from app.db.session import SessionLocal, engine
     from app.services.strategy_registry import StrategyConfiguration
 
@@ -166,7 +166,7 @@ async def test_signal_block_reason_handles_zero_cooldown_per_side_and_daily_ceil
         max_trades_per_side=1,
         cooldown_minutes=0,
     )
-    controls = {"maximum_signals": 2}
+    controls = {"maximum_daily_trades": 2}
     orchestrator = PaperScannerOrchestrator(settings(), MemoryRedis())  # type: ignore[arg-type]
 
     def _candle(minute: int) -> CompletedCandle:
@@ -220,9 +220,11 @@ async def test_signal_block_reason_handles_zero_cooldown_per_side_and_daily_ceil
         )
         assert await orchestrator._signal_block_reason(_candle(1), strategy, short_decision, controls) is None
 
-        # Two live paper signals recorded: the account-wide daily ceiling blocks every side.
+        # Signals alone do not spend the day's budget. This used to be the
+        # whole test, and it was measuring the wrong thing: a signal whose
+        # entry never filled is not a trade the account took.
         async with SessionLocal() as session:
-            for index in range(2):
+            for index in range(4):
                 session.add(
                     PaperSignal(
                         signal_key=f"p0-block-signal-{index}",
@@ -240,12 +242,50 @@ async def test_signal_block_reason_handles_zero_cooldown_per_side_and_daily_ceil
                     )
                 )
             await session.commit()
-        assert (
-            await orchestrator._signal_block_reason(_candle(2), strategy, short_decision, controls)
-            == "Daily paper-signal ceiling reached"
-        )
+        assert await orchestrator._signal_block_reason(_candle(2), strategy, short_decision, controls) is None
+
+        # Two ENTRY orders with fills: now the account-wide ceiling blocks every side.
+        async with SessionLocal() as session:
+            # One ENTRY per signal: the schema enforces it, which conveniently
+            # makes "distinct filled entries" the same count as "signals that
+            # actually traded".
+            signals = list(
+                (
+                    await session.scalars(
+                        select(PaperSignal)
+                        .where(PaperSignal.session_date == session_date)
+                        .order_by(PaperSignal.signal_key)
+                        .limit(2)
+                    )
+                ).all()
+            )
+            for index, source in enumerate(signals):
+                session.add(
+                    PaperOrder(
+                        paper_signal_id=source.id,
+                        client_order_id=f"p0-block-entry-{index}",
+                        instrument_token="NSE_EQ|BLOCK",
+                        session_date=session_date,
+                        strategy_version="orb-retest-v1@1",
+                        side="BUY",
+                        order_type="MARKET",
+                        order_role="ENTRY",
+                        quantity=1,
+                        filled_quantity=1,
+                        status="FILLED",
+                        eligible_after=datetime(2031, 3, 4, 4, index, tzinfo=UTC),
+                    )
+                )
+            await session.commit()
+        reason = await orchestrator._signal_block_reason(_candle(2), strategy, short_decision, controls)
+        assert reason is not None
+        assert reason.startswith("Daily trade ceiling reached")
+        # The numbers are in the reason so an operator is not sent to the
+        # database to find out which trades used the budget.
+        assert "2 of 2 used" in reason
     finally:
         async with SessionLocal() as session:
+            await session.execute(delete(PaperOrder).where(PaperOrder.session_date == session_date))
             await session.execute(delete(PaperSignal).where(PaperSignal.session_date == session_date))
             await session.execute(delete(ScannerEvaluation).where(ScannerEvaluation.session_date == session_date))
             await session.commit()

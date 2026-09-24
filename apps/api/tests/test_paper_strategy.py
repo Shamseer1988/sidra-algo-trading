@@ -9,7 +9,7 @@ CONTROLS = {
     "account_capital": 100_000.0,
     "risk_per_trade_percent": 0.5,
     "maximum_daily_risk_percent": 1.0,
-    "maximum_signals": 2,
+    "maximum_daily_trades": 2,
     "minimum_score": 80,
     "minimum_rr": 1.5,
     "volume_multiplier": 1.3,

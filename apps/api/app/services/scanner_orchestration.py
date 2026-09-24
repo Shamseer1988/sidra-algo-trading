@@ -21,6 +21,7 @@ from app.services.safety import emergency_stop_state, paper_tracking_enabled
 from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 from app.services.telegram import TelegramError, TelegramNotificationService
 from app.services.telegram_config import configured_settings
+from app.services.trade_counter import count_filled_entries
 from app.services.trading_symbols import resolve_symbol
 
 STATE_TTL_SECONDS = 60 * 60 * 18
@@ -111,21 +112,22 @@ class PaperScannerOrchestrator:
         decision,
         controls: dict,
     ) -> str | None:
-        """Paper-only quota limits that block a *new signal* while still recording the evaluation.
+        """Quota limits that block a *new signal* while still recording the evaluation.
 
         Ordering: an account-wide daily ceiling, then the per-strategy daily cap, then the
         optional per-strategy per-side cap, then the per-strategy cooldown.
         """
         latest = None
         async with SessionLocal() as session:
-            daily_signals = await session.scalar(
-                select(func.count(PaperSignal.id)).where(
-                    PaperSignal.session_date == candle.session_date,
-                    PaperSignal.status.notin_(["PAPER_RISK_REJECTED"]),
-                )
-            )
-            if int(daily_signals or 0) >= int(controls["maximum_signals"]):
-                return "Daily paper-signal ceiling reached"
+            # Counted from fills, not signals. A signal whose entry order never
+            # filled did not use up one of the day's trades, and the previous
+            # counter spent the budget on it anyway. The reason string carries
+            # the numbers because "ceiling reached" without them sends an
+            # operator to the database to find out which trades those were.
+            ceiling = int(controls["maximum_daily_trades"])
+            taken = await count_filled_entries(session, candle.session_date)
+            if taken.total >= ceiling:
+                return f"Daily trade ceiling reached: {taken.explain(ceiling)}"
             accepted = await session.scalar(
                 select(func.count(ScannerEvaluation.id)).where(
                     ScannerEvaluation.session_date == candle.session_date,

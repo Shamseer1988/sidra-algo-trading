@@ -116,7 +116,7 @@ export function AppShell() {
       setControls({ ...controls, intraday_leverage_enabled: value === "true" });
       return;
     }
-    const numeric = ["account_capital", "risk_per_trade_percent", "maximum_daily_risk_percent", "maximum_open_positions", "maximum_open_exposure_percent", "maximum_signals", "minimum_score", "minimum_rr", "volume_multiplier", "retest_tolerance_percent", "minimum_ema_spread_percent", "stop_atr_multiple", "min_stop_distance_percent", "intraday_leverage_multiplier"].includes(key);
+    const numeric = ["account_capital", "risk_per_trade_percent", "maximum_daily_risk_percent", "maximum_open_positions", "maximum_open_exposure_percent", "maximum_daily_trades", "minimum_score", "minimum_rr", "volume_multiplier", "retest_tolerance_percent", "minimum_ema_spread_percent", "stop_atr_multiple", "min_stop_distance_percent", "intraday_leverage_multiplier"].includes(key);
     setControls({ ...controls, [key]: numeric ? Number(value) : value });
   }
   async function signOut() { await api.logout(); router.replace("/login"); router.refresh(); }

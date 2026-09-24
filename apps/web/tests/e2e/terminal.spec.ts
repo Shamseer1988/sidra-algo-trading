@@ -130,7 +130,7 @@ const MOCK_CONTROLS = {
   maximum_daily_risk_percent: 1.0,
   maximum_open_positions: 3,
   maximum_open_exposure_percent: 100,
-  maximum_signals: 2,
+  maximum_daily_trades: 2,
   minimum_score: 90,
   minimum_rr: 1.5,
   volume_multiplier: 1.3,

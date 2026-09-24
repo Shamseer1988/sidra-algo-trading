@@ -44,7 +44,7 @@
 #     winning trades in one session, which needs minimum_score back at 60 for the
 #     volume and a near-perfect day besides: eight trades all winning is 1,602.
 #
-#   maximum_signals 3, maximum_daily_risk_percent 5.5
+#   maximum_daily_trades 4, maximum_daily_risk_percent 10.0
 #     Two to three trades a day, capped twice over so neither cap alone has to
 #     hold. The signal cap stops the scanner producing a fourth; the risk budget
 #     of 550 rupees is three trades at 180 and stops the risk engine reserving
@@ -110,13 +110,13 @@ echo "=== PROPOSED (10,000 rupee account, 5x, +2000 / -1000 daily) ==="
 cat <<'PROFILE' | tee /tmp/trading-controls-proposed.json
 {
   "account_capital": 10000.0,
-  "risk_per_trade_percent": 1.8,
-  "maximum_daily_risk_percent": 5.5,
+  "risk_per_trade_percent": 2.5,
+  "maximum_daily_risk_percent": 10.0,
   "daily_loss_limit": 1000.0,
   "daily_profit_target": 2000.0,
   "maximum_open_positions": 1,
   "maximum_open_exposure_percent": 100.0,
-  "maximum_signals": 3,
+  "maximum_daily_trades": 4,
   "minimum_score": 71,
   "minimum_rr": 1.5,
   "volume_multiplier": 1.3,

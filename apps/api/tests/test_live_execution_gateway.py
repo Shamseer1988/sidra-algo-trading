@@ -32,7 +32,7 @@ CONTROLS = {
     "account_capital": 10000,
     "risk_per_trade_percent": 1,
     "maximum_daily_risk_percent": 3,
-    "maximum_signals": 4,
+    "maximum_daily_trades": 4,
     "minimum_score": 80,
     "minimum_rr": 1.5,
     "volume_multiplier": 1.3,
