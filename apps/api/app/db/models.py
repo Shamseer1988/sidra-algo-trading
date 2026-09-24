@@ -914,3 +914,42 @@ class LiveOrderApproval(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class BrokerDaySnapshot(Base):
+    """What the broker said about one session, kept beside our figures, never over them.
+
+    The broker's numbers are the authoritative money and they arrive late. The
+    obvious thing to do when they arrive is to correct the local rows with them,
+    and that is the one thing this table exists to prevent: overwriting would
+    destroy the record of what this system believed at the time, which is both
+    what an audit needs and what a reconciliation has to compare against.
+
+    Nothing here is ever read back into ``paper_fills``, ``paper_positions`` or
+    ``paper_orders``. The History screen shows both sides and says whether they
+    agree.
+
+    Append-only, with no unique key on (session_date, broker). A day is commonly
+    fetched more than once because the broker's own figures settle over hours,
+    and a table that replaced a row would lose the fact that they moved.
+
+    Every money column is nullable. A broker endpoint that reports charges but
+    not turnover is ordinary, and storing zero there would read as "the broker
+    said zero" — which is a different and much worse claim than "not reported".
+    """
+
+    __tablename__ = "broker_day_snapshots"
+    __table_args__ = (Index("ix_broker_day_snapshots_date_broker_fetched", "session_date", "broker", "fetched_at"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    session_date: Mapped[date] = mapped_column(Date, index=True)
+    broker: Mapped[str] = mapped_column(String(20), index=True)
+    # Which endpoint produced it, because the brokers disagree about what each
+    # figure means and the answer to "realized of what?" depends on the source.
+    source: Mapped[str] = mapped_column(String(60))
+    realized_pnl: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    charges: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    turnover: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    trade_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

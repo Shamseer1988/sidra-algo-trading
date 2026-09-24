@@ -14,6 +14,7 @@ from app.api.routes import (
     broker,
     events,
     health,
+    history,
     journal,
     live,
     live_shadow,
@@ -144,6 +145,7 @@ app.include_router(telegram.router, prefix="/api/v1")
 app.include_router(events.router, prefix="/api/v1")
 app.include_router(market_data.router, prefix="/api/v1")
 app.include_router(journal.router, prefix="/api/v1")
+app.include_router(history.router, prefix="/api/v1")
 app.include_router(paper.router, prefix="/api/v1")
 app.include_router(risk.router, prefix="/api/v1")
 app.include_router(backtesting.router, prefix="/api/v1")
