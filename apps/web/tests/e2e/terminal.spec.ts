@@ -503,6 +503,19 @@ export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" =
     await route.fulfill({ json: MOCK_AUDIT });
   });
 
+  await page.route("**/api/v1/history/overview*", async (route: Route) => {
+    await route.fulfill({ json: MOCK_HISTORY_OVERVIEW });
+  });
+  await page.route("**/api/v1/history/daily*", async (route: Route) => {
+    await route.fulfill({ json: MOCK_HISTORY_DAYS });
+  });
+  await page.route("**/api/v1/history/trades/*", async (route: Route) => {
+    await route.fulfill({ json: MOCK_HISTORY_TRADE_DETAIL });
+  });
+  await page.route("**/api/v1/history/trades*", async (route: Route) => {
+    await route.fulfill({ json: MOCK_HISTORY_TRADES });
+  });
+
   await page.route("**/api/v1/journal/export.csv*", async (route: Route) => {
     await route.fulfill({
       status: 200,
@@ -512,6 +525,193 @@ export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" =
     });
   });
 }
+
+
+const MOCK_HISTORY_OVERVIEW = {
+  from_date: "2026-08-25",
+  to_date: "2026-09-24",
+  trading_days: 2,
+  trades: 3,
+  open_trades: 0,
+  wins: 2,
+  losses: 1,
+  scratches: 0,
+  win_rate_percent: "66.67",
+  gross_pnl: "800.00",
+  charges: "115.00",
+  net_pnl: "685.00",
+  best_day: "460.00",
+  worst_day: "225.00",
+  largest_win: "460.00",
+  largest_loss: "-235.00",
+  average_win: "460.00",
+  average_loss: "-235.00",
+  profit_factor: "3.91",
+  expectancy: "228.33",
+  charges_as_percent_of_gross: "14.38",
+  halted_days: 1,
+  live_trades: 1,
+  reconciliation_counts: { ESTIMATED_CHARGES: 1, MISMATCH: 1 },
+  reconciliation_labels: {
+    MATCHED: "Matched",
+    ESTIMATED_CHARGES: "Estimated charges",
+    BROKER_DATA_PENDING: "Broker data pending",
+    MISMATCH: "Mismatch",
+  },
+};
+
+const MOCK_HISTORY_DAYS = [
+  {
+    session_date: "2026-09-24",
+    trades: 2,
+    open_trades: 0,
+    wins: 1,
+    losses: 1,
+    scratches: 0,
+    win_rate_percent: "50.00",
+    gross_pnl: "300.00",
+    charges: "75.00",
+    net_pnl: "225.00",
+    unrealized_pnl: "0.00",
+    best_trade: "460.00",
+    worst_trade: "-235.00",
+    live_trades: 1,
+    halt_reason: "PAPER: DAILY_PROFIT_TARGET at ₹2040",
+    reconciliation: "MISMATCH",
+    reconciliation_label: "Mismatch",
+    reconciliation_note: "UPSTOX reports ₹380 realised against our ₹300.",
+    broker: "UPSTOX",
+    broker_realized_pnl: "380.00",
+    broker_charges: "75.00",
+    broker_fetched_at: new Date().toISOString(),
+  },
+  {
+    session_date: "2026-09-23",
+    trades: 1,
+    open_trades: 0,
+    wins: 1,
+    losses: 0,
+    scratches: 0,
+    win_rate_percent: "100.00",
+    gross_pnl: "500.00",
+    charges: "40.00",
+    net_pnl: "460.00",
+    unrealized_pnl: "0.00",
+    best_trade: "460.00",
+    worst_trade: "460.00",
+    live_trades: 0,
+    halt_reason: null,
+    reconciliation: "ESTIMATED_CHARGES",
+    reconciliation_label: "Estimated charges",
+    reconciliation_note: "Paper session.",
+    broker: null,
+    broker_realized_pnl: null,
+    broker_charges: null,
+    broker_fetched_at: null,
+  },
+];
+
+const MOCK_HISTORY_TRADES = [
+  {
+    position_id: "pos-001",
+    signal_id: "sig-001",
+    session_date: "2026-09-24",
+    instrument_token: "NSE_EQ|INE002A01018",
+    script_name: "RELIANCE",
+    side: "LONG",
+    strategy_version: "orb-retest-v1@3",
+    status: "CLOSED",
+    execution_mode: "LIVE",
+    is_open: false,
+    quantity: 10,
+    open_quantity: 0,
+    entry_price: "100.0000",
+    exit_price: "150.0000",
+    stop_price: "98.0000",
+    target_price: "106.0000",
+    opened_at: "2026-09-24T04:05:00Z",
+    closed_at: "2026-09-24T06:00:00Z",
+    gross_pnl: "500.00",
+    charges: "40.00",
+    net_pnl: "460.00",
+    unrealized_pnl: "0.00",
+    risk_amount: "100.00",
+    r_multiple: "4.60",
+    reconciliation: "MISMATCH",
+    reconciliation_label: "Mismatch",
+    reconciliation_note: "UPSTOX reports ₹380 realised against our ₹500.",
+  },
+  {
+    position_id: "pos-002",
+    signal_id: "sig-002",
+    session_date: "2026-09-24",
+    instrument_token: "NSE_EQ|INE467B01029",
+    script_name: "TCS",
+    side: "LONG",
+    strategy_version: "vwap-pullback-v1@1",
+    status: "CLOSED",
+    execution_mode: "PAPER",
+    is_open: false,
+    quantity: 5,
+    open_quantity: 0,
+    entry_price: "200.0000",
+    exit_price: "160.0000",
+    stop_price: "196.0000",
+    target_price: "212.0000",
+    opened_at: "2026-09-24T05:05:00Z",
+    closed_at: "2026-09-24T07:00:00Z",
+    gross_pnl: "-200.00",
+    charges: "35.00",
+    net_pnl: "-235.00",
+    unrealized_pnl: "0.00",
+    risk_amount: "100.00",
+    r_multiple: "-2.35",
+    reconciliation: "ESTIMATED_CHARGES",
+    reconciliation_label: "Estimated charges",
+    reconciliation_note: "Simulated. Charges are this system's estimate from the published rate card.",
+  },
+];
+
+const MOCK_HISTORY_TRADE_DETAIL = {
+  trade: MOCK_HISTORY_TRADES[0],
+  orders: [
+    {
+      order_id: "ord-001",
+      client_order_id: "coid-001",
+      order_role: "ENTRY",
+      order_type: "LIMIT",
+      side: "BUY",
+      status: "FILLED",
+      quantity: 10,
+      filled_quantity: 10,
+      average_fill_price: "100.0000",
+      limit_price: "100.0000",
+      stop_price: null,
+      fee_total: "20.00",
+      rejection_reason: null,
+      created_at: "2026-09-24T04:05:00Z",
+    },
+  ],
+  fills: [
+    {
+      fill_id: "fill-001",
+      order_id: "ord-001",
+      side: "BUY",
+      quantity: 10,
+      price: "100.0000",
+      gross_value: "1000.00",
+      slippage_amount: "0.50",
+      brokerage: "15.00",
+      stt: "1.00",
+      exchange_charge: "0.50",
+      gst: "3.00",
+      sebi_charge: "0.10",
+      stamp_duty: "0.40",
+      total_fees: "20.00",
+      occurred_at: "2026-09-24T04:06:00Z",
+    },
+  ],
+};
 
 test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
   test("expired access token refreshes once and retries the protected request", async ({ page }) => {
@@ -811,5 +1011,65 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(exportBtn).toBeVisible();
     await expect(exportBtn).toHaveAttribute("href", "/api/v1/journal/export.csv");
     await expect(exportBtn).toHaveAttribute("download", "paper-journal.csv");
+  });
+  test("8. History: gross, charges and net stay three separate figures", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await page.click('button:has-text("History")');
+
+    await expect(page.getByRole("heading", { name: "History" })).toBeVisible();
+    // The three must never collapse into one "P&L". A screen that showed only
+    // ₹800 would be reporting money that cannot be withdrawn.
+    // Matched on the tile's own label, not on the text anywhere inside it: the
+    // Net tile carries the note "after charges" and would answer for Charges.
+    const tile = (label: string) => page.locator(".glass-inset").filter({ has: page.getByText(label, { exact: true }) });
+    await expect(tile("Net P&L")).toContainText("₹685.00");
+    await expect(tile("Gross P&L")).toContainText("₹800.00");
+    await expect(tile("Charges")).toContainText("₹115.00");
+  });
+
+  test("8b. History: a broker figure is shown beside ours, never instead of it", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await page.click('button:has-text("History")');
+
+    const day = page.locator("tr", { hasText: "2026-09-24" }).first();
+    await expect(day).toContainText("₹225.00");
+    await expect(day).toContainText("UPSTOX: +₹380.00 realised");
+    await expect(day.getByText("Mismatch")).toBeVisible();
+  });
+
+  test("8c. History: a paper day reads as estimated charges, not as a fault", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await page.click('button:has-text("History")');
+
+    const day = page.locator("tr", { hasText: "2026-09-23" }).first();
+    await expect(day.getByText("Estimated charges")).toBeVisible();
+  });
+
+  test("8d. History: opening a trade shows the itemised cost of every fill", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await page.click('button:has-text("History")');
+    await page.getByRole("button", { name: /^Trades \(/ }).click();
+
+    await page.locator("tr", { hasText: "RELIANCE" }).first().click();
+    await expect(page.getByRole("heading", { name: /RELIANCE LONG/ })).toBeVisible();
+    // One "charges" total cannot answer "which line is wrong"; these can.
+    await expect(page.getByRole("columnheader", { name: "Brokerage" })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "STT" })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Stamp duty" })).toBeVisible();
+  });
+
+  test("8e. History: both exports carry the chosen range", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await page.click('button:has-text("History")');
+
+    const csv = page.getByRole("link", { name: "CSV" });
+    const excel = page.getByRole("link", { name: "Excel" });
+    await expect(csv).toHaveAttribute("href", /\/api\/v1\/history\/export\.csv\?from_date=\d{4}-\d{2}-\d{2}&to_date=\d{4}-\d{2}-\d{2}/);
+    await expect(excel).toHaveAttribute("href", /\/api\/v1\/history\/export\.xlsx\?from_date=/);
   });
 });

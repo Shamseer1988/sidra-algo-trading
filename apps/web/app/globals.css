@@ -139,7 +139,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   .terminal-table td { @apply whitespace-nowrap border-b border-slate-800/70 px-5 py-4 text-slate-300; }
   .terminal-table tbody tr { @apply cursor-pointer transition-colors hover:bg-terminal-800; }
   .terminal-table td strong { color: var(--foreground); @apply block font-medium; }
-  .terminal-table td span:not(.status-pill) { color: var(--muted); @apply mt-1 block text-xs; }
+  /* A span in a cell is a sub-label under the cell's main value — except when
+     it is a badge. The exclusion list is why this rule can stay a blanket one:
+     without it, a badge inherits display:block from a selector too specific for
+     an inline-flex utility to override, and its icon and text land on separate
+     lines. */
+  .terminal-table td span:not(.status-pill):not(.badge-pill) { color: var(--muted); @apply mt-1 block text-xs; }
   .table-selected { background: color-mix(in srgb, var(--primary-soft) 76%, transparent); }
   .numeric { font-variant-numeric: tabular-nums; }
   .muted-cell { color: var(--muted) !important; @apply text-xs; }
@@ -208,6 +213,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 :root[data-theme="light"] .bg-amber-950\/20 { background-color: rgba(251, 191, 36, .12); }
 :root[data-theme="light"] .bg-sky-950\/10 { background-color: rgba(56, 189, 248, .10); }
 :root[data-theme="light"] .bg-slate-800 { background-color: var(--glass-muted); }
+/* The History screen's reconciliation pills. Four statuses that each mean a
+   different next action, so the tones have to survive the light theme intact —
+   especially the neutral one: "estimated charges" is the normal steady state of
+   a reconciled day, and a pill that read as a warning would train an operator
+   to ignore warnings. */
+:root[data-theme="light"] .bg-slate-800\/60 { background-color: var(--glass-muted); }
+:root[data-theme="light"] .bg-rose-950\/20 { background-color: rgba(244, 63, 94, .10); }
+:root[data-theme="light"] .bg-emerald-500\/10 { background-color: rgba(16, 185, 129, .12); }
 :root[data-theme="light"] .shadow-black\/20, :root[data-theme="light"] .shadow-black\/40, :root[data-theme="light"] .shadow-black\/60 { --tw-shadow-color: var(--shadow); }
 
 @supports not (backdrop-filter: blur(1px)) {

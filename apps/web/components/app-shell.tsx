@@ -10,6 +10,7 @@ import { TerminalSidebar } from "./layout/terminal-sidebar";
 import { UnavailableWorkspace } from "../features/common/unavailable-workspace";
 import { ControlPanel } from "../features/controls/control-panel";
 import { Dashboard } from "../features/dashboard/dashboard";
+import { HistoryWorkspace } from "../features/history/history-workspace";
 import { JournalPanel } from "../features/journal/journal-panel";
 import { MarketPanel } from "../features/market/market-panel";
 import { PaperExecutionPanel } from "../features/paper/paper-execution-panel";
@@ -132,6 +133,7 @@ export function AppShell() {
     case "risk": content = <RiskCenter safety={safety} telegram={telegram} canOperate={Boolean(canOperate)} isAdmin={Boolean(isAdmin)} onEmergency={() => void emergencyAction()} onClear={() => void emergencyAction(true)} onPaper={() => void paperAction()} onTelegram={() => void telegramAction()} />; break;
     case "backtesting": content = <BacktestingWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
     case "telegram": content = controlsPanel; break;
+    case "history": content = <HistoryWorkspace onMessage={setMessage} />; break;
     case "journal": content = <JournalPanel signals={signals} />; break;
     case "upstox": content = <UpstoxConsole isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
     case "firstock": content = <FirstockConsole isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;

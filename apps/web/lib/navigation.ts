@@ -6,6 +6,7 @@ import {
   BookOpenCheck,
   Bot,
   BriefcaseBusiness,
+  CalendarRange,
   CandlestickChart,
   ClipboardList,
   DatabaseZap,
@@ -39,6 +40,7 @@ export type WorkspaceId =
   | "performance"
   | "backtesting"
   | "journal"
+  | "history"
   | "upstox"
   | "firstock"
   | "automation"
@@ -76,6 +78,7 @@ export const navigationSections: NavigationSection[] = [
       { id: "risk", label: "Risk Center", icon: ShieldAlert, available: true },
       { id: "performance", label: "Performance", icon: AreaChart, available: false },
       { id: "backtesting", label: "Backtesting", icon: LineChart, available: true },
+      { id: "history", label: "History", icon: CalendarRange, available: true },
       { id: "journal", label: "Journal", icon: BookOpenCheck, available: true },
     ],
   },
@@ -121,6 +124,7 @@ export const workspaceMeta: Record<WorkspaceId, { eyebrow: string; title: string
   risk: { eyebrow: "Safety controls", title: "Risk center" },
   performance: { eyebrow: "Analytics workspace", title: "Performance" },
   backtesting: { eyebrow: "Research workspace", title: "Backtesting" },
+  history: { eyebrow: "Trading record", title: "History" },
   journal: { eyebrow: "Paper tracking", title: "Journal" },
   upstox: { eyebrow: "Paper market data", title: "Upstox" },
   firstock: { eyebrow: "Market data", title: "Firstock" },

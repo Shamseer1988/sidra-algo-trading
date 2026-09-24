@@ -81,6 +81,125 @@ export type IndicatorSettings = {
 // "ENVIRONMENT" means nobody has saved these through the UI yet, so the
 // deployment is still reading its .env. Worth showing rather than hiding.
 export type IndicatorCatalog = { settings: SettingSpec[]; source: "DATABASE" | "ENVIRONMENT" };
+export type ReconciliationStatus = "MATCHED" | "ESTIMATED_CHARGES" | "BROKER_DATA_PENDING" | "MISMATCH";
+// Every money field arrives as a string because the API sends Decimals: a
+// rupee figure that round-trips through a JavaScript number is a rupee figure
+// that can come back a paisa short.
+export type HistoryTrade = {
+  position_id: string;
+  signal_id: string;
+  session_date: string;
+  instrument_token: string;
+  script_name: string;
+  side: string;
+  strategy_version: string;
+  status: string;
+  execution_mode: "PAPER" | "LIVE";
+  is_open: boolean;
+  quantity: number;
+  open_quantity: number;
+  entry_price: string | null;
+  exit_price: string | null;
+  stop_price: string;
+  target_price: string;
+  opened_at: string | null;
+  closed_at: string | null;
+  gross_pnl: string;
+  charges: string;
+  net_pnl: string;
+  unrealized_pnl: string;
+  risk_amount: string;
+  r_multiple: string | null;
+  reconciliation: ReconciliationStatus;
+  reconciliation_label: string;
+  reconciliation_note: string;
+};
+export type HistoryDay = {
+  session_date: string;
+  trades: number;
+  open_trades: number;
+  wins: number;
+  losses: number;
+  scratches: number;
+  win_rate_percent: string | null;
+  gross_pnl: string;
+  charges: string;
+  net_pnl: string;
+  unrealized_pnl: string;
+  best_trade: string | null;
+  worst_trade: string | null;
+  live_trades: number;
+  halt_reason: string | null;
+  reconciliation: ReconciliationStatus;
+  reconciliation_label: string;
+  reconciliation_note: string;
+  broker: string | null;
+  broker_realized_pnl: string | null;
+  broker_charges: string | null;
+  broker_fetched_at: string | null;
+};
+export type HistoryOverview = {
+  from_date: string;
+  to_date: string;
+  trading_days: number;
+  trades: number;
+  open_trades: number;
+  wins: number;
+  losses: number;
+  scratches: number;
+  win_rate_percent: string | null;
+  gross_pnl: string;
+  charges: string;
+  net_pnl: string;
+  best_day: string | null;
+  worst_day: string | null;
+  largest_win: string | null;
+  largest_loss: string | null;
+  average_win: string | null;
+  average_loss: string | null;
+  profit_factor: string | null;
+  expectancy: string | null;
+  charges_as_percent_of_gross: string | null;
+  halted_days: number;
+  live_trades: number;
+  reconciliation_counts: Record<string, number>;
+  reconciliation_labels: Record<string, string>;
+};
+export type HistoryOrder = {
+  order_id: string;
+  client_order_id: string;
+  order_role: string;
+  order_type: string;
+  side: string;
+  status: string;
+  quantity: number;
+  filled_quantity: number;
+  average_fill_price: string | null;
+  limit_price: string | null;
+  stop_price: string | null;
+  fee_total: string;
+  rejection_reason: string | null;
+  created_at: string;
+};
+export type HistoryFill = {
+  fill_id: string;
+  order_id: string;
+  side: string;
+  quantity: number;
+  price: string;
+  gross_value: string;
+  slippage_amount: string;
+  brokerage: string;
+  stt: string;
+  exchange_charge: string;
+  gst: string;
+  sebi_charge: string;
+  stamp_duty: string;
+  total_fees: string;
+  occurred_at: string;
+};
+export type HistoryTradeDetail = { trade: HistoryTrade; orders: HistoryOrder[]; fills: HistoryFill[] };
+export type HistoryRange = { from_date?: string; to_date?: string };
 export type RiskPreset = { key: string; label: string; description: string; controls: Record<string, number>; effective: EffectiveLimits };
 export type SettingRevision = { created_at: string; changed_keys: string[]; risk_increased: string[]; changed_by_user_id: string | null };
 export type TradingControls = { account_capital: number; risk_per_trade_percent: number; maximum_daily_risk_percent: number; maximum_open_positions: number; maximum_open_exposure_percent: number; maximum_daily_trades: number; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number; stop_atr_multiple: number; min_stop_distance_percent: number; trade_start_time: string; trade_cutoff_time: string; intraday_leverage_enabled?: boolean; intraday_leverage_multiplier?: number; execution_approval_mode?: ExecutionApprovalMode; live_broker?: LiveBroker };
@@ -147,8 +266,23 @@ async function request<T>(path: string, init?: RequestInit, allowRefresh = true)
   return response.json() as Promise<T>;
 }
 
+/** Only the parameters that were actually given; an empty `to_date=` is not the same as omitting it. */
+function historyQuery(range: Record<string, string | undefined>): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(range)) if (value) params.set(key, value);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
 export const api = {
   me: () => request<User>("/auth/me"), login: (email: string, password: string) => request<{ email: string; role: string }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }), refresh: () => request<{ email: string; role: string }>("/auth/refresh", { method: "POST" }), logout: () => request<void>("/auth/logout", { method: "POST" }), sessions: () => request<UserSession[]>("/auth/sessions"), revokeSession: (id: string) => request<void>(`/auth/sessions/${id}`, { method: "DELETE" }), auditLogs: () => request<AuditLog[]>("/auth/audit-logs"), overview: () => request<Overview>("/system/overview"), marketSession: () => request<MarketSession>("/system/market-session"), scanner: () => request<ScannerStatus>("/scanner/status"), dataQuality: () => request<DataQuality[]>("/scanner/data-quality"), evaluations: (limit = 100) => request<ScannerEvaluation[]>(`/scanner/evaluations?limit=${limit}`), signals: () => request<PaperSignal[]>("/scanner/signals"), paperSummary: () => request<PaperExecutionSummary>("/paper/summary"), paperOrders: () => request<PaperOrder[]>("/paper/orders"), paperPositions: () => request<PaperPosition[]>("/paper/positions"), paperRiskSummary: () => request<PaperRiskSummary>("/risk/summary"), shadowOrders: () => request<ShadowOrder[]>("/shadow/orders"), shadowSummary: () => request<ShadowSummary>("/shadow/summary"), omsOrders: () => request<OmsOrder[]>("/oms/orders"), omsReconciliations: () => request<OmsReconciliation[]>("/oms/reconciliations"), runOmsReconciliation: () => request<OmsReconciliation>("/oms/reconciliations/run", { method: "POST" }), backtests: () => request<BacktestRun[]>("/backtests"), runBacktest: (input: { start_date: string; end_date: string; instrument_tokens: string[]; strategy_ids: string[]; timeframe_seconds: number }) => request<BacktestRunDetail>("/backtests/run", { method: "POST", body: JSON.stringify(input) }), sweeps: () => request<BacktestSweep[]>("/backtests/sweeps"), createSweep: (input: { strategy_id: string; start_date: string; end_date: string; instrument_tokens: string[]; validation_fraction: number; parameter_grid: Record<string, number[]> }) => request<BacktestSweep>("/backtests/sweeps", { method: "POST", body: JSON.stringify(input) }), promoteSweepCombination: (id: string, index: number) => request<PaperStrategy[]>(`/backtests/sweeps/${id}/promote?combination_index=${index}`, { method: "POST" }), candles: (instrument: string, sessionDate: string) => request<MarketCandle[]>(`/market-data/candles/${encodeURIComponent(instrument)}?session_date=${encodeURIComponent(sessionDate)}`), strategies: () => request<PaperStrategy[]>("/settings/strategies"), strategyMetrics: () => request<StrategyMetric[]>("/settings/strategies/metrics"), strategyDefinitions: () => request<StrategyDefinition[]>("/settings/strategies/definitions"), updateStrategies: (items: PaperStrategy[]) => request<PaperStrategy[]>("/settings/strategies", { method: "PUT", body: JSON.stringify(items) }), startScanner: () => request<ScannerStatus>("/scanner/start", { method: "POST" }), stopScanner: () => request<ScannerStatus>("/scanner/stop", { method: "POST" }), universe: () => request<UniverseEntry[]>("/universe"), universeSummary: () => request<UniverseSummary>("/universe/summary"), refreshUniverse: () => request<UniverseSummary>("/universe/refresh", { method: "POST" }), marketRegime: () => request<MarketRegime>("/market-data/regime"), scoreAnalysis: () => request<ScoreAnalysis>("/journal/score-analysis"), controls: () => request<TradingControls>("/settings/trading"), updateControls: (controls: TradingControls) => request<TradingControls>("/settings/trading", { method: "PUT", body: JSON.stringify(controls) }), settingsCatalog: () => request<SettingsCatalog>("/settings/trading/catalog"), indicatorCatalog: () => request<IndicatorCatalog>("/settings/indicators/catalog"), updateIndicators: (indicators: IndicatorSettings) => request<IndicatorSettings>("/settings/indicators", { method: "PUT", body: JSON.stringify(indicators) }), settingsHistory: () => request<SettingRevision[]>("/settings/trading/history"), riskPresets: () => request<RiskPreset[]>("/settings/trading/presets"), applyRiskPreset: (preset: string, confirmRiskIncrease: boolean) => request<TradingControls>(`/settings/trading/presets/${encodeURIComponent(preset)}`, { method: "POST", body: JSON.stringify({ preset, confirm_risk_increase: confirmRiskIncrease }) }),
+
+  historyOverview: (range: HistoryRange) => request<HistoryOverview>(`/history/overview${historyQuery(range)}`),
+  historyDaily: (range: HistoryRange) => request<HistoryDay[]>(`/history/daily${historyQuery(range)}`),
+  historyTrades: (range: HistoryRange & { session_date?: string; instrument_token?: string; strategy_version?: string }) =>
+    request<HistoryTrade[]>(`/history/trades${historyQuery(range)}`),
+  historyTrade: (positionId: string) => request<HistoryTradeDetail>(`/history/trades/${encodeURIComponent(positionId)}`),
+  historyExportUrl: (kind: "csv" | "xlsx", range: HistoryRange) => `/api/v1/history/export.${kind}${historyQuery(range)}`,
   safety: () => request<SafetyStatus>("/safety/status"), enablePaper: () => request<SafetyStatus>("/safety/paper/enable", { method: "POST" }), disablePaper: () => request<SafetyStatus>("/safety/paper/disable", { method: "POST" }), emergencyStop: (reason: string) => request<SafetyStatus>("/safety/emergency-stop", { method: "POST", body: JSON.stringify({ reason }) }), clearEmergencyStop: () => request<SafetyStatus>("/safety/emergency-stop/clear", { method: "POST" }), assistedApprovals: () => request<AssistedApproval[]>("/assisted/approvals"), decideAssistedApproval: (referenceId: string, decision: "APPROVE" | "REJECT") => request<AssistedApproval>(`/assisted/approvals/${encodeURIComponent(referenceId)}/decision`, { method: "POST", body: JSON.stringify({ decision }) }), liveReadiness: () => request<LiveReadiness>("/live/readiness"), verifyLiveReadiness: () => request<LiveReadiness>("/live/readiness/verify", { method: "POST" }), liveReadinessHistory: () => request<LiveReadinessHistory[]>("/live/readiness/history"), telegram: () => request<TelegramStatus>("/telegram/status"), testTelegram: () => request<TelegramStatus>("/telegram/test", { method: "POST" }), brokerControls: () => request<BrokerControls>("/market-data/brokers"), updateBrokerControls: (controls: BrokerControls) => request<BrokerControls>("/market-data/brokers", { method: "PUT", body: JSON.stringify(controls) }), startUpstoxOAuth: () => request<UpstoxOAuthStart>("/market-data/upstox/authorize", { method: "POST" }),
   completeUpstoxOAuth: (code: string, state: string) => request<{ status: string; expires_at: string }>(`/market-data/upstox/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`),
   autoAuthStatus: () => request<AutoAuthStatus>("/market-data/upstox/auto-auth/status"),
