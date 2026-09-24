@@ -18,6 +18,7 @@ from app.services.extra_strategies import (
 )
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_strategy import AWAITING, STRATEGY_VERSION, StrategyDecision, evaluate_orb_retest
+from app.services.signal_inputs import DEFAULT_REQUIRED_INPUTS, normalise_required
 
 STRATEGIES_KEY = "paper_strategies"
 
@@ -66,6 +67,18 @@ class StrategyConfiguration(BaseModel):
     minimum_ema_spread_percent: float = Field(default=0.05, ge=0, le=5)
     # Minimum |relative strength vs NIFTY| for the RS Pullback strategy; blank uses its built-in default.
     rs_threshold_percent: float | None = Field(default=None, ge=0, le=10)
+    # Indicator inputs this strategy depends on. A required input that is
+    # missing blocks the signal outright rather than scoring it lower: a
+    # breakout-retest without volume confirmation is not a weaker version of
+    # that strategy, it is a different one nobody tested. Empty means "use the
+    # built-in default for this strategy type", which is how an existing stored
+    # configuration keeps working without being rewritten.
+    required_inputs: list[str] = Field(default_factory=list, max_length=10)
+
+    @field_validator("required_inputs")
+    @classmethod
+    def validate_required_inputs(cls, values: list[str]) -> list[str]:
+        return normalise_required(values)
 
     @field_validator("universe")
     @classmethod
@@ -90,9 +103,22 @@ class StrategyConfiguration(BaseModel):
             raise ValueError("Only REGULAR market session is supported")
         return normalized
 
+    def effective_required_inputs(self) -> list[str]:
+        """What this strategy insists on, chosen or inherited.
+
+        Falling back to the built-in default rather than to "nothing required"
+        matters: an empty list would mean every stored configuration written
+        before this field existed silently reverts to scoring absent data,
+        which is the behaviour being fixed.
+        """
+        if self.required_inputs:
+            return list(self.required_inputs)
+        return list(DEFAULT_REQUIRED_INPUTS.get(self.strategy_type, []))
+
     def effective_controls(self, base: dict) -> dict:
         values = {
             **base,
+            "required_inputs": self.effective_required_inputs(),
             "minimum_score": self.minimum_score,
             "minimum_rr": self.minimum_rr,
             "volume_multiplier": self.volume_multiplier,

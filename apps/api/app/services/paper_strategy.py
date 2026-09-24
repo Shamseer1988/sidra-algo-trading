@@ -10,6 +10,7 @@ from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Literal
 
 from app.services.market_calculations import MARKET_TIMEZONE, CompletedCandle
+from app.services.signal_inputs import missing_required
 
 STRATEGY_VERSION = "orb-retest-v1"
 AWAITING = "AWAITING_BREAKOUT"
@@ -47,13 +48,26 @@ def _inside_trade_window(candle: CompletedCandle, controls: dict) -> bool:
     return str(controls["trade_start_time"]) <= opened and closed <= str(controls["trade_cutoff_time"])
 
 
-def _is_choppy(candle: CompletedCandle, indicators: dict, controls: dict) -> bool:
+def _chop_refusal(candle: CompletedCandle, indicators: dict, controls: dict) -> str | None:
+    """Why this candle is not tradeable on EMA separation, or None if it is.
+
+    Returns the reason rather than a boolean because the two cases it refuses
+    are different facts and used to be reported as the same one. "EMA spread
+    indicates choppy market" told an operator the market was ranging when what
+    had actually happened was that no EMA had been computed — the same species
+    of dishonesty as scoring a missing input full marks, in the field they read
+    to find out why nothing traded.
+    """
     fast = _number(indicators, "ema_fast")
     slow = _number(indicators, "ema_slow")
-    if fast is None or slow is None or candle.close <= 0:
-        return True
+    if fast is None or slow is None:
+        return "EMA values are unavailable"
+    if candle.close <= 0:
+        return "Candle close is not a usable price"
     spread_percent = abs(fast - slow) * Decimal("100") / candle.close
-    return spread_percent < Decimal(str(controls.get("minimum_ema_spread_percent", 0.05)))
+    if spread_percent < Decimal(str(controls.get("minimum_ema_spread_percent", 0.05))):
+        return "EMA spread indicates choppy market"
+    return None
 
 
 def _clamp(value: Decimal, low: Decimal, high: Decimal) -> Decimal:
@@ -75,9 +89,17 @@ def _score(
 ) -> dict[str, int]:
     """Continuous, deterministic partial-credit scoring; each component is 0-20.
 
-    Missing inputs (no ATR yet, no benchmark snapshot, no volume baseline) award the
-    affected component full credit rather than zero: the data-quality gate already blocks
-    bad data, so scoring only differentiates when the inputs are actually present.
+    **A missing input scores zero.** It used to score full credit, on the stated
+    grounds that "the data-quality gate already blocks bad data" — which is not
+    what that gate does. It watches the feed (tick freshness, missing buckets,
+    latency) and says nothing about whether ATR or a volume baseline has been
+    computed, so a healthy feed on a newly tracked instrument passed it with
+    none of these available and then scored 100/100.
+
+    Absence must not outscore unfavourable evidence. A strategy that genuinely
+    depends on an input declares it required, and ``evaluate_orb_retest``
+    refuses before reaching this function; everything else is optional and
+    simply earns nothing when it is not there.
     """
     is_long = side == "LONG"
     close = candle.close
@@ -107,13 +129,14 @@ def _score(
         )
         breakout_points = (Decimal("8") + reclaim_points) * range_factor
     else:
-        breakout_points = twenty
+        # No ATR means the reclaim cannot be measured, not that it was decisive.
+        breakout_points = Decimal("0")
 
     # 2) Trend: EMA direction is a hard gate; separation beyond the choppy threshold is a bonus.
     directional_ema = fast is not None and slow is not None and (fast > slow if is_long else fast < slow)
-    if fast is None or slow is None:
-        ema_points = twenty
-    elif not directional_ema:
+    # No EMAs and EMAs pointing the wrong way both earn nothing. They are
+    # different facts with the same worth: neither is evidence of a trend.
+    if fast is None or slow is None or not directional_ema:
         ema_points = Decimal("0")
     else:
         spread_percent = abs(fast - slow) * Decimal("100") / close if close > 0 else Decimal("0")
@@ -125,12 +148,13 @@ def _score(
     upper_2 = _number(bands, "upper_2")
     lower_1 = _number(bands, "lower_1")
     lower_2 = _number(bands, "lower_2")
-    if vwap is None:
-        vwap_points = twenty
-    elif (is_long and close < vwap) or (not is_long and close > vwap):
+    # No VWAP, or on the wrong side of it: nothing either way.
+    if vwap is None or (is_long and close < vwap) or (not is_long and close > vwap):
         vwap_points = Decimal("0")
     elif (is_long and upper_1 is None) or (not is_long and lower_1 is None):
-        vwap_points = twenty
+        # On the right side of VWAP, but with no bands to say how extended it
+        # is. Half credit: the direction is confirmed and the stretch is not.
+        vwap_points = Decimal("10")
     else:
         near = upper_1 if is_long else lower_1
         far = upper_2 if is_long else lower_2
@@ -143,9 +167,8 @@ def _score(
     # 4) Volume: below the configured RVOL multiple is a hard zero; scale up to 2x the multiple.
     relative_volume = _number(volume, "relative_volume")
     threshold = Decimal(str(controls["volume_multiplier"]))
-    if relative_volume is None:
-        volume_points = twenty
-    elif relative_volume < threshold:
+    # No baseline yet, or volume below the multiple: no confirmation either way.
+    if relative_volume is None or relative_volume < threshold:
         volume_points = Decimal("0")
     else:
         excess = (relative_volume - threshold) / threshold if threshold > 0 else Decimal("1")
@@ -154,12 +177,13 @@ def _score(
     # 5) Market: NIFTY regime agreement plus relative-strength magnitude in the trade direction.
     wanted_regime = "BULLISH" if is_long else "BEARISH"
     if regime_name in (None, "INSUFFICIENT_DATA"):
-        regime_points = Decimal("10")
+        # The benchmark saying it could not decide is not the benchmark agreeing.
+        regime_points = Decimal("0")
     else:
         regime_points = Decimal("10") if regime_name == wanted_regime else Decimal("0")
     relative_value = _number(relative, "relative_strength_percent")
     if relative_value is None:
-        rs_points = Decimal("10")
+        rs_points = Decimal("0")
     elif (relative_value > 0) == is_long and relative_value != 0:
         rs_points = Decimal("10") * _clamp(abs(relative_value) / Decimal("0.4"), Decimal("0"), Decimal("1"))
     else:
@@ -291,8 +315,21 @@ def evaluate_orb_retest(
         return StrategyDecision(next_state=AWAITING, reason="Breakout was invalidated")
     if not retested:
         return StrategyDecision(next_state=prior_state, reason="Awaiting breakout retest")
-    if _is_choppy(candle, indicators, controls):
-        return StrategyDecision(next_state=AWAITING, reason="EMA spread indicates choppy market")
+    # Checked after the setup is confirmed and before anything else can refuse
+    # it, so that missing data is reported as missing data. A strategy without
+    # an input it depends on is not that strategy with a lower score; it is a
+    # different one nobody tested. Returning AWAITING rather than holding the
+    # breakout state means the setup has to re-form once the data exists,
+    # instead of firing the moment a baseline fills in mid-session.
+    missing = missing_required(indicators, nifty_indicators, controls.get("required_inputs"))
+    if missing:
+        return StrategyDecision(
+            next_state=AWAITING,
+            reason=f"Required market data unavailable: {', '.join(missing)}",
+        )
+    chop = _chop_refusal(candle, indicators, controls)
+    if chop is not None:
+        return StrategyDecision(next_state=AWAITING, reason=chop)
     breakdown = _score(side, candle, indicators, nifty_indicators, controls, level)
     score = sum(breakdown.values())
     if score < int(controls["minimum_score"]):

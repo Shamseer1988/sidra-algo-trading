@@ -18,8 +18,13 @@ CONTROLS = {
     "trade_cutoff_time": "14:45",
 }
 
+# A realistic snapshot: every input this strategy uses is present. It used to
+# omit ATR entirely and still score 100, because a missing input awarded full
+# marks — the defect these tests now guard against rather than rely on.
 INDICATORS = {
     "opening_range": {"high": 110.0, "low": 100.0, "complete": True},
+    "atr": 1.0,
+    "opening_range_atr": 1.0,
     "vwap": 105.0,
     "ema_fast": 111.0,
     "ema_slow": 106.0,
@@ -55,7 +60,9 @@ def test_long_strategy_requires_breakout_then_retest_before_paper_signal() -> No
     )
     assert confirmed.next_state == SIGNALLED
     assert confirmed.side == "LONG"
-    assert confirmed.score == 100
+    # 86, not 100: the reclaim is scored against ATR, and the fixture has no
+    # VWAP bands so its alignment earns half credit rather than all of it.
+    assert confirmed.score == 86
     assert confirmed.quantity > 0
     assert confirmed.target_price is not None and confirmed.entry_price is not None
     assert confirmed.target_price > confirmed.entry_price
@@ -71,7 +78,7 @@ def test_strategy_rejects_retest_when_market_conditions_fail() -> None:
     assert decision.next_state == AWAITING
     assert decision.reason == "Retest failed score threshold"
     assert decision.side is None
-    assert decision.score == 80
+    assert decision.score == 66
     assert decision.score_breakdown["market_confirmation"] == 0
 
 

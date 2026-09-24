@@ -173,7 +173,13 @@ async def test_signal_and_alert_deduplication_idempotency():
 
     indicators = {
         "opening_range": {"high": 110.0, "low": 100.0, "complete": True},
+        # ATR is what the reclaim is measured against. Omitting it used to
+        # score full marks for breakout quality; it now scores none, so a
+        # deduplication test that needs a signal has to supply one.
+        "atr": 1.0,
+        "opening_range_atr": 1.0,
         "vwap": 105.0,
+        "vwap_bands": {"upper_1": 113.0, "upper_2": 118.0},
         "ema_fast": 111.0,
         "ema_slow": 106.0,
         "volume": {"relative_volume": 1.5},
