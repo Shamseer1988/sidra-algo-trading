@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type AuditLog, type BrokerControls, type UserSession } from "../../components/api";
 import type { WorkspaceId } from "../../lib/navigation";
 import { formatIstTimestamp } from "../../lib/formatting";
+import { IndicatorSettingsForm } from "./indicator-settings-form";
 import { TradingControlsForm } from "./trading-controls-form";
 
 export function SettingsPanel({
@@ -30,6 +31,7 @@ export function SettingsPanel({
       </div>
 
       <TradingControlsForm isAdmin={isAdmin} onMessage={onMessage} />
+      <IndicatorSettingsForm isAdmin={isAdmin} onMessage={onMessage} />
 
       <MarketDataFeedSelector isAdmin={isAdmin} onMessage={onMessage} onNavigate={onNavigate} />
       <SecurityPanel isAdmin={isAdmin} onMessage={onMessage} />

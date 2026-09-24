@@ -443,6 +443,9 @@ async def update_indicator_settings(
     something somebody has to infer later.
     """
     stored = await session.get(ApplicationSetting, INDICATOR_KEY)
+    # Captured before the row is created, because after that the object exists
+    # either way and the distinction this records is gone.
+    was_stored = stored is not None
     previous = (
         dict(stored.value)
         if stored is not None and isinstance(stored.value, dict)
@@ -465,7 +468,7 @@ async def update_indicator_settings(
             event_type="settings.indicators_updated",
             metadata_json={
                 "changed_keys": summary.changed_keys,
-                "previous_source": "DATABASE" if stored.created_at else "ENVIRONMENT",
+                "previous_source": "DATABASE" if was_stored else "ENVIRONMENT",
             },
         )
     )
