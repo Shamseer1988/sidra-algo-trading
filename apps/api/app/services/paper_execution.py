@@ -9,9 +9,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import ApplicationSetting, PaperFill, PaperOrder, PaperPosition, PaperSignal
+from app.db.models import (
+    ApplicationSetting,
+    MarketIndicatorSnapshot,
+    PaperFill,
+    PaperOrder,
+    PaperPosition,
+    PaperSignal,
+)
 from app.db.session import SessionLocal
 from app.services import daily_limits
+from app.services.exit_rules import from_controls as exit_rules_from
+from app.services.exit_rules import time_exit_due, trail_to
 from app.services.live_shadow_runner import run_live_shadow
 from app.services.market_calculations import CompletedCandle
 from app.services.oms import PaperOmsGateway
@@ -39,7 +48,10 @@ DEFAULT_PAPER_EXECUTION_CONTROLS = PaperExecutionControls().model_dump()
 # Order roles that close a position. One of them filling settles the signal, so
 # the others must not also fill on the same candle — which would exit a position
 # twice and book the second exit against a quantity that is no longer there.
-EXIT_ROLES = frozenset({"TARGET", "STOP", "HALT"})
+# TIME is an exit the clock asked for: a per-strategy holding limit or a
+# square-off time. It sorts last of the exits because a stop or target resting
+# at the exchange would have been hit before anybody squared anything off.
+EXIT_ROLES = frozenset({"TARGET", "STOP", "HALT", "TIME"})
 
 
 @dataclass(frozen=True)
@@ -301,7 +313,7 @@ class PaperOrderManager:
                             select(PaperOrder).where(
                                 PaperOrder.paper_signal_id == signal.id,
                                 PaperOrder.id != order.id,
-                                PaperOrder.order_role.in_(["TARGET", "STOP"]),
+                                PaperOrder.order_role.in_(["TARGET", "STOP", "TIME", "HALT"]),
                                 PaperOrder.status.in_(["PENDING", "PARTIALLY_FILLED"]),
                             )
                         )
@@ -325,6 +337,124 @@ class PaperOrderManager:
             Decimal(str(position.realized_pnl))
             + Decimal(str(position.unrealized_pnl))
             - Decimal(str(position.fees_total))
+        )
+
+    async def _current_atr(self, session: AsyncSession, candle: CompletedCandle) -> Decimal | None:
+        """ATR as of this candle, for a trail that follows current volatility.
+
+        Read from the indicator snapshot the aggregation writes per candle
+        rather than from the signal, because a trail set from entry-time
+        volatility stops adapting exactly when adapting matters — a volatility
+        spike after entry is the case an ATR trail exists for.
+        """
+        row = await session.scalar(
+            select(MarketIndicatorSnapshot)
+            .where(
+                MarketIndicatorSnapshot.instrument_token == candle.instrument_token,
+                MarketIndicatorSnapshot.candle_opened_at <= candle.opened_at,
+                MarketIndicatorSnapshot.session_date == candle.session_date,
+            )
+            .order_by(MarketIndicatorSnapshot.candle_opened_at.desc())
+            .limit(1)
+        )
+        value = (row.values or {}).get("atr") if row is not None else None
+        try:
+            return Decimal(str(value)) if value is not None else None
+        except (TypeError, ArithmeticError):
+            return None
+
+    async def _manage_open_positions(
+        self, session: AsyncSession, candle: CompletedCandle, positions: list[PaperPosition]
+    ) -> None:
+        """Move the stop and close on the clock, per the rules the trade was taken under.
+
+        The rules come from the signal's snapshot, not from the strategy as it
+        stands now. A strategy edited at 11:00 must not move the stop of a
+        position opened at 10:30: that trade was taken under the old rules and
+        has to be managed — and judged — under them.
+        """
+        open_positions = [position for position in positions if position.open_quantity > 0]
+        if not open_positions:
+            return
+        atr = await self._current_atr(session, candle)
+
+        for position in open_positions:
+            signal = await session.get(PaperSignal, position.paper_signal_id)
+            if signal is None:
+                continue
+            snapshot = signal.strategy_snapshot or {}
+            rules = exit_rules_from(snapshot.get("effective_controls") or {})
+
+            await self._trail_stop(session, position, signal, candle, atr, rules)
+            reason = time_exit_due(opened_at=position.opened_at, now=candle.closed_at, rules=rules)
+            if reason is not None:
+                await self._queue_time_exit(session, position, signal, candle, reason)
+
+    async def _trail_stop(self, session, position, signal, candle, atr, rules) -> None:
+        stop_order = await session.scalar(
+            select(PaperOrder).where(
+                PaperOrder.paper_signal_id == signal.id,
+                PaperOrder.order_role == "STOP",
+                PaperOrder.status.in_(["PENDING", "PARTIALLY_FILLED"]),
+            )
+        )
+        if stop_order is None or stop_order.stop_price is None or position.average_entry_price is None:
+            return
+        # The risk the trade was sized on, from the signal rather than from the
+        # stop as it stands: once the stop has moved, the distance to it is no
+        # longer the R that "one R ahead" refers to.
+        risk_per_unit = abs(Decimal(str(signal.entry_price)) - Decimal(str(signal.stop_price)))
+        moved = trail_to(
+            side=position.side,
+            entry=position.average_entry_price,
+            current_stop=stop_order.stop_price,
+            risk_per_unit=risk_per_unit,
+            candle_close=candle.close,
+            candle_extreme=candle.high if position.side == "LONG" else candle.low,
+            atr=atr,
+            rules=rules,
+        )
+        if moved is None:
+            return
+        previous = Decimal(str(stop_order.stop_price))
+        stop_order.stop_price = _money(moved)
+        position.stop_price = _money(moved)
+        # Written down because a trade that closed at a level nobody chose by
+        # hand has to be explicable afterwards from the record alone.
+        history = list(stop_order.simulation_snapshot.get("trail", []))
+        history.append(
+            {
+                "rule": rules.trailing_rule,
+                "from": str(previous),
+                "to": str(_money(moved)),
+                "at": candle.closed_at.isoformat(),
+            }
+        )
+        stop_order.simulation_snapshot = {**stop_order.simulation_snapshot, "trail": history}
+
+    async def _queue_time_exit(self, session, position, signal, candle, reason: str) -> None:
+        existing = await session.scalar(
+            select(PaperOrder.id).where(PaperOrder.paper_signal_id == signal.id, PaperOrder.order_role == "TIME")
+        )
+        if existing is not None:
+            return
+        # Eligible from the close of this candle, so it fills at the next
+        # candle's open. Filling it on the candle that triggered it would book
+        # an exit at a price that had already passed.
+        session.add(
+            PaperOrder(
+                paper_signal_id=signal.id,
+                client_order_id=f"paper:{signal.id}:time",
+                instrument_token=signal.instrument_token,
+                session_date=signal.session_date,
+                strategy_version=signal.strategy_version,
+                side=exit_side(signal.side),
+                order_type="MARKET",
+                order_role="TIME",
+                quantity=position.open_quantity,
+                eligible_after=candle.closed_at,
+                simulation_snapshot={"source": "exit_rules", "reason": reason, "paper_only": True},
+            )
         )
 
     async def _halt_if_the_day_is_over(self, session: AsyncSession, session_date: date) -> None:
@@ -440,7 +570,9 @@ class PaperOrderManager:
             )
             # HALT first: it is the day's stop, and an exit that queued behind a
             # re-entry would be an exit that happened after one more trade.
-            orders.sort(key=lambda order: {"HALT": 0, "STOP": 1, "TARGET": 2, "ENTRY": 3}.get(order.order_role, 4))
+            orders.sort(
+                key=lambda order: {"HALT": 0, "STOP": 1, "TARGET": 2, "TIME": 3, "ENTRY": 4}.get(order.order_role, 5)
+            )
             processed_exit_signals: set[object] = set()
             settled_signal_ids: set[object] = set()
             for order in orders:
@@ -473,6 +605,10 @@ class PaperOrderManager:
             )
             for position in positions:
                 self._mark_to_market(position, candle.close)
+            # After the fills, so a position already closed by its stop or
+            # target this candle is not trailed or queued for a time exit it
+            # will never need.
+            await self._manage_open_positions(session, candle, positions)
             # Checked on every candle rather than only when a signal arrives: a
             # daily limit is normally crossed by a price moving, and on a day
             # that then halts, the next signal never comes — so nothing would

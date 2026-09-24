@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ApplicationSetting
+from app.services.exit_rules import ExitRules
 from app.services.extra_strategies import (
     EMA_MOMENTUM_VERSION,
     RS_PULLBACK_VERSION,
@@ -74,6 +75,11 @@ class StrategyConfiguration(BaseModel):
     # built-in default for this strategy type", which is how an existing stored
     # configuration keeps working without being rewritten.
     required_inputs: list[str] = Field(default_factory=list, max_length=10)
+    # How a trade is left: stop placement, target placement, whether the stop
+    # follows price, and whether the position is closed on the clock. Every
+    # default reproduces the behaviour that was hard-coded before this field
+    # existed, so a stored strategy keeps trading the way it was measured.
+    exit_rules: ExitRules = Field(default_factory=ExitRules)
 
     @field_validator("required_inputs")
     @classmethod
@@ -119,6 +125,10 @@ class StrategyConfiguration(BaseModel):
         values = {
             **base,
             "required_inputs": self.effective_required_inputs(),
+            # Carried in the controls so that the strategy functions keep taking
+            # one dict, and so the rules land in the signal's snapshot and travel
+            # with the trade rather than being looked up again at exit time.
+            "exit_rules": self.exit_rules.model_dump(),
             "minimum_score": self.minimum_score,
             "minimum_rr": self.minimum_rr,
             "volume_multiplier": self.volume_multiplier,
@@ -129,6 +139,12 @@ class StrategyConfiguration(BaseModel):
             values["risk_per_trade_percent"] = self.risk_per_trade_percent
         if self.rs_threshold_percent is not None:
             values["rs_threshold_percent"] = self.rs_threshold_percent
+        # A per-strategy stop override replaces the account control for this
+        # strategy only; left blank, the account control still reaches it.
+        if self.exit_rules.stop_atr_multiple is not None:
+            values["stop_atr_multiple"] = self.exit_rules.stop_atr_multiple
+        if self.exit_rules.min_stop_distance_percent is not None:
+            values["min_stop_distance_percent"] = self.exit_rules.min_stop_distance_percent
         return values
 
     def snapshot(self, base_controls: dict) -> dict:

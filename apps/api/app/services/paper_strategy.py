@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Literal
 
+from app.services.exit_rules import from_controls as exit_rules_from
+from app.services.exit_rules import plan as exit_plan
 from app.services.market_calculations import MARKET_TIMEZONE, CompletedCandle
 from app.services.signal_inputs import missing_required
 
@@ -214,25 +216,22 @@ def plan_trade(
     strategy so entry/stop/target/quantity mechanics stay identical across them.
     """
     entry = Decimal(str(entry))
-    structural_distance = (entry - structural_stop) if side == "LONG" else (structural_stop - entry)
-
-    atr_value = _number(indicators, "atr")
-    atr_floor = (
-        atr_value * Decimal(str(controls.get("stop_atr_multiple", 0)))
-        if atr_value is not None and atr_value > 0
-        else Decimal("0")
+    # The stop and target rules live in one module so that a strategy can carry
+    # its own and the arithmetic stays in one place. Defaults reproduce exactly
+    # what this function used to compute inline.
+    plan = exit_plan(
+        side=side,
+        entry=entry,
+        structural_stop=structural_stop,
+        atr=_number(indicators, "atr"),
+        rules=exit_rules_from(controls),
+        account_stop_atr_multiple=controls.get("stop_atr_multiple", 0),
+        account_min_stop_percent=controls.get("min_stop_distance_percent", 0),
+        minimum_rr=controls["minimum_rr"],
     )
-    percent_floor = entry * Decimal(str(controls.get("min_stop_distance_percent", 0))) / Decimal("100")
-    risk_per_unit = max(structural_distance, atr_floor, percent_floor)
-    if risk_per_unit <= 0 or entry <= 0:
+    if plan is None:
         return None
-
-    if side == "LONG":
-        stop = entry - risk_per_unit
-        target = entry + (risk_per_unit * Decimal(str(controls["minimum_rr"])))
-    else:
-        stop = entry + risk_per_unit
-        target = entry - (risk_per_unit * Decimal(str(controls["minimum_rr"])))
+    stop, target, risk_per_unit = plan.stop, plan.target, plan.risk_per_unit
 
     risk_amount = (
         Decimal(str(controls["account_capital"])) * Decimal(str(controls["risk_per_trade_percent"])) / Decimal("100")
