@@ -1,16 +1,32 @@
 # Sidra Algo Trading
 
-Self-hosted, paper-first NSE algorithmic trading command center. The current release has no order-submission path. `LIVE_TRADING_ENABLED=false` is the mandatory default.
+Self-hosted, paper-first NSE algorithmic trading command center.
+
+**Setting it up for the first time: [`SETUP_FROM_SCRATCH.md`](SETUP_FROM_SCRATCH.md)** —
+fresh clone to a running paper session.
+
+A broker order path now exists, and it is locked shut. `LIVE_TRADING_ENABLED` is
+refused by the settings validator **unconditionally**: an API given
+`LIVE_TRADING_ENABLED=true` does not start. Removing that lock is a deliberate,
+separate act, documented in
+[`GOING_LIVE_WITH_UPSTOX.md`](GOING_LIVE_WITH_UPSTOX.md).
 
 ## Current state
 
-The available foundation includes Docker topology, FastAPI, database migrations,
-protected login/RBAC, scanner safety controls, Upstox paper-market-data ingestion,
-retained Firstock market-data support, completed one-minute candle calculations,
-paper strategy signals, journal analytics, deterministic replay foundations, and
-dedicated-bot Telegram control-plane support. A fail-closed NSE calendar and
-per-instrument data-quality gates prevent unsafe signal evaluation. Every
-order-submission path remains outside this release.
+Docker topology, FastAPI, database migrations, protected login and RBAC, scanner
+safety controls, Upstox market-data ingestion with Firstock retained, completed
+one-minute candle calculations, a dynamic scan universe, four paper strategies
+with per-strategy entry and exit rules, a fill-based daily trade counter, a
+latched daily profit and loss stop, a broker-style trading history with
+four-way reconciliation, settings that are entirely editable from the UI, and
+Telegram alerts and approvals. A fail-closed NSE calendar and per-instrument
+data-quality gates prevent unsafe signal evaluation; a required indicator input
+that is missing blocks a signal rather than scoring it.
+
+The live execution layer — readiness gates, activation with expiry, per-order
+approval, write-ahead submission records, three-outcome classification, UNKNOWN
+recovery and broker reconciliation — is built and enforced. What holds execution
+shut is the lock above, not an absence of code.
 
 ## Prerequisites
 
