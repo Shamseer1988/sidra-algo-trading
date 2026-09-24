@@ -197,7 +197,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 :root[data-theme="light"] .text-slate-400, :root[data-theme="light"] .text-slate-500 { color: var(--muted); }
 :root[data-theme="light"] .text-emerald-300, :root[data-theme="light"] .text-emerald-400, :root[data-theme="light"] .text-bullish { color: var(--positive); }
 :root[data-theme="light"] .text-rose-200, :root[data-theme="light"] .text-rose-300, :root[data-theme="light"] .text-rose-400 { color: var(--negative); }
-:root[data-theme="light"] .text-amber-300 { color: var(--warning); }
+:root[data-theme="light"] .text-amber-300, :root[data-theme="light"] .text-amber-100 { color: var(--warning); }
+/* The settings screen states when each control takes effect, and an operator
+   reading "applies to the session already running" needs to be able to read it
+   in both themes. These tones are legible on the dark surface and wash out on
+   the light one, so they are remapped here with the rest of the palette rather
+   than written as Tailwind dark: variants — darkMode is unconfigured, so that
+   variant follows the operating system rather than this app's theme toggle. */
+:root[data-theme="light"] .text-sky-300 { color: #0369a1; }
+:root[data-theme="light"] .bg-amber-950\/20 { background-color: rgba(251, 191, 36, .12); }
+:root[data-theme="light"] .bg-sky-950\/10 { background-color: rgba(56, 189, 248, .10); }
+:root[data-theme="light"] .bg-slate-800 { background-color: var(--glass-muted); }
 :root[data-theme="light"] .shadow-black\/20, :root[data-theme="light"] .shadow-black\/40, :root[data-theme="light"] .shadow-black\/60 { --tw-shadow-color: var(--shadow); }
 
 @supports not (backdrop-filter: blur(1px)) {

@@ -140,6 +140,144 @@ const MOCK_CONTROLS = {
   trade_cutoff_time: "14:45",
 };
 
+// Shaped from a real /settings/trading/catalog response. The settings screen
+// renders entirely from this, so a mock that drifted from the API would test a
+// form nobody ships. Trimmed to one control of each kind.
+const MOCK_CATALOG = {
+  group_order: ["ACCOUNT_AND_BROKER", "DAILY_RISK", "TRADING_SESSION"],
+  group_labels: {
+    ACCOUNT_AND_BROKER: "Account and broker",
+    DAILY_RISK: "Daily risk",
+    TRADING_SESSION: "Trading session",
+  },
+  settings: [
+    {
+      key: "intraday_leverage_enabled",
+      group: "ACCOUNT_AND_BROKER",
+      group_label: "Account and broker",
+      label: "Use intraday leverage",
+      help: "When off, exposure is capped at the capital above. When on, the exposure ceiling is multiplied.",
+      unit: "BOOLEAN",
+      kind: "boolean",
+      choices: [],
+      is_ceiling: false,
+      effect: "NEXT_SIGNAL",
+      effect_label: "Applies to the next signal evaluated; signals already taken keep the old value.",
+      value: true,
+      minimum: null,
+      maximum: null,
+      exclusive_minimum: null,
+      exclusive_maximum: null,
+      last_changed_at: null,
+    },
+    {
+      key: "live_broker",
+      group: "ACCOUNT_AND_BROKER",
+      group_label: "Account and broker",
+      label: "Live broker",
+      help: "Where a live order would be sent. NONE sends nothing and is a refusal, not a fallback.",
+      unit: "CHOICE",
+      kind: "choice",
+      choices: ["NONE", "UPSTOX", "FIRSTOCK"],
+      is_ceiling: false,
+      effect: "IMMEDIATE",
+      effect_label: "Applies at once, including to the session already running.",
+      value: "NONE",
+      minimum: null,
+      maximum: null,
+      exclusive_minimum: null,
+      exclusive_maximum: null,
+      last_changed_at: null,
+    },
+    {
+      key: "maximum_daily_trades",
+      group: "DAILY_RISK",
+      group_label: "Daily risk",
+      label: "Maximum trades per day",
+      help: "Account-wide filled entries, across every strategy and both brokers, counted on first fill.",
+      unit: "COUNT",
+      kind: "integer",
+      choices: [],
+      is_ceiling: true,
+      effect: "IMMEDIATE",
+      effect_label: "Applies at once, including to the session already running.",
+      value: 4,
+      minimum: 1,
+      maximum: 20,
+      exclusive_minimum: null,
+      exclusive_maximum: null,
+      last_changed_at: "2026-09-24T04:00:00+00:00",
+    },
+    {
+      key: "daily_loss_limit",
+      group: "DAILY_RISK",
+      group_label: "Daily risk",
+      label: "Daily loss stop",
+      help: "In rupees, not a percent. Reaching it closes the day and exits open positions.",
+      unit: "INR",
+      kind: "number",
+      choices: [],
+      is_ceiling: true,
+      effect: "IMMEDIATE",
+      effect_label: "Applies at once, including to the session already running.",
+      value: 400,
+      minimum: 0,
+      maximum: 10000000,
+      exclusive_minimum: null,
+      exclusive_maximum: null,
+      last_changed_at: null,
+    },
+    {
+      key: "trade_start_time",
+      group: "TRADING_SESSION",
+      group_label: "Trading session",
+      label: "Trade start time",
+      help: "IST. No entry is taken before this, so set it after the opening range completes.",
+      unit: "TIME_IST",
+      kind: "time",
+      choices: [],
+      is_ceiling: false,
+      effect: "NEXT_SESSION",
+      effect_label: "Applies from the next trading session.",
+      value: "09:24",
+      minimum: null,
+      maximum: null,
+      exclusive_minimum: null,
+      exclusive_maximum: null,
+      last_changed_at: null,
+    },
+  ],
+  effective: {
+    capital: "10000",
+    planned_risk_per_trade: "100.00",
+    daily_risk_budget: "200.00",
+    trades_the_budget_allows: 2,
+    configured_trade_ceiling: 4,
+    effective_trade_ceiling: 2,
+    binding_control: "maximum_daily_risk_percent",
+    maximum_open_positions: 1,
+    exposure_ceiling: "50000.00",
+    leverage_multiplier: "5.0",
+    daily_loss_limit: "400.0",
+    daily_loss_percent: "4.00",
+    daily_profit_target: "2000.0",
+    daily_profit_percent: "20.00",
+    warnings: [
+      "The daily risk budget of ₹200.00 funds 2 trade(s) at ₹100.00 of planned risk each, so only 2 of the 4 configured trades can be taken.",
+    ],
+  },
+};
+
+const MOCK_PRESETS = [
+  {
+    key: "CAUTIOUS_PAPER_START",
+    label: "Cautious paper start",
+    description: "₹100 planned risk a trade, ₹400 daily loss stop. Where to begin.",
+    controls: {},
+    effective: { ...MOCK_CATALOG.effective, planned_risk_per_trade: "100.00", daily_loss_limit: "400.0", effective_trade_ceiling: 4 },
+  },
+];
+
 const MOCK_STRATEGIES = [{
   id: "orb-default",
   name: "ORB Retest — Default",
@@ -245,7 +383,7 @@ const MOCK_LIVE_READINESS = {
 };
 const MOCK_OMS_RECONCILIATIONS = [{ id: "recon-001", mode: "PAPER", status: "CLEAN", internal_orders: 3, external_orders: 0, unknown_orders: 0, detail: "Paper OMS has no external broker side; internal links are consistent.", created_at: new Date().toISOString() }];
 
-async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN") {
+export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN") {
   const user = userRole === "ADMIN" ? MOCK_ADMIN_USER : MOCK_VIEWER_USER;
   let currentScanner = { status: "STOPPED", last_heartbeat: new Date().toISOString(), detail: "Scanner is paused" };
 
@@ -293,6 +431,14 @@ async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN
 
   await page.route("**/api/v1/telegram/status", async (route: Route) => {
     await route.fulfill({ json: MOCK_TELEGRAM });
+  });
+
+  await page.route("**/api/v1/settings/trading/catalog", async (route: Route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(MOCK_CATALOG) });
+  });
+
+  await page.route("**/api/v1/settings/trading/presets", async (route: Route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(MOCK_PRESETS) });
   });
 
   await page.route("**/api/v1/settings/trading", async (route: Route) => {
@@ -425,13 +571,13 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     // Navigate to Settings
     await page.click('button:has-text("Settings")');
 
-    // In Viewer mode, settings form inputs must be disabled and Save button not rendered
-    const input = page.locator('input[type="number"]').first();
-    await expect(input).toBeDisabled();
-    // A viewer must not be able to hand a live order path to themselves.
-    await expect(page.getByLabel("Approval mode")).toBeDisabled();
+    // A viewer sees the settings and can change none of them.
+    await expect(page.locator('input[type="number"]').first()).toBeDisabled();
     await expect(page.getByLabel("Live broker")).toBeDisabled();
-    await expect(page.getByRole("button", { name: "Save controls" })).toHaveCount(0);
+    await expect(page.getByLabel("Use intraday leverage")).toBeDisabled();
+    // No save, no discard, and no way to apply a risk profile in one click.
+    await expect(page.getByRole("button", { name: /^Save/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^Apply/ })).toHaveCount(0);
   });
 
   test("3. Scanner Controls: Start and Stop triggers in Dashboard", async ({ page }) => {
@@ -510,23 +656,40 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
 
     // Navigate to Settings
     await page.click('button:has-text("Settings")');
-    await expect(page.getByRole("heading", { name: "Paper risk & strategy controls" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Trading controls" })).toBeVisible();
 
-    // The live approval mode is a fixed set of choices, never a free-text field,
-    // and a system that has not been switched on must read as disabled.
-    const approvalMode = page.getByLabel("Approval mode");
-    await expect(approvalMode).toHaveValue("DISABLED");
-    await expect(page.getByText("Disabled — no live order path is offered.")).toBeVisible();
+    // What the settings actually permit, shown above the inputs that set them.
+    await expect(page.getByRole("heading", { name: "Effective limits" })).toBeVisible();
+    // The contradiction is surfaced rather than left to be discovered from an
+    // empty session: four configured, two reachable.
+    await expect(page.getByText("of 4 configured")).toBeVisible();
+    await expect(page.getByText(/only 2 of the 4 configured trades/)).toBeVisible();
+
+    // Exposure is labelled as exposure, never as cash.
+    await expect(page.getByText(/exposure, not cash/)).toBeVisible();
+
+    // A stop is an instruction, not a promise.
+    await expect(page.getByText(/not a guarantee/)).toBeVisible();
+
+    // Every control carries its unit, its range, when it takes effect, and
+    // when it last moved — the things the old raw-input grid never said.
+    await expect(page.getByText("Allowed: 1 to 20")).toBeVisible();
+    await expect(page.getByText(/Applies at once, including to the session already running/).first()).toBeVisible();
+    await expect(page.getByText(/Last changed/)).toBeVisible();
+    await expect(page.getByText("Not changed here yet").first()).toBeVisible();
 
     // No broker chosen is a refusal, not a fallback to whichever one exists.
     await expect(page.getByLabel("Live broker")).toHaveValue("NONE");
-    await expect(page.getByText("No broker selected — no order can be routed anywhere.")).toBeVisible();
 
-    // Save controls
-    const saveBtn = page.getByRole("button", { name: "Save controls" });
-    await expect(saveBtn).toBeVisible();
+    // Nothing to save until something is edited.
+    await expect(page.getByText("No changes to save.")).toBeVisible();
+
+    // Editing one control offers to save exactly that one.
+    await page.getByLabel("Maximum trades per day").fill("3");
+    const saveBtn = page.getByRole("button", { name: "Save 1 change" });
+    await expect(saveBtn).toBeEnabled();
     await saveBtn.click();
-    await expect(page.getByText("Trading controls saved.")).toBeVisible();
+    await expect(page.getByText("Saved 1 change.")).toBeVisible();
   });
 
   test("5b. Strategy workspace: versioned glass panel and strategy metrics", async ({ page }) => {

@@ -14,7 +14,17 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      use: {
+        ...devices["Desktop Chrome"],
+        // The container ships a Chromium that this Playwright build does not
+        // expect by version number, and there is no network to fetch the one it
+        // wants. Pointing at the installed binary keeps the suite runnable here;
+        // PLAYWRIGHT_CHROMIUM_PATH lets any other environment override it, and
+        // an unset variable falls through to Playwright's own resolution.
+        launchOptions: process.env.PLAYWRIGHT_CHROMIUM_PATH
+          ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
+          : {},
+      },
     },
   ],
   webServer: {

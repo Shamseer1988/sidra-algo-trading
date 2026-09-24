@@ -1,161 +1,35 @@
 "use client";
 
-import { SlidersHorizontal } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { api, type AuditLog, type BrokerControls, type TradingControls, type UserSession } from "../../components/api";
+import { api, type AuditLog, type BrokerControls, type UserSession } from "../../components/api";
 import type { WorkspaceId } from "../../lib/navigation";
 import { formatIstTimestamp } from "../../lib/formatting";
+import { TradingControlsForm } from "./trading-controls-form";
 
 export function SettingsPanel({
-  controls,
   isAdmin,
-  onSave,
-  onChange,
   onMessage,
   onNavigate,
 }: {
-  controls: TradingControls;
   isAdmin: boolean;
-  onSave: (event: FormEvent<HTMLFormElement>) => void;
-  onChange: (key: keyof TradingControls, value: string) => void;
   onMessage: (message: string) => void;
   onNavigate?: (id: WorkspaceId) => void;
 }) {
-  const isLeverageEnabled = Boolean(controls.intraday_leverage_enabled ?? true);
-  const approvalMode = controls.execution_approval_mode ?? "DISABLED";
-  const liveBroker = controls.live_broker ?? "NONE";
-
   return (
     <section>
       <div className="page-toolbar">
         <div>
           <p className="eyebrow">Configuration</p>
-          <h2 className="page-title">Paper risk & strategy controls</h2>
+          <h2 className="page-title">Trading controls</h2>
           <p className="page-copy">
-            Risk limits, strategy filters, and broker intraday leverage options.
+            Every control below is described, bounded and validated by the server. The effective limits at the top are
+            what these settings actually permit once they are read together.
           </p>
         </div>
       </div>
 
-      <form onSubmit={onSave} className="panel mt-6 max-w-5xl p-5 sm:p-7 space-y-6">
-        {/* Live Execution Approval Mode */}
-        <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 p-4 sm:p-5">
-          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="rounded bg-amber-500/20 px-2 py-0.5 text-xs font-bold text-amber-300 border border-amber-500/30">
-                  Live Execution
-                </span>
-                <h4 className="text-sm font-semibold text-white">Order approval mode</h4>
-              </div>
-              <p className="mt-1.5 text-xs leading-5 text-slate-300">
-                Who authorises an order before it reaches the broker. This setting alone never enables live
-                trading: every submission still has to pass the live readiness gates, and the system remains
-                paper-only until those gates open.
-              </p>
-              <p className="mt-1.5 text-xs leading-5 text-amber-200/80">
-                {liveBroker === "NONE"
-                  ? "No broker selected — no order can be routed anywhere."
-                  : `Orders would be routed to ${liveBroker}.`}
-              </p>
-              <p className="mt-1.5 text-xs leading-5 text-amber-200/80">
-                {approvalMode === "DISABLED"
-                  ? "Disabled — no live order path is offered."
-                  : approvalMode === "TELEGRAM_APPROVAL"
-                    ? "Telegram approval — each order waits for your explicit reply before submission."
-                    : "Automatic — orders would submit without a per-order confirmation."}
-              </p>
-            </div>
-
-            <div className="flex flex-col gap-3 sm:min-w-[13rem]">
-              <label className="field-label whitespace-nowrap">
-                Live broker
-                <select
-                  disabled={!isAdmin}
-                  value={liveBroker}
-                  onChange={(event) => onChange("live_broker", event.target.value)}
-                  className="field-input mt-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono text-sm"
-                >
-                  <option value="NONE">None selected</option>
-                  <option value="UPSTOX">Upstox</option>
-                  <option value="FIRSTOCK">Firstock</option>
-                </select>
-              </label>
-
-              <label className="field-label whitespace-nowrap">
-                Approval mode
-                <select
-                  disabled={!isAdmin}
-                  value={approvalMode}
-                  onChange={(event) => onChange("execution_approval_mode", event.target.value)}
-                  className="field-input mt-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono text-sm"
-                >
-                  <option value="DISABLED">Disabled</option>
-                  <option value="TELEGRAM_APPROVAL">Telegram approval</option>
-                  <option value="AUTOMATIC">Automatic</option>
-                </select>
-              </label>
-            </div>
-          </div>
-        </div>
-
-        {/* Intraday Leverage Option */}
-        <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-4 sm:p-5">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs font-bold text-emerald-300 border border-emerald-500/30">
-                  Broker Margin (4x – 5x)
-                </span>
-                <h4 className="text-sm font-semibold text-white">Intraday Broker Leverage</h4>
-              </div>
-              <p className="mt-1.5 text-xs leading-5 text-slate-300">
-                Upstox and Firstock provide 4x–5x leverage for intraday equity MIS orders. When enabled, exposure capacity calculates with 5x buying power while respecting your fixed Stop Loss risk amount.
-              </p>
-            </div>
-
-            <label className="flex items-center gap-3 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                disabled={!isAdmin}
-                checked={isLeverageEnabled}
-                onChange={(e) => onChange("intraday_leverage_enabled", e.target.checked ? "true" : "false")}
-                className="h-5 w-5 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500"
-              />
-              <span className="text-xs font-semibold text-slate-200 whitespace-nowrap">
-                {isLeverageEnabled ? "5x Leverage ACTIVE" : "1x Cash Only"}
-              </span>
-            </label>
-          </div>
-        </div>
-
-        {/* Core Controls Grid */}
-        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-          {Object.entries(controls)
-            .filter(([key]) => !["intraday_leverage_enabled", "intraday_leverage_multiplier", "execution_approval_mode", "live_broker"].includes(key))
-            .map(([key, value]) => (
-              <label key={key} className="field-label capitalize">
-                {key.replaceAll("_", " ")}
-                <input
-                  disabled={!isAdmin}
-                  className="field-input mt-2 disabled:cursor-not-allowed disabled:opacity-50 font-mono text-sm"
-                  type={typeof value === "number" ? "number" : "text"}
-                  step="any"
-                  value={typeof value === "boolean" ? String(value) : (value ?? "")}
-                  onChange={(event) => onChange(key as keyof TradingControls, event.target.value)}
-                />
-              </label>
-            ))}
-        </div>
-
-      {isAdmin && (
-          <button className="primary-button mt-4" type="submit">
-            <SlidersHorizontal className="h-4 w-4" />
-            Save controls
-          </button>
-        )}
-      </form>
+      <TradingControlsForm isAdmin={isAdmin} onMessage={onMessage} />
 
       <MarketDataFeedSelector isAdmin={isAdmin} onMessage={onMessage} onNavigate={onNavigate} />
       <SecurityPanel isAdmin={isAdmin} onMessage={onMessage} />

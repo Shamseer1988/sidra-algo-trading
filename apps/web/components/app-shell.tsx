@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Activity, BellRing, Database, Radio, RefreshCw, Wifi } from "lucide-react";
 
@@ -109,16 +109,6 @@ export function AppShell() {
   async function emergencyAction(clear = false) { try { setSafety(clear ? await api.clearEmergencyStop() : await api.emergencyStop("Emergency stop engaged from trading terminal")); setMessage(clear ? "Emergency stop cleared." : "Emergency stop engaged; scanner stopped.", clear ? "success" : "info"); void load(); } catch (error) { setMessage(error instanceof Error ? error.message : "Safety action failed"); } }
   async function paperAction() { try { if (safety) setSafety(safety.paper_tracking_enabled ? await api.disablePaper() : await api.enablePaper()); setMessage("Paper-tracking setting updated."); } catch (error) { setMessage(error instanceof Error ? error.message : "Paper setting failed"); } }
   async function telegramAction() { try { setTelegram(await api.testTelegram()); setMessage("Telegram test alert sent."); } catch (error) { setMessage(error instanceof Error ? error.message : "Telegram test failed"); } }
-  async function saveControls(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (!controls) return; try { setControls(await api.updateControls(controls)); setMessage("Trading controls saved."); } catch (error) { setMessage(error instanceof Error ? error.message : "Settings save failed"); } }
-  function updateControl(key: keyof TradingControls, value: string) {
-    if (!controls) return;
-    if (key === "intraday_leverage_enabled") {
-      setControls({ ...controls, intraday_leverage_enabled: value === "true" });
-      return;
-    }
-    const numeric = ["account_capital", "risk_per_trade_percent", "maximum_daily_risk_percent", "maximum_open_positions", "maximum_open_exposure_percent", "maximum_daily_trades", "minimum_score", "minimum_rr", "volume_multiplier", "retest_tolerance_percent", "minimum_ema_spread_percent", "stop_atr_multiple", "min_stop_distance_percent", "intraday_leverage_multiplier"].includes(key);
-    setControls({ ...controls, [key]: numeric ? Number(value) : value });
-  }
   async function signOut() { await api.logout(); router.replace("/login"); router.refresh(); }
 
   if (loading) return <main className="grid min-h-screen place-items-center bg-terminal-950 text-sm text-slate-400"><RefreshCw className="mr-2 h-4 w-4 animate-spin" />Loading protected terminal…</main>;
@@ -149,7 +139,7 @@ export function AppShell() {
     case "system": content = <SystemHealthPanel overview={overview} scanner={scanner} />; break;
     case "audit": content = <SecurityPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} auditOnly />; break;
     case "liveGates": content = <LiveReadinessWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
-    case "settings": content = <SettingsPanel controls={controls} isAdmin={Boolean(isAdmin)} onSave={saveControls} onChange={updateControl} onMessage={setMessage} onNavigate={selectWorkspace} />; break;
+    case "settings": content = <SettingsPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} onNavigate={selectWorkspace} />; break;
     default: content = <UnavailableWorkspace workspace={active} />;
   }
 
