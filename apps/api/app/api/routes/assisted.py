@@ -1,4 +1,17 @@
-"""Protected paper-only assisted approval APIs."""
+"""Protected paper-only assisted approval APIs.
+
+No screen calls these any more: the Assisted Trading workspace was removed in
+the navigation restructure because the operator does not use it. The endpoints
+stay because ``trade_approval_intents`` is an audit record and this is its only
+read surface — deleting the route would leave rows nobody can see.
+
+Not to be confused with the live approval path. A Telegram ``sentinel:approve``
+callback still writes a ``TradeApprovalIntent`` here and answers "no order will
+be sent in this release"; a live order is approved through
+``LiveOrderApproval``, which is a different table, a different callback prefix
+and a different revalidation. Deleting this module would not touch that, and
+merging the two would let a paper decision reach a broker.
+"""
 
 from datetime import datetime
 

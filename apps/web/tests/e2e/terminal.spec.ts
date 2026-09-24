@@ -360,17 +360,6 @@ const MOCK_SESSIONS = [
 const MOCK_AUDIT = [
   { id: "aud-1", event_type: "auth.login_success", created_at: new Date().toISOString(), user_id: "u-1", ip_address: "127.0.0.1", message: "Admin sign-in", metadata_json: {} },
 ];
-const MOCK_ASSISTED_APPROVALS = [{
-  reference_id: "signal-assisted-001",
-  decision: "PENDING",
-  source: "WEB",
-  status: "PENDING",
-  expires_at: new Date(Date.now() + 300000).toISOString(),
-  decided_at: null,
-  risk_revalidated_at: null,
-  submission_block_reason: null,
-  created_at: new Date().toISOString(),
-}];
 const MOCK_LIVE_READINESS = {
   status: "HARD_LOCKED",
   overall_ready: false,
@@ -468,13 +457,6 @@ export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" =
   await page.route("**/api/v1/risk/summary", async (route: Route) => { await route.fulfill({ json: MOCK_RISK_SUMMARY }); });
   await page.route("**/api/v1/backtests", async (route: Route) => { await route.fulfill({ json: MOCK_BACKTESTS }); });
   await page.route("**/api/v1/oms/reconciliations", async (route: Route) => { await route.fulfill({ json: MOCK_OMS_RECONCILIATIONS }); });
-  await page.route(/\/api\/v1\/assisted\/approvals(?:\/.*)?$/, async (route: Route) => {
-    if (route.request().method() === "POST") {
-      await route.fulfill({ json: { ...MOCK_ASSISTED_APPROVALS[0], decision: "APPROVE", status: "APPROVED_PAPER_ONLY", risk_revalidated_at: new Date().toISOString(), submission_block_reason: "Live broker submission is unavailable in this release" } });
-    } else {
-      await route.fulfill({ json: MOCK_ASSISTED_APPROVALS });
-    }
-  });
   await page.route(/\/api\/v1\/live\/readiness(?:\/.*)?$/, async (route: Route) => {
     if (route.request().url().endsWith("/history")) {
       await route.fulfill({ json: [] });
@@ -713,6 +695,34 @@ const MOCK_HISTORY_TRADE_DETAIL = {
   ],
 };
 
+/**
+ * Navigate the restructured shell.
+ *
+ * Primary workspaces are in the sidebar; the views that used to be their own
+ * menu entries are now tabs inside them, and everything diagnostic lives under
+ * a collapsed "Admin & diagnostics" section. Tests say where they are going in
+ * those terms rather than clicking a label and hoping it is still top-level.
+ */
+const ADMIN_WORKSPACES = new Set([
+  "Backtesting",
+  "OMS",
+  "Shadow comparison",
+  "Live readiness",
+  "Upstox console",
+  "Firstock console",
+  "Scheduler",
+  "System health",
+  "Audit log",
+]);
+
+async function go(page: Page, workspace: string, tab?: string) {
+  if (ADMIN_WORKSPACES.has(workspace)) {
+    await page.getByRole("button", { name: "Admin & diagnostics" }).click();
+  }
+  await page.getByRole("button", { name: workspace, exact: true }).click();
+  if (tab) await page.getByRole("tab", { name: tab, exact: true }).click();
+}
+
 test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
   test("expired access token refreshes once and retries the protected request", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
@@ -769,7 +779,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText("VIEWER", { exact: true })).toBeVisible();
 
     // Navigate to Settings
-    await page.click('button:has-text("Settings")');
+    await go(page, "Settings");
 
     // A viewer sees the settings and can change none of them.
     await expect(page.locator('input[type="number"]').first()).toBeDisabled();
@@ -806,7 +816,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await page.goto("/");
 
     // Switch to Signals tab
-    await page.click('button:has-text("Signals")');
+    await go(page, "Scanner & Universe", "Signals");
     await expect(page.getByRole("heading", { name: "Signals" })).toBeVisible();
 
     // Verify both mock signals render in table
@@ -838,7 +848,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
-    await page.getByRole("button", { name: "Scanner", exact: true }).click();
+    await go(page, "Scanner & Universe", "Scanner");
     await expect(page.getByRole("heading", { name: "Scanner workspace" })).toBeVisible();
     await expect(page.getByText("NSE:RELIANCE", { exact: true }).first()).toBeVisible();
 
@@ -855,7 +865,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await page.goto("/");
 
     // Navigate to Settings
-    await page.click('button:has-text("Settings")');
+    await go(page, "Settings");
     await expect(page.getByRole("heading", { name: "Trading controls" })).toBeVisible();
 
     // What the settings actually permit, shown above the inputs that set them.
@@ -896,7 +906,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
-    await page.getByRole("button", { name: "Strategies", exact: true }).click();
+    await go(page, "Strategies");
     await expect(page.getByRole("heading", { name: "Strategies" })).toBeVisible();
     await expect(page.getByText("ORB Retest — Default · v1")).toBeVisible();
     await expect(page.getByText("25%")).toBeVisible();
@@ -908,13 +918,13 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
-    await page.getByRole("button", { name: "Orders", exact: true }).click();
+    await go(page, "Orders & Positions", "Orders");
     await expect(page.getByRole("heading", { name: "Paper orderbook" })).toBeVisible();
     await expect(page.getByText("Simulated orderbook")).toBeVisible();
     await expect(page.getByText("NSE:RELIANCE", { exact: true })).toBeVisible();
     await expect(page.getByText("₹110.25")).toBeVisible();
 
-    await page.getByRole("button", { name: "Positions", exact: true }).click();
+    await go(page, "Orders & Positions", "Positions");
     await expect(page.getByRole("heading", { name: "Paper positions", exact: true })).toBeVisible();
     await expect(page.getByText("Signal-linked paper positions")).toBeVisible();
     await expect(page.getByText("32/32")).toBeVisible();
@@ -924,9 +934,9 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
-    await page.getByRole("button", { name: "Risk Center", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Risk center", exact: true })).toBeVisible();
-    await expect(page.getByText("Verified reservation capacity gates every simulated entry.")).toBeVisible();
+    await go(page, "Risk");
+    await expect(page.getByRole("heading", { name: "Risk", exact: true })).toBeVisible();
+    await expect(page.getByText(/Reservation capacity gates every simulated entry/)).toBeVisible();
     await expect(page.getByText("₹500 / ₹1,000")).toBeVisible();
     await expect(page.getByText("1/3")).toBeVisible();
     await expect(page.getByText("₹8,768")).toBeVisible();
@@ -936,7 +946,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
-    await page.getByRole("button", { name: "Backtesting", exact: true }).click();
+    await go(page, "Backtesting");
     await expect(page.getByRole("heading", { name: "Backtesting lab", exact: true })).toBeVisible();
     await expect(page.getByText("Historical replay uses only completed candles")).toBeVisible();
     await expect(page.getByText("₹1,250").first()).toBeVisible();
@@ -945,23 +955,11 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByRole("cell", { name: "ORB Retest — Default v1" })).toBeVisible();
   });
 
-  test("5f. Assisted trading: paper-only approval is visible and cannot imply broker submission", async ({ page }) => {
-    await setupMockRoutes(page, "ADMIN");
-    await page.goto("/");
-
-    await page.getByRole("button", { name: "Assisted Trading", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Assisted trading", exact: true })).toBeVisible();
-    await expect(page.getByText("Submission boundary active.")).toBeVisible();
-    await page.getByRole("button", { name: "Approve signal-assisted-001" }).click();
-    await expect(page.getByText("No broker order was submitted.")).toBeVisible();
-    await expect(page.getByText("Approved Paper Only")).toBeVisible();
-  });
-
   test("5g. Live gates: readiness inspection preserves the hard execution lock", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
-    await page.getByRole("button", { name: "Live Gates", exact: true }).click();
+    await go(page, "Live readiness");
     await expect(page.getByRole("heading", { name: "Live readiness gates", exact: true })).toBeVisible();
     await expect(page.getByText("Live execution hard lock active.")).toBeVisible();
     await expect(page.getByText("No broker submission adapter is implemented.")).toBeVisible();
@@ -973,7 +971,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
-    await page.getByRole("button", { name: "System Health", exact: true }).click();
+    await go(page, "System health");
     await expect(page.getByRole("heading", { name: "System health", exact: true })).toBeVisible();
     await expect(page.getByText("Startup reconciliation")).toBeVisible();
     await expect(page.getByText("internal links are consistent.")).toBeVisible();
@@ -983,8 +981,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
-    // Navigate to Settings -> Security Panel
-    await page.click('button:has-text("Settings")');
+    await go(page, "Settings", "Sessions");
     await expect(page.getByRole("heading", { name: "Active sessions", exact: true })).toBeVisible();
     await expect(page.getByText("Chrome on Windows")).toBeVisible();
     await expect(page.getByText("Firefox on macOS")).toBeVisible();
@@ -1004,7 +1001,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await page.goto("/");
 
     // Navigate to Signals tab
-    await page.click('button:has-text("Signals")');
+    await go(page, "Scanner & Universe", "Signals");
 
     // Verify CSV Export link is present with correct attributes
     const exportBtn = page.locator('[data-testid="export-csv-btn"]');
@@ -1015,7 +1012,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
   test("8. History: gross, charges and net stay three separate figures", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
-    await page.click('button:has-text("History")');
+    await go(page, "History");
 
     await expect(page.getByRole("heading", { name: "History" })).toBeVisible();
     // The three must never collapse into one "P&L". A screen that showed only
@@ -1031,7 +1028,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
   test("8b. History: a broker figure is shown beside ours, never instead of it", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
-    await page.click('button:has-text("History")');
+    await go(page, "History");
 
     const day = page.locator("tr", { hasText: "2026-09-24" }).first();
     await expect(day).toContainText("₹225.00");
@@ -1042,7 +1039,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
   test("8c. History: a paper day reads as estimated charges, not as a fault", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
-    await page.click('button:has-text("History")');
+    await go(page, "History");
 
     const day = page.locator("tr", { hasText: "2026-09-23" }).first();
     await expect(day.getByText("Estimated charges")).toBeVisible();
@@ -1051,7 +1048,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
   test("8d. History: opening a trade shows the itemised cost of every fill", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
-    await page.click('button:has-text("History")');
+    await go(page, "History");
     await page.getByRole("button", { name: /^Trades \(/ }).click();
 
     await page.locator("tr", { hasText: "RELIANCE" }).first().click();
@@ -1065,11 +1062,88 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
   test("8e. History: both exports carry the chosen range", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
-    await page.click('button:has-text("History")');
+    await go(page, "History");
 
     const csv = page.getByRole("link", { name: "CSV" });
     const excel = page.getByRole("link", { name: "Excel" });
     await expect(csv).toHaveAttribute("href", /\/api\/v1\/history\/export\.csv\?from_date=\d{4}-\d{2}-\d{2}&to_date=\d{4}-\d{2}-\d{2}/);
     await expect(excel).toHaveAttribute("href", /\/api\/v1\/history\/export\.xlsx\?from_date=/);
+  });
+  test("9. Navigation: seven places to work, and nothing that renders \"unavailable\"", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    // Seven, exactly. The count is asserted rather than just the labels,
+    // because the failure this guards against is an eighth entry creeping back.
+    const primary = page.locator("aside .space-y-1").first().getByRole("button");
+    await expect(primary).toHaveText([
+      "Dashboard",
+      "Strategies",
+      "Scanner & Universe",
+      "Orders & Positions",
+      "History",
+      "Risk",
+      "Settings",
+    ]);
+
+    // The three placeholders that rendered a "planned workspace" page are gone,
+    // as are the two entries that were second copies of a screen.
+    for (const gone of ["Performance", "Automation Rules", "Users", "Assisted Trading", "Telegram", "Journal"]) {
+      await expect(page.getByRole("button", { name: gone, exact: true })).toHaveCount(0);
+    }
+    await expect(page.getByText("Soon")).toHaveCount(0);
+  });
+
+  test("9b. Navigation: diagnostics are collapsed until asked for", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: "System health", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Admin & diagnostics" }).click();
+    await expect(page.getByRole("button", { name: "System health", exact: true })).toBeVisible();
+  });
+
+  test("9c. Navigation: a tab changes the view without leaving the workspace", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await go(page, "Orders & Positions");
+    await expect(page.getByRole("tab", { name: "Orders" })).toHaveAttribute("aria-selected", "true");
+    await page.getByRole("tab", { name: "Positions" }).click();
+    await expect(page.getByRole("tab", { name: "Positions" })).toHaveAttribute("aria-selected", "true");
+    // Still in the same workspace; the tabs did not navigate away.
+    await expect(page.getByRole("tab", { name: "Orders" })).toBeVisible();
+  });
+
+  test("9d. Navigation: leaving a workspace and returning lands on its first tab", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await go(page, "Orders & Positions", "Positions");
+    await go(page, "Risk");
+    await go(page, "Orders & Positions");
+    await expect(page.getByRole("tab", { name: "Orders" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("9e. Settings: alerts moved in from their own menu entry", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await go(page, "Settings", "Alerts");
+    await expect(page.getByRole("heading", { name: "Alerts", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send test alert" })).toBeVisible();
+  });
+
+  test("9f. Risk: the live lock is stated accurately, and still cannot be switched off here", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await go(page, "Risk");
+    // The old copy claimed the live gates did not exist. They do; the lock is
+    // what holds execution shut, and no screen may offer to lift it.
+    await expect(page.getByText(/readiness, activation, approval and reconciliation gates are built/)).toBeVisible();
+    await expect(page.getByText("LIVE_TRADING_ENABLED")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Enable live trading" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Emergency stop", exact: true })).toBeVisible();
   });
 });

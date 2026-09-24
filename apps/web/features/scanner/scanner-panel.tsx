@@ -191,7 +191,7 @@ export function ScannerPanel({
           <p className="eyebrow">Scanner operations</p>
           <h2 className="page-title">Scanner workspace</h2>
           <p className="page-copy">
-            Completed-candle strategy evaluations, including accepted, watching, and rejected setups. Live execution remains unavailable.
+            Completed-candle strategy evaluations, including accepted, watching, and rejected setups. Live execution remains locked.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -381,7 +381,7 @@ function ScannerStatusStrip({
         >
           {safety.emergency_stop_active ? "Emergency stop active" : "Paper scan permitted"}
         </p>
-        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">No broker order path exists.</p>
+        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Live execution is locked; nothing here can reach a broker.</p>
       </article>
     </div>
   );

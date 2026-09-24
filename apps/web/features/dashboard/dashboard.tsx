@@ -89,7 +89,7 @@ export function Dashboard({
         <Metric label="Qualified signals" value={String(signals.length)} note={`${longSignals} long · ${shortSignals} short`} />
         <Metric label="Telegram delivery" value={String(alerted)} note="Paper alerts confirmed" />
         <Metric label="Paper tracking" value={safety.paper_tracking_enabled ? "ACTIVE" : "PAUSED"} note="Journal and notifications" />
-        <Metric label="Live execution" value="LOCKED" note="No broker order path" />
+        <Metric label="Live execution" value="LOCKED" note="Gates built; LIVE_TRADING_ENABLED refused" />
       </section>
 
       <section className="mt-4 grid gap-4 xl:grid-cols-[1.25fr_.75fr]">
@@ -123,7 +123,7 @@ export function Dashboard({
           </div>
           <div className="mt-5 space-y-3 text-sm">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-slate-500">Execution mode</span><span className="status-pill status-good">PAPER</span></div>
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-slate-500">Broker submission</span><span className="font-medium text-slate-300">Unavailable</span></div>
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-slate-500">Broker submission</span><span className="font-medium text-slate-300" title="The broker order path exists and is locked shut by LIVE_TRADING_ENABLED">Locked</span></div>
             <div className="flex items-center justify-between"><span className="text-slate-500">Emergency protection</span><span className="flex items-center gap-1.5 font-medium text-emerald-300"><ShieldCheck className="h-4 w-4" />Armed</span></div>
           </div>
         </article>

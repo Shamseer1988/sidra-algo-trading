@@ -296,7 +296,7 @@ cancellation request is not a cancellation.
 These live in the web UI and the API environment, deliberately separate so no
 single change turns live trading on.
 
-**In the web UI, under System → Settings** (admin only):
+**In the web UI, under Settings → Trading controls** (admin only):
 
 | Setting | Value | Why |
 |---|---|---|
@@ -318,14 +318,14 @@ matching address.
 Leave `LIVE_TRADING_ENABLED` alone. It is locked; setting it true stops the API
 from starting.
 
-**Then, under System → Live Gates:**
+**Then, under Admin & diagnostics → Live readiness:**
 
 1. **Reconcile** — must come back clean, and must have run within the last 15
    minutes for any order to be authorised
 2. **Activate** — arms the system; expires on its own after 8 hours, so a system
    armed this morning is not still armed unattended tonight
 
-The **Live Gates** page lists every gate and what is blocking each one, including
+The **Live readiness** page lists every gate and what is blocking each one, including
 "no live broker is selected". Use it as the checklist rather than this document —
 it reads the real state.
 
@@ -337,7 +337,7 @@ Send me:
 
 - the full output of step 8 stage 2
 - `docker compose exec api alembic current`
-- a screenshot of the **Live Gates** page
+- a screenshot of the **Live readiness** page
 
 I will then remove the `LIVE_TRADING_ENABLED` refusal in its own commit, with
 the evidence in the message. That is the correct moment: after a real order has

@@ -2,39 +2,85 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { api, type AuditLog, type BrokerControls, type UserSession } from "../../components/api";
+import { api, type AuditLog, type BrokerControls, type TelegramStatus, type UserSession } from "../../components/api";
+import { AlertsPanel } from "../controls/control-panel";
 import type { WorkspaceId } from "../../lib/navigation";
 import { formatIstTimestamp } from "../../lib/formatting";
 import { IndicatorSettingsForm } from "./indicator-settings-form";
 import { TradingControlsForm } from "./trading-controls-form";
 
+/**
+ * Settings, one tab at a time.
+ *
+ * Everything below used to be one scroll: twenty-one trading controls, eight
+ * indicator periods, the feed selector and the session list, stacked. Finding
+ * the daily loss stop meant scrolling past the market-data buttons. The tabs
+ * hold the same panels, addressed rather than hunted for.
+ *
+ * `tab` comes from the shell so the menu, the tab strip and the page cannot
+ * disagree about which one is showing.
+ */
+/** What each tab is, in one line, so the page is never a heading-less form. */
+const TAB_COPY: Record<string, { title: string; copy: string }> = {
+  trading: {
+    title: "Trading controls",
+    copy: "Every control is described, bounded and validated by the server. The effective limits at the top are what these settings actually permit once they are read together.",
+  },
+  indicators: {
+    title: "Indicator periods",
+    copy: "The ruler every strategy, the universe builder and the backtester measure with. Changing one changes what a signal means, so they take effect from the next session.",
+  },
+  alerts: {
+    title: "Alerts",
+    copy: "Where this system tells you what it did. Alerts are outbound only; the inbound controls are what let you answer an approval request from your phone.",
+  },
+  data: {
+    title: "Market data",
+    copy: "Which connector supplies completed candles to the scanner. Credentials and connection health live in the broker consoles under Admin.",
+  },
+  security: {
+    title: "Sessions",
+    copy: "Every signed-in browser, and the ability to end any of them.",
+  },
+};
+
 export function SettingsPanel({
+  tab,
   isAdmin,
   onMessage,
   onNavigate,
+  telegram,
+  onTelegram,
 }: {
+  tab: string;
   isAdmin: boolean;
   onMessage: (message: string) => void;
   onNavigate?: (id: WorkspaceId) => void;
+  telegram: TelegramStatus;
+  onTelegram: () => void;
 }) {
+  const meta = TAB_COPY[tab] ?? TAB_COPY.trading;
   return (
     <section>
       <div className="page-toolbar">
         <div>
           <p className="eyebrow">Configuration</p>
-          <h2 className="page-title">Trading controls</h2>
-          <p className="page-copy">
-            Every control below is described, bounded and validated by the server. The effective limits at the top are
-            what these settings actually permit once they are read together.
-          </p>
+          <h2 className="page-title">{meta.title}</h2>
+          <p className="page-copy">{meta.copy}</p>
         </div>
       </div>
 
-      <TradingControlsForm isAdmin={isAdmin} onMessage={onMessage} />
-      <IndicatorSettingsForm isAdmin={isAdmin} onMessage={onMessage} />
-
-      <MarketDataFeedSelector isAdmin={isAdmin} onMessage={onMessage} onNavigate={onNavigate} />
-      <SecurityPanel isAdmin={isAdmin} onMessage={onMessage} />
+      {tab === "indicators" ? (
+        <IndicatorSettingsForm isAdmin={isAdmin} onMessage={onMessage} />
+      ) : tab === "alerts" ? (
+        <AlertsPanel telegram={telegram} isAdmin={isAdmin} onTelegram={onTelegram} />
+      ) : tab === "data" ? (
+        <MarketDataFeedSelector isAdmin={isAdmin} onMessage={onMessage} onNavigate={onNavigate} />
+      ) : tab === "security" ? (
+        <SecurityPanel isAdmin={isAdmin} onMessage={onMessage} />
+      ) : (
+        <TradingControlsForm isAdmin={isAdmin} onMessage={onMessage} />
+      )}
     </section>
   );
 }

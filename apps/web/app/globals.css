@@ -145,6 +145,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
      an inline-flex utility to override, and its icon and text land on separate
      lines. */
   .terminal-table td span:not(.status-pill):not(.badge-pill) { color: var(--muted); @apply mt-1 block text-xs; }
+  /* A workspace's tabs. Underline rather than pill because the strip sits
+     directly under the page title and a row of pills there reads as a second
+     navigation menu, which is the thing this restructure removed. */
+  .workspace-tabs { border-bottom: 1px solid var(--glass-border); @apply -mt-1 mb-6 flex flex-wrap gap-1; }
+  .workspace-tab { color: var(--muted); @apply -mb-px border-b-2 border-transparent px-3 py-2 text-sm font-medium transition-colors; }
+  .workspace-tab:hover { color: var(--foreground); }
+  .workspace-tab-active { color: var(--primary); border-color: var(--primary); }
   .table-selected { background: color-mix(in srgb, var(--primary-soft) 76%, transparent); }
   .numeric { font-variant-numeric: tabular-nums; }
   .muted-cell { color: var(--muted) !important; @apply text-xs; }

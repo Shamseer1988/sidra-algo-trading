@@ -7,8 +7,6 @@ import { Activity, BellRing, Database, Radio, RefreshCw, Wifi } from "lucide-rea
 import { api, ApiError, type DataQuality, type MarketRegime, type MarketSession, type Overview, type PaperSignal, type SafetyStatus, type ScannerStatus, type TelegramStatus, type TradingControls, type User } from "./api";
 import { TerminalHeader } from "./layout/terminal-header";
 import { TerminalSidebar } from "./layout/terminal-sidebar";
-import { UnavailableWorkspace } from "../features/common/unavailable-workspace";
-import { ControlPanel } from "../features/controls/control-panel";
 import { Dashboard } from "../features/dashboard/dashboard";
 import { HistoryWorkspace } from "../features/history/history-workspace";
 import { JournalPanel } from "../features/journal/journal-panel";
@@ -16,7 +14,6 @@ import { MarketPanel } from "../features/market/market-panel";
 import { PaperExecutionPanel } from "../features/paper/paper-execution-panel";
 import { OmsWorkspace } from "../features/oms/oms-workspace";
 import { ShadowWorkspace } from "../features/shadow/shadow-workspace";
-import { AssistedTradingWorkspace } from "../features/assisted/assisted-trading-workspace";
 import { LiveReadinessWorkspace } from "../features/live/live-readiness-workspace";
 import { RiskCenter } from "../features/risk/risk-center";
 import { BacktestingWorkspace } from "../features/backtesting/backtesting-workspace";
@@ -29,7 +26,8 @@ import { SchedulerPanel } from "../features/automation/scheduler-panel";
 import { SignalsPanel } from "../features/signals/signals-panel";
 import { StrategiesPanel } from "../features/strategies/strategies-panel";
 import { SystemHealthPanel } from "../features/system/system-health-panel";
-import type { WorkspaceId } from "../lib/navigation";
+import { WorkspaceTabs } from "./layout/workspace-tabs";
+import { defaultTab, workspaceTabs, type WorkspaceId } from "../lib/navigation";
 import { CheckCircle2, XCircle, Info, X } from "lucide-react";
 
 type ToastKind = "success" | "error" | "info";
@@ -44,7 +42,12 @@ function classifyToast(text: string): ToastKind {
 
 export function AppShell() {
   const router = useRouter();
-  const [active, setActive] = useState<WorkspaceId>("overview");
+  const [active, setActive] = useState<WorkspaceId>("dashboard");
+  // The tab within the active workspace. Held here rather than inside each
+  // panel so that selecting a workspace from anywhere — the menu, the header,
+  // a cross-link — lands on its first tab rather than on whatever was last
+  // open in a screen the operator has since left.
+  const [tab, setTab] = useState<string | null>(defaultTab("dashboard"));
   const [menuOpen, setMenuOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -105,7 +108,12 @@ export function AppShell() {
     ["Application API", overview.api, Wifi], ["PostgreSQL", overview.database, Database], ["Redis", overview.redis, Activity], ["Scanner", { status: scanner.status, detail: scanner.detail }, Radio], ["Market data", overview.market_data, Radio], ["Firstock", overview.firstock, Radio], ["Telegram", overview.telegram, BellRing],
   ] as const : [], [overview, scanner]);
 
-  const selectWorkspace = (workspace: WorkspaceId) => { setActive(workspace); setMenuOpen(false); if (workspace === "market") void loadMarketState(); };
+  const selectWorkspace = (workspace: WorkspaceId) => {
+    setActive(workspace);
+    setTab(defaultTab(workspace));
+    setMenuOpen(false);
+    if (workspace === "scanner") void loadMarketState();
+  };
   async function scannerAction(action: "start" | "stop") { try { setScanner(action === "start" ? await api.startScanner() : await api.stopScanner()); setMessage(`Scanner ${action === "start" ? "start requested" : "stopped"}.`); void load(); } catch (error) { setMessage(error instanceof Error ? error.message : "Scanner control failed"); } }
   async function emergencyAction(clear = false) { try { setSafety(clear ? await api.clearEmergencyStop() : await api.emergencyStop("Emergency stop engaged from trading terminal")); setMessage(clear ? "Emergency stop cleared." : "Emergency stop engaged; scanner stopped.", clear ? "success" : "info"); void load(); } catch (error) { setMessage(error instanceof Error ? error.message : "Safety action failed"); } }
   async function paperAction() { try { if (safety) setSafety(safety.paper_tracking_enabled ? await api.disablePaper() : await api.enablePaper()); setMessage("Paper-tracking setting updated."); } catch (error) { setMessage(error instanceof Error ? error.message : "Paper setting failed"); } }
@@ -116,36 +124,66 @@ export function AppShell() {
   if (!user || !overview || !scanner || !safety || !telegram || !controls) return null;
 
   const refreshAll = () => { void load(); void loadMarketState(); };
-  const controlsPanel = <ControlPanel safety={safety} telegram={telegram} canOperate={Boolean(canOperate)} isAdmin={Boolean(isAdmin)} onEmergency={() => void emergencyAction()} onClear={() => void emergencyAction(true)} onPaper={() => void paperAction()} onTelegram={() => void telegramAction()} />;
+  const tabs = workspaceTabs[active];
+  const showing = tab ?? defaultTab(active);
+
   let content: ReactNode;
   switch (active) {
-    case "overview": content = <Dashboard services={services} scanner={scanner} safety={safety} signals={signals} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />; break;
-    case "market": content = <MarketPanel session={marketSession} quality={dataQuality} overview={overview} scanner={scanner} regime={regime} onRefresh={refreshAll} />; break;
-    case "scanner": content = <ScannerPanel scanner={scanner} safety={safety} dataQuality={dataQuality} refreshKey={scannerRevision} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />; break;
-    case "universe": content = <UniverseWorkspace canOperate={Boolean(canOperate)} onMessage={setMessage} />; break;
-    case "signals": content = <SignalsPanel signals={signals} />; break;
-    case "strategies": content = <StrategiesPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
-    case "orders": content = <PaperExecutionPanel view="orders" />; break;
-    case "positions": content = <PaperExecutionPanel view="positions" />; break;
-    case "oms": content = <OmsWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
-    case "shadow": content = <ShadowWorkspace />; break;
-    case "assisted": content = <AssistedTradingWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
-    case "risk": content = <RiskCenter safety={safety} telegram={telegram} canOperate={Boolean(canOperate)} isAdmin={Boolean(isAdmin)} onEmergency={() => void emergencyAction()} onClear={() => void emergencyAction(true)} onPaper={() => void paperAction()} onTelegram={() => void telegramAction()} />; break;
-    case "backtesting": content = <BacktestingWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
-    case "telegram": content = controlsPanel; break;
-    case "history": content = <HistoryWorkspace onMessage={setMessage} />; break;
-    case "journal": content = <JournalPanel signals={signals} />; break;
-    case "upstox": content = <UpstoxConsole isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
-    case "firstock": content = <FirstockConsole isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
-    case "scheduler": content = <SchedulerPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
-    case "system": content = <SystemHealthPanel overview={overview} scanner={scanner} />; break;
-    case "audit": content = <SecurityPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} auditOnly />; break;
-    case "liveGates": content = <LiveReadinessWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />; break;
-    case "settings": content = <SettingsPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} onNavigate={selectWorkspace} />; break;
-    default: content = <UnavailableWorkspace workspace={active} />;
+    case "dashboard":
+      content = <Dashboard services={services} scanner={scanner} safety={safety} signals={signals} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />;
+      break;
+    case "strategies":
+      content = <StrategiesPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
+      break;
+    case "scanner":
+      content =
+        showing === "universe" ? <UniverseWorkspace canOperate={Boolean(canOperate)} onMessage={setMessage} />
+        : showing === "signals" ? <SignalsPanel signals={signals} />
+        : showing === "market" ? <MarketPanel session={marketSession} quality={dataQuality} overview={overview} scanner={scanner} regime={regime} onRefresh={refreshAll} />
+        : <ScannerPanel scanner={scanner} safety={safety} dataQuality={dataQuality} refreshKey={scannerRevision} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />;
+      break;
+    case "orders":
+      content = <PaperExecutionPanel view={showing === "positions" ? "positions" : "orders"} />;
+      break;
+    case "history":
+      content = showing === "journal" ? <JournalPanel signals={signals} /> : <HistoryWorkspace onMessage={setMessage} />;
+      break;
+    case "risk":
+      content = <RiskCenter safety={safety} canOperate={Boolean(canOperate)} isAdmin={Boolean(isAdmin)} onEmergency={() => void emergencyAction()} onClear={() => void emergencyAction(true)} onPaper={() => void paperAction()} />;
+      break;
+    case "settings":
+      content = <SettingsPanel tab={showing ?? "trading"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} onNavigate={selectWorkspace} telegram={telegram} onTelegram={() => void telegramAction()} />;
+      break;
+    case "backtesting":
+      content = <BacktestingWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
+      break;
+    case "oms":
+      content = <OmsWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
+      break;
+    case "shadow":
+      content = <ShadowWorkspace />;
+      break;
+    case "liveGates":
+      content = <LiveReadinessWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
+      break;
+    case "upstox":
+      content = <UpstoxConsole isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
+      break;
+    case "firstock":
+      content = <FirstockConsole isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
+      break;
+    case "scheduler":
+      content = <SchedulerPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
+      break;
+    case "system":
+      content = <SystemHealthPanel overview={overview} scanner={scanner} />;
+      break;
+    case "audit":
+      content = <SecurityPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} auditOnly />;
+      break;
   }
 
-  return <main className="min-h-screen bg-terminal-950 text-slate-200"><TerminalSidebar active={active} collapsed={collapsed} menuOpen={menuOpen} user={user} onSelect={selectWorkspace} onToggle={() => setCollapsed((value) => !value)} onSignOut={() => void signOut()} /><div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}><TerminalHeader active={active} overview={overview} scanner={scanner} safety={safety} user={user} onOpenNavigation={() => setMenuOpen((value) => !value)} onOpenControls={() => selectWorkspace("risk")} /><div className="mx-auto max-w-[1600px] p-4 sm:p-6">{content}</div></div><Toaster toasts={toasts} onDismiss={dismissToast} /></main>;
+  return <main className="min-h-screen bg-terminal-950 text-slate-200"><TerminalSidebar active={active} collapsed={collapsed} menuOpen={menuOpen} user={user} onSelect={selectWorkspace} onToggle={() => setCollapsed((value) => !value)} onSignOut={() => void signOut()} /><div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}><TerminalHeader active={active} overview={overview} scanner={scanner} safety={safety} user={user} onOpenNavigation={() => setMenuOpen((value) => !value)} onOpenControls={() => selectWorkspace("risk")} /><div className="mx-auto max-w-[1600px] p-4 sm:p-6">{tabs && showing && <WorkspaceTabs tabs={tabs} active={showing} onSelect={setTab} />}{content}</div></div><Toaster toasts={toasts} onDismiss={dismissToast} /></main>;
 }
 
 function Toaster({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {

@@ -80,13 +80,6 @@ export function IndicatorSettingsForm({ isAdmin, onMessage }: { isAdmin: boolean
   return (
     <section className="mt-6 max-w-5xl space-y-6">
       <article className="panel p-5 sm:p-7">
-        <p className="eyebrow">Configuration</p>
-        <h3 className="mt-1 text-base font-semibold text-white">Indicator periods</h3>
-        <p className="mt-1 text-xs leading-5 text-slate-400">
-          Every strategy, the universe builder and the backtester measure with these same numbers. Changing one changes
-          what a signal means, so they take effect from the next session rather than mid-run.
-        </p>
-
         <p
           className={`mt-4 flex gap-2 rounded-md border p-3 text-xs leading-5 ${
             fromDatabase ? "border-slate-800 text-slate-400" : "border-amber-500/30 bg-amber-950/20 text-amber-100"

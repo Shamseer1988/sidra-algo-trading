@@ -1,13 +1,7 @@
 import {
   Activity,
-  AreaChart,
-  BarChart3,
-  BellRing,
-  BookOpenCheck,
-  Bot,
   BriefcaseBusiness,
   CalendarRange,
-  CandlestickChart,
   ClipboardList,
   DatabaseZap,
   Ghost,
@@ -19,121 +13,141 @@ import {
   ShieldAlert,
   SlidersHorizontal,
   TimerReset,
-  UsersRound,
   WalletCards,
   type LucideIcon,
 } from "lucide-react";
 
+/**
+ * Seven places to work, and a drawer for the instruments.
+ *
+ * The old menu had twenty-four entries across five sections, three of which
+ * rendered "unavailable", two of which were the same component behind different
+ * labels, and one of which (Telegram) was a second copy of a card already shown
+ * inside Risk. An operator looking for "where do I see what I traded" had five
+ * plausible answers and no correct one.
+ *
+ * The rule now: a primary entry is somewhere you go during a trading day. A
+ * related view that answers the same question is a tab inside it, not a
+ * sibling in the menu. Everything that exists to diagnose the machine rather
+ * than to trade moves to Admin & diagnostics, which is collapsed by default.
+ *
+ * Moving a screen into Admin changes navigation only. Every service, gate and
+ * check behind those screens keeps running exactly as before — hiding a page
+ * has never been a way to switch anything off in this system, and the readiness
+ * gates in particular are enforced server-side whether or not anybody is
+ * looking at them.
+ */
+
 export type WorkspaceId =
-  | "overview"
-  | "market"
-  | "scanner"
-  | "universe"
-  | "signals"
+  // Primary
+  | "dashboard"
   | "strategies"
+  | "scanner"
   | "orders"
-  | "positions"
+  | "history"
+  | "risk"
+  | "settings"
+  // Admin & diagnostics
+  | "backtesting"
   | "oms"
   | "shadow"
-  | "assisted"
-  | "risk"
-  | "performance"
-  | "backtesting"
-  | "journal"
-  | "history"
+  | "liveGates"
   | "upstox"
   | "firstock"
-  | "automation"
   | "scheduler"
-  | "telegram"
   | "system"
-  | "audit"
-  | "liveGates"
-  | "users"
-  | "settings";
+  | "audit";
 
-export type NavigationItem = { id: WorkspaceId; label: string; icon: LucideIcon; available: boolean };
-export type NavigationSection = { label: string; items: NavigationItem[] };
+export type NavigationItem = { id: WorkspaceId; label: string; icon: LucideIcon };
+export type NavigationSection = { label: string; items: NavigationItem[]; collapsible?: boolean };
 
 export const navigationSections: NavigationSection[] = [
   {
     label: "Trading",
     items: [
-      { id: "overview", label: "Overview", icon: Activity, available: true },
-      { id: "market", label: "Market", icon: CandlestickChart, available: true },
-      { id: "scanner", label: "Scanner", icon: RadioTower, available: true },
-      { id: "universe", label: "Universe", icon: DatabaseZap, available: true },
-      { id: "signals", label: "Signals", icon: BarChart3, available: true },
-      { id: "strategies", label: "Strategies", icon: SlidersHorizontal, available: true },
-      { id: "orders", label: "Orders", icon: ClipboardList, available: true },
-      { id: "positions", label: "Positions", icon: BriefcaseBusiness, available: true },
-      { id: "oms", label: "OMS", icon: ClipboardList, available: true },
-      { id: "shadow", label: "Shadow Mode", icon: Ghost, available: true },
-      { id: "assisted", label: "Assisted Trading", icon: Bot, available: true },
+      { id: "dashboard", label: "Dashboard", icon: Activity },
+      { id: "strategies", label: "Strategies", icon: SlidersHorizontal },
+      { id: "scanner", label: "Scanner & Universe", icon: RadioTower },
+      { id: "orders", label: "Orders & Positions", icon: BriefcaseBusiness },
+      { id: "history", label: "History", icon: CalendarRange },
+      { id: "risk", label: "Risk", icon: ShieldAlert },
+      { id: "settings", label: "Settings", icon: Settings2 },
     ],
   },
   {
-    label: "Risk & analytics",
+    label: "Admin & diagnostics",
+    collapsible: true,
     items: [
-      { id: "risk", label: "Risk Center", icon: ShieldAlert, available: true },
-      { id: "performance", label: "Performance", icon: AreaChart, available: false },
-      { id: "backtesting", label: "Backtesting", icon: LineChart, available: true },
-      { id: "history", label: "History", icon: CalendarRange, available: true },
-      { id: "journal", label: "Journal", icon: BookOpenCheck, available: true },
-    ],
-  },
-  {
-    label: "Brokers",
-    items: [
-      { id: "upstox", label: "Upstox", icon: Landmark, available: true },
-      { id: "firstock", label: "Firstock", icon: WalletCards, available: true },
-    ],
-  },
-  {
-    label: "Automation",
-    items: [
-      { id: "automation", label: "Automation Rules", icon: Bot, available: false },
-      { id: "scheduler", label: "Scheduler", icon: TimerReset, available: true },
-      { id: "telegram", label: "Telegram", icon: BellRing, available: true },
-    ],
-  },
-  {
-    label: "System",
-    items: [
-      { id: "system", label: "System Health", icon: DatabaseZap, available: true },
-      { id: "audit", label: "Audit Log", icon: ScrollText, available: true },
-      { id: "liveGates", label: "Live Gates", icon: ShieldAlert, available: true },
-      { id: "users", label: "Users", icon: UsersRound, available: false },
-      { id: "settings", label: "Settings", icon: Settings2, available: true },
+      { id: "backtesting", label: "Backtesting", icon: LineChart },
+      { id: "oms", label: "OMS", icon: ClipboardList },
+      { id: "shadow", label: "Shadow comparison", icon: Ghost },
+      { id: "liveGates", label: "Live readiness", icon: ShieldAlert },
+      { id: "upstox", label: "Upstox console", icon: Landmark },
+      { id: "firstock", label: "Firstock console", icon: WalletCards },
+      { id: "scheduler", label: "Scheduler", icon: TimerReset },
+      { id: "system", label: "System health", icon: DatabaseZap },
+      { id: "audit", label: "Audit log", icon: ScrollText },
     ],
   },
 ];
 
 export const workspaceMeta: Record<WorkspaceId, { eyebrow: string; title: string }> = {
-  overview: { eyebrow: "Operations overview", title: "Paper command center" },
-  market: { eyebrow: "Market intelligence", title: "Market state" },
-  scanner: { eyebrow: "Scanner operations", title: "Scanner workspace" },
-  universe: { eyebrow: "Daily stock selection", title: "Scan universe" },
-  signals: { eyebrow: "Paper scanner output", title: "Signals" },
-  strategies: { eyebrow: "Paper scanner configuration", title: "Strategies" },
-  orders: { eyebrow: "Execution workspace", title: "Orders" },
-  positions: { eyebrow: "Execution workspace", title: "Positions" },
-  oms: { eyebrow: "Execution lifecycle", title: "OMS operations" },
-  shadow: { eyebrow: "Zero-submission comparison", title: "Shadow mode" },
-  assisted: { eyebrow: "Controlled paper decisions", title: "Assisted trading" },
-  risk: { eyebrow: "Safety controls", title: "Risk center" },
-  performance: { eyebrow: "Analytics workspace", title: "Performance" },
-  backtesting: { eyebrow: "Research workspace", title: "Backtesting" },
+  dashboard: { eyebrow: "Operations overview", title: "Dashboard" },
+  strategies: { eyebrow: "Scanner configuration", title: "Strategies" },
+  scanner: { eyebrow: "What we are watching today", title: "Scanner & Universe" },
+  orders: { eyebrow: "Execution workspace", title: "Orders & Positions" },
   history: { eyebrow: "Trading record", title: "History" },
-  journal: { eyebrow: "Paper tracking", title: "Journal" },
-  upstox: { eyebrow: "Paper market data", title: "Upstox" },
-  firstock: { eyebrow: "Market data", title: "Firstock" },
-  automation: { eyebrow: "Automation workspace", title: "Automation rules" },
-  scheduler: { eyebrow: "Automation workspace", title: "Scheduler" },
-  telegram: { eyebrow: "Notifications", title: "Telegram" },
+  risk: { eyebrow: "Safety controls", title: "Risk" },
+  settings: { eyebrow: "Configuration", title: "Settings" },
+  backtesting: { eyebrow: "Research", title: "Backtesting" },
+  oms: { eyebrow: "Execution lifecycle", title: "OMS operations" },
+  shadow: { eyebrow: "Zero-submission comparison", title: "Shadow comparison" },
+  liveGates: { eyebrow: "Pre-live checklist", title: "Live readiness" },
+  upstox: { eyebrow: "Broker connectivity", title: "Upstox console" },
+  firstock: { eyebrow: "Broker connectivity", title: "Firstock console" },
+  scheduler: { eyebrow: "Automation", title: "Scheduler" },
   system: { eyebrow: "Infrastructure", title: "System health" },
   audit: { eyebrow: "Security & operations", title: "Audit log" },
-  liveGates: { eyebrow: "Future execution controls", title: "Live readiness gates" },
-  users: { eyebrow: "Administration", title: "Users" },
-  settings: { eyebrow: "Configuration", title: "Settings" },
 };
+
+/**
+ * The tabs inside a workspace.
+ *
+ * Each one used to be its own menu entry. They are grouped here because they
+ * answer the same question as the workspace that holds them — "what are we
+ * looking at today", "what is open", "what happened" — and a menu that lists
+ * four answers to one question makes the reader choose before they have the
+ * information to choose with.
+ *
+ * The first tab is the default, and the ids are stable because they appear in
+ * the URL hash and in tests.
+ */
+export type WorkspaceTab = { id: string; label: string };
+
+export const workspaceTabs: Partial<Record<WorkspaceId, WorkspaceTab[]>> = {
+  scanner: [
+    { id: "scanner", label: "Scanner" },
+    { id: "universe", label: "Universe" },
+    { id: "signals", label: "Signals" },
+    { id: "market", label: "Market" },
+  ],
+  orders: [
+    { id: "orders", label: "Orders" },
+    { id: "positions", label: "Positions" },
+  ],
+  history: [
+    { id: "trades", label: "Trades" },
+    { id: "journal", label: "Signal journal" },
+  ],
+  settings: [
+    { id: "trading", label: "Trading controls" },
+    { id: "indicators", label: "Indicator periods" },
+    { id: "alerts", label: "Alerts" },
+    { id: "data", label: "Market data" },
+    { id: "security", label: "Sessions" },
+  ],
+};
+
+export function defaultTab(workspace: WorkspaceId): string | null {
+  return workspaceTabs[workspace]?.[0]?.id ?? null;
+}
