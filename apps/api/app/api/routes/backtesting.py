@@ -163,7 +163,14 @@ async def _load_history(
     start_date: date,
     end_date: date,
 ) -> tuple[dict[str, list[CompletedCandle]], list[CompletedCandle]]:
-    all_tokens = list(dict.fromkeys([*instrument_tokens, app_settings.nifty_benchmark_token]))
+    # NIFTY is stored under whichever key the feed that recorded it uses:
+    # "NSE:26000" from Firstock, "NSE_INDEX|Nifty 50" from Upstox. Asking for
+    # both and letting the data decide is the only version of this that keeps
+    # working when the deployment changes feed, or holds history from both.
+    # Reading one setting would fail every backtest on the other broker with
+    # "Benchmark candles are unavailable", which names the wrong cause.
+    benchmark_keys = {app_settings.nifty_benchmark_token, app_settings.upstox_nifty_benchmark_key}
+    all_tokens = list(dict.fromkeys([*instrument_tokens, *benchmark_keys]))
     rows = list(
         (
             await session.scalars(
@@ -179,13 +186,16 @@ async def _load_history(
         ).all()
     )
     by_instrument: dict[str, list[CompletedCandle]] = {item: [] for item in instrument_tokens}
-    benchmark: list[CompletedCandle] = []
+    # Keyed per benchmark candidate rather than merged: two feeds' NIFTY series
+    # interleaved would be one series with two of every candle.
+    benchmark_series: dict[str, list[CompletedCandle]] = {key: [] for key in benchmark_keys}
     for row in rows:
         candle = _completed(row)
-        if row.instrument_token == app_settings.nifty_benchmark_token:
-            benchmark.append(candle)
+        if row.instrument_token in benchmark_series and row.instrument_token not in by_instrument:
+            benchmark_series[row.instrument_token].append(candle)
         elif row.instrument_token in by_instrument:
             by_instrument[row.instrument_token].append(candle)
+    benchmark = max(benchmark_series.values(), key=len, default=[])
     if not benchmark:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Benchmark candles are unavailable for this range"
