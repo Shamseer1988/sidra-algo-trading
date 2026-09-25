@@ -51,6 +51,7 @@ export function SettingsPanel({
   onNavigate,
   telegram,
   onTelegram,
+  onRegisterWebhook,
 }: {
   tab: string;
   isAdmin: boolean;
@@ -58,6 +59,7 @@ export function SettingsPanel({
   onNavigate?: (id: WorkspaceId) => void;
   telegram: TelegramStatus;
   onTelegram: () => void;
+  onRegisterWebhook: () => void;
 }) {
   const meta = TAB_COPY[tab] ?? TAB_COPY.trading;
   return (
@@ -73,7 +75,7 @@ export function SettingsPanel({
       {tab === "indicators" ? (
         <IndicatorSettingsForm isAdmin={isAdmin} onMessage={onMessage} />
       ) : tab === "alerts" ? (
-        <AlertsPanel telegram={telegram} isAdmin={isAdmin} onTelegram={onTelegram} />
+        <AlertsPanel telegram={telegram} isAdmin={isAdmin} onTelegram={onTelegram} onRegisterWebhook={onRegisterWebhook} />
       ) : tab === "data" ? (
         <MarketDataFeedSelector isAdmin={isAdmin} onMessage={onMessage} onNavigate={onNavigate} />
       ) : tab === "security" ? (

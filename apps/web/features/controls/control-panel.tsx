@@ -1,6 +1,6 @@
 "use client";
 
-import { BellRing, LockKeyhole, ShieldAlert } from "lucide-react";
+import { BellRing, LockKeyhole, ShieldAlert, Webhook } from "lucide-react";
 
 import type { SafetyStatus, TelegramStatus } from "../../components/api";
 
@@ -105,10 +105,12 @@ export function AlertsPanel({
   telegram,
   isAdmin,
   onTelegram,
+  onRegisterWebhook,
 }: {
   telegram: TelegramStatus;
   isAdmin: boolean;
   onTelegram: () => void;
+  onRegisterWebhook: () => void;
 }) {
   return (
     <section className="mt-6 max-w-5xl">
@@ -123,10 +125,23 @@ export function AlertsPanel({
         </p>
         <p className="mt-2 text-xs leading-5 text-slate-500">{telegram.detail}</p>
         {isAdmin && (
-          <button disabled={!telegram.configured} onClick={onTelegram} className="secondary-button mt-6">
-            <BellRing className="h-4 w-4" />
-            Send test alert
-          </button>
+          <div className="mt-6 flex flex-wrap gap-3">
+            <button disabled={!telegram.configured} onClick={onTelegram} className="secondary-button">
+              <BellRing className="h-4 w-4" />
+              Send test alert
+            </button>
+            <button disabled={!telegram.inbound_enabled} onClick={onRegisterWebhook} className="secondary-button">
+              <Webhook className="h-4 w-4" />
+              Register webhook
+            </button>
+          </div>
+        )}
+        {isAdmin && (
+          <p className="mt-3 text-xs leading-5 text-slate-500">
+            A test alert proves outbound only. Registering tells Telegram where to deliver replies and which
+            secret to send with them, so it is required after the webhook URL or secret changes — until then
+            every inbound update is rejected and approvals stop without an error anywhere in this screen.
+          </p>
         )}
       </article>
     </section>

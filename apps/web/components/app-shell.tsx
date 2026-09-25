@@ -118,6 +118,10 @@ export function AppShell() {
   async function emergencyAction(clear = false) { try { setSafety(clear ? await api.clearEmergencyStop() : await api.emergencyStop("Emergency stop engaged from trading terminal")); setMessage(clear ? "Emergency stop cleared." : "Emergency stop engaged; scanner stopped.", clear ? "success" : "info"); void load(); } catch (error) { setMessage(error instanceof Error ? error.message : "Safety action failed"); } }
   async function paperAction() { try { if (safety) setSafety(safety.paper_tracking_enabled ? await api.disablePaper() : await api.enablePaper()); setMessage("Paper-tracking setting updated."); } catch (error) { setMessage(error instanceof Error ? error.message : "Paper setting failed"); } }
   async function telegramAction() { try { setTelegram(await api.testTelegram()); setMessage("Telegram test alert sent."); } catch (error) { setMessage(error instanceof Error ? error.message : "Telegram test failed"); } }
+  // Registering tells Telegram both the URL and the secret it must send back. A
+  // secret rotated in .env without re-registering leaves every inbound update
+  // rejected with 401, which under TELEGRAM_APPROVAL blocks orders silently.
+  async function registerTelegramWebhook() { try { setTelegram(await api.registerTelegramWebhook()); setMessage("Telegram webhook registered. Inbound approvals now use the current secret."); } catch (error) { setMessage(error instanceof Error ? error.message : "Telegram webhook registration failed"); } }
   async function signOut() { await api.logout(); router.replace("/login"); router.refresh(); }
 
   if (loading) return <main className="grid min-h-screen place-items-center bg-terminal-950 text-sm text-slate-400"><RefreshCw className="mr-2 h-4 w-4 animate-spin" />Loading protected terminal…</main>;
@@ -152,7 +156,7 @@ export function AppShell() {
       content = <RiskCenter safety={safety} canOperate={Boolean(canOperate)} isAdmin={Boolean(isAdmin)} onEmergency={() => void emergencyAction()} onClear={() => void emergencyAction(true)} onPaper={() => void paperAction()} />;
       break;
     case "settings":
-      content = <SettingsPanel tab={showing ?? "trading"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} onNavigate={selectWorkspace} telegram={telegram} onTelegram={() => void telegramAction()} />;
+      content = <SettingsPanel tab={showing ?? "trading"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} onNavigate={selectWorkspace} telegram={telegram} onTelegram={() => void telegramAction()} onRegisterWebhook={() => void registerTelegramWebhook()} />;
       break;
     case "backtesting":
       content = <BacktestingWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;

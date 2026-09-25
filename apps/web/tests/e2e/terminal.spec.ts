@@ -1250,6 +1250,10 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await go(page, "Settings", "Alerts");
     await expect(page.getByRole("heading", { name: "Alerts", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Send test alert" })).toBeVisible();
+    // A test alert only proves the outbound direction. Registering is what tells
+    // Telegram where replies go and which secret to send, and without a control
+    // for it here an operator has no way to recover from a rotated secret.
+    await expect(page.getByRole("button", { name: "Register webhook" })).toBeVisible();
   });
 
   test("9f. Risk: the live lock is stated accurately, and still cannot be switched off here", async ({ page }) => {
