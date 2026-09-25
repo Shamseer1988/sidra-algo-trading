@@ -57,6 +57,7 @@ Usage, from the API container:
 import argparse
 import asyncio
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -179,6 +180,22 @@ async def stage_one(client: UpstoxOrderClient, *, instrument_key: str, price: fl
             readable = required is not None and available is not None
             print(f"  [{'OK' if readable else 'PROBLEM'}] Both figures are {'' if readable else 'not '}readable.")
             findings["margin"] = "readable" if readable else "unreadable"
+            # Readable is not the same as sufficient, and an underfunded account
+            # is refused with the same envelope as an unregistered IP or a
+            # non-algo app. Those are the first two things an operator is told
+            # to suspect, and re-registering an IP is capped at once a week, so
+            # a silent funds shortfall costs days spent fixing the wrong thing.
+            if readable:
+                try:
+                    shortfall = Decimal(str(available)) < Decimal(str(required))
+                except (InvalidOperation, ValueError, TypeError):
+                    shortfall = False
+                if shortfall:
+                    findings["margin"] = "insufficient-funds"
+                    print(f"  [PROBLEM] Available {available!r} is below the {required!r} this order needs.")
+                    print("  A placement test will be REFUSED, and the refusal looks")
+                    print("  identical to an unregistered IP or a non-algo app. Fund the")
+                    print("  account before stage 2 so a refusal means what it says.")
         except UpstoxError as exc:
             print(f"  [PROBLEM] Margin call failed: {exc}")
             print("  The live risk engine refuses any order it cannot price, so")

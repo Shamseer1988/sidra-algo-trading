@@ -323,6 +323,7 @@ docker compose exec api python scripts/verify_upstox_orders.py
 - [ ] The order book echoes our `tag`
 - [ ] Positions parse
 - [ ] The margin endpoints answer
+- [ ] `available_margin` is **positive and above** the margin the test order needs
 - [ ] The two trade-report endpoints answer
 - [ ] Nothing is flagged as a PROBLEM
 
