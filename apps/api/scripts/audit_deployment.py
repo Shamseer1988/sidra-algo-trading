@@ -153,23 +153,32 @@ async def main() -> int:
             print(f"  {field:26}: {value}")
 
         heading("6. Square-off time, per strategy")
-        from app.services.strategy_registry import STRATEGIES_KEY
+        # Parse through the application's own model rather than reaching into
+        # the stored JSON: the row is a bare list, a reader that assumed a
+        # wrapper object would be wrong, and a reader that guesses the shape
+        # right today breaks silently the next time the shape moves.
+        from app.services.strategy_registry import DEFAULT_STRATEGIES, STRATEGIES_KEY, StrategyConfiguration
 
-        strategies = await session.get(ApplicationSetting, STRATEGIES_KEY)
-        entries = (strategies.value or {}).get("strategies", []) if strategies else []
-        if not entries:
-            print(f"{WARN} No strategies are stored; the shipped defaults are in use.")
-        for entry in entries:
-            rules = entry.get("exit_rules") or {}
-            square_off = rules.get("square_off_time")
-            name = str(entry.get("name", "?"))[:34]
-            enabled = entry.get("enabled", True)
-            if square_off:
-                print(f"{OK} {name:34} {square_off}  enabled={enabled}")
-            else:
+        row = await session.get(ApplicationSetting, STRATEGIES_KEY)
+        stored_strategies = row.value if row else DEFAULT_STRATEGIES
+        print(f"  source                : {'database' if row else 'shipped defaults'}")
+        missing = 0
+        for item in stored_strategies:
+            try:
+                configuration = StrategyConfiguration.model_validate(item)
+            except Exception as exc:  # a row this cannot parse is itself the finding
                 problems += 1
-                print(f"{BAD} {name:34} NO SQUARE-OFF  enabled={enabled}")
-        if any(not (e.get("exit_rules") or {}).get("square_off_time") for e in entries):
+                print(f"{BAD} unparseable strategy row: {exc}")
+                continue
+            square_off = configuration.exit_rules.square_off_time
+            name = configuration.name[:34]
+            if square_off:
+                print(f"{OK} {name:34} {square_off}  enabled={configuration.enabled}")
+            else:
+                missing += 1
+                print(f"{BAD} {name:34} NO SQUARE-OFF  enabled={configuration.enabled}")
+        problems += missing
+        if missing:
             print("  Nothing closes a position because the session is ending.")
             print("  Live, the broker squares off MIS at its own time and price.")
 
