@@ -216,24 +216,36 @@ nano .env
 ```
 
 ```sh
-APPLICATION_MODE=LIVE
 LIVE_COMPLIANCE_APPROVED=true
 LIVE_STATIC_IP_VERIFIED=true
 ```
+
+**Leave `APPLICATION_MODE=PAPER`.** Setting it to `LIVE` stops the API from
+starting — see the note below.
 
 ```sh
 docker compose up -d api scanner-worker
 docker compose logs --tail=20 api      # confirm it restarted cleanly
 ```
 
-- [ ] Three lines set
+- [ ] Two lines set
+- [ ] `APPLICATION_MODE` still `PAPER`
 - [ ] API restarted without error
 
 > **Do not touch `LIVE_TRADING_ENABLED`.** It is locked: the API refuses to
 > start with it true, unconditionally. That is Phase 6 and it is mine.
 >
-> `APPLICATION_MODE=LIVE` while the lock is on is safe — it affects logging, the
-> status display and one readiness gate, and changes no trading behaviour.
+> **`APPLICATION_MODE=LIVE` is also refused in Release 1.** An earlier revision
+> of this checklist told you to set it; that was wrong and it crash-loops the
+> API. `config.py` rejects the value at import time
+> (`prohibit_implicit_live_mode`), so `Settings` never constructs and the
+> container restarts forever. Recover with `APPLICATION_MODE=PAPER`.
+>
+> This leaves the readiness screen's **runtime mode** gate red, and it cannot
+> currently be made green: `live_readiness.py` requires `APPLICATION_MODE` to be
+> `LIVE`, while `config.py` refuses to boot with it. Both refusals are lifted
+> together in Phase 6 — the runtime gate is not something you can clear from
+> `.env` beforehand. The other eight gates work normally.
 >
 > `LIVE_COMPLIANCE_APPROVED` and `LIVE_STATIC_IP_VERIFIED` are **attestations**.
 > The system cannot verify either and simply trusts you. Set them true only when

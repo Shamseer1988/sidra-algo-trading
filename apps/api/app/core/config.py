@@ -213,6 +213,18 @@ class Settings(BaseSettings):
     @field_validator("application_mode")
     @classmethod
     def prohibit_implicit_live_mode(cls, value: str) -> str:
+        """Refuse LIVE at import time, which crash-loops rather than degrades.
+
+        This is the second of two Release 1 refusals; the other rejects
+        ``live_trading_enabled``. Both must be lifted together at activation,
+        and note what that means until then: ``live_readiness`` asks for
+        ``application_mode == "LIVE"`` in its runtime-mode gate, so that gate
+        cannot be cleared from the environment — the only value that satisfies
+        it is the one that stops the process from starting. That is deliberate,
+        not an oversight, but it does mean an operator reading the readiness
+        screen sees a red gate with no action available. Say so wherever the
+        go-live steps are written down.
+        """
         if value == "LIVE":
             raise ValueError("LIVE application mode is not available in Release 1")
         return value

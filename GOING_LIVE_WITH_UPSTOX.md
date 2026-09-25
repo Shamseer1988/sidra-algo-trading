@@ -397,7 +397,6 @@ On each strategy card, under **How the trade is left**, set **Square off at** to
 ### In `.env` on the NAS
 
 ```sh
-APPLICATION_MODE=LIVE
 LIVE_COMPLIANCE_APPROVED=true
 LIVE_STATIC_IP_VERIFIED=true
 ```
@@ -410,6 +409,14 @@ showed the matching address.
 
 **Leave `LIVE_TRADING_ENABLED` alone.** It is locked; setting it true stops the
 API from starting.
+
+**Leave `APPLICATION_MODE` at `PAPER` too.** Release 1 refuses that value the
+same way: `prohibit_implicit_live_mode` in `apps/api/app/core/config.py` raises
+during settings construction, so the API crash-loops rather than starting in a
+degraded mode. Note the consequence — `live_readiness.py` wants
+`APPLICATION_MODE == "LIVE"` for its runtime-mode gate, so that one gate stays
+red until both refusals are lifted together at activation. It is not a
+misconfiguration on your side and there is no `.env` value that clears it.
 
 ---
 
