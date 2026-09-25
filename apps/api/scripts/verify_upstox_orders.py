@@ -113,7 +113,7 @@ async def report_egress_ip() -> str | None:
     print(f"  Outbound address: {address}")
     print("  This exact address must be the Primary (or Secondary) static IP")
     print("  registered against your app at account.upstox.com/developer/apps.")
-    print("  If it is not, every order will be rejected from 1 April 2026 onward.")
+    print("  If it is not, every order is rejected. This has been enforced since 1 April 2026.")
     return address
 
 
