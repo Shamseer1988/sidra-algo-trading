@@ -5,6 +5,10 @@ Self-hosted, paper-first NSE algorithmic trading command center.
 **Setting it up for the first time: [`SETUP_FROM_SCRATCH.md`](SETUP_FROM_SCRATCH.md)** —
 fresh clone to a running paper session.
 
+**Taking an existing deployment live: [`GO_LIVE_CHECKLIST.md`](GO_LIVE_CHECKLIST.md)** —
+tick-as-you-go, with the reasoning in
+[`GOING_LIVE_WITH_UPSTOX.md`](GOING_LIVE_WITH_UPSTOX.md).
+
 A broker order path now exists, and it is locked shut. `LIVE_TRADING_ENABLED` is
 refused by the settings validator **unconditionally**: an API given
 `LIVE_TRADING_ENABLED=true` does not start. Removing that lock is a deliberate,
