@@ -407,16 +407,15 @@ Then `docker compose up -d api scanner-worker`.
 Set it only once Step 2 is genuinely done — including 2c — and Step 8's stage 1
 showed the matching address.
 
-**Leave `LIVE_TRADING_ENABLED` alone.** It is locked; setting it true stops the
-API from starting.
+**Leave `APPLICATION_MODE` and `LIVE_TRADING_ENABLED` for last.** Both were
+refused at import until a real order proved placement worked; that evidence now
+exists and both are ordinary settings. Nothing will stop you setting them, so
+set them only when you mean it — they must be set *together*, and one without
+the other sends no order while looking armed in the environment file.
 
-**Leave `APPLICATION_MODE` at `PAPER` too.** Release 1 refuses that value the
-same way: `prohibit_implicit_live_mode` in `apps/api/app/core/config.py` raises
-during settings construction, so the API crash-loops rather than starting in a
-degraded mode. Note the consequence — `live_readiness.py` wants
-`APPLICATION_MODE == "LIVE"` for its runtime-mode gate, so that one gate stays
-red until both refusals are lifted together at activation. It is not a
-misconfiguration on your side and there is no `.env` value that clears it.
+Until then the readiness screen's runtime-mode gate reads red, which is simply
+true: the runtime is not configured for live. The other eight gates behave
+normally, and that red row turns green the moment both lines are set.
 
 ---
 

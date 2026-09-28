@@ -323,8 +323,24 @@ def test_production_configuration_fails_closed() -> None:
         auto_create_schema=False,
     )
     assert production.live_trading_enabled is False
-    with pytest.raises(ValidationError, match="LIVE_TRADING_ENABLED"):
-        settings(live_trading_enabled=True)
+
+
+def test_live_trading_is_off_by_default_but_no_longer_refused() -> None:
+    """Both live settings are now ordinary values, and default to safe ones.
+
+    They were refused at import until a real order proved placement worked.
+    Keeping the refusal after that would have meant the readiness screen's
+    runtime-mode gate could never go green: it asks for ``LIVE``, which was the
+    one value that stopped the process from starting.
+
+    What must stay true is the default. An operator who never touches these
+    gets a paper system, and reaching live has to be something they did on
+    purpose in two separate places.
+    """
+    assert settings().application_mode == "PAPER"
+    assert settings().live_trading_enabled is False
+    assert settings(application_mode="LIVE").application_mode == "LIVE"
+    assert settings(live_trading_enabled=True).live_trading_enabled is True
 
 
 def test_invalid_calendar_overrides_fail_during_configuration() -> None:

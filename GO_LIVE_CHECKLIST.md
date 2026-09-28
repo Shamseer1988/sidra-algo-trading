@@ -232,20 +232,15 @@ docker compose logs --tail=20 api      # confirm it restarted cleanly
 - [ ] `APPLICATION_MODE` still `PAPER`
 - [ ] API restarted without error
 
-> **Do not touch `LIVE_TRADING_ENABLED`.** It is locked: the API refuses to
-> start with it true, unconditionally. That is Phase 6 and it is mine.
+> **Leave `APPLICATION_MODE` and `LIVE_TRADING_ENABLED` alone here.** Both are
+> accepted values now, so nothing stops you setting them — and that is the
+> point of leaving them until Phase 6. Setting them before a real order has
+> been placed means the first thing you learn about the broker path, you learn
+> with money on it.
 >
-> **`APPLICATION_MODE=LIVE` is also refused in Release 1.** An earlier revision
-> of this checklist told you to set it; that was wrong and it crash-loops the
-> API. `config.py` rejects the value at import time
-> (`prohibit_implicit_live_mode`), so `Settings` never constructs and the
-> container restarts forever. Recover with `APPLICATION_MODE=PAPER`.
->
-> This leaves the readiness screen's **runtime mode** gate red, and it cannot
-> currently be made green: `live_readiness.py` requires `APPLICATION_MODE` to be
-> `LIVE`, while `config.py` refuses to boot with it. Both refusals are lifted
-> together in Phase 6 — the runtime gate is not something you can clear from
-> `.env` beforehand. The other eight gates work normally.
+> Until they are set, the readiness screen's **runtime mode** gate reads red.
+> That is accurate rather than broken: the runtime genuinely is not configured
+> for live. The other eight gates work normally.
 >
 > `LIVE_COMPLIANCE_APPROVED` and `LIVE_STATIC_IP_VERIFIED` are **attestations**.
 > The system cannot verify either and simply trusts you. Set them true only when
@@ -366,29 +361,64 @@ It prints what it is about to do and makes you type `PLACE A REAL ORDER`.
 
 ---
 
-# Phase 6 — I remove the lock
+# Phase 6 — The locks are off
 
-Send me all three:
+Both Release 1 refusals were removed once Phase 5.2 proved placement worked:
+the order was accepted, the order book echoed our `tag`, and the rejection came
+from the broker's risk engine rather than from authentication, the IP
+allow-list or the algo-app check. Nothing was left resting.
 
-```sh
-# 1
-docker compose exec api alembic current
+**The environment is no longer what stops an order.** From here the guard is
+the readiness gates, the approval mode and your own hand on the arming switch.
 
-# 2 — the full output of Phase 5.2, not a summary
-
-# 3
-./scripts/live-control.sh status
-```
-
-I remove the `LIVE_TRADING_ENABLED` refusal in its own commit with the evidence
-in the message. Then:
+### 6.1 Take the build
 
 ```sh
 git pull origin main
-docker compose build api scanner-worker && docker compose up -d
-# set LIVE_TRADING_ENABLED=true in .env
-docker compose up -d api scanner-worker
+docker compose build api scanner-worker web
+docker compose up -d
+docker compose exec api python scripts/audit_deployment.py
 ```
+
+Section 1 should still say **Paper** — nothing has been armed yet.
+
+### 6.2 Run a paper week first
+
+- [ ] The scanner has run a full session end to end on this build
+- [ ] `LIVE_SHADOW_ENABLED=true` has logged what live decisions would have been
+- [ ] You have read those shadow decisions and they look like trades you would
+      have wanted taken
+
+> This is the step that is easy to skip and expensive to have skipped. Nothing
+> before it has run the strategy loop against a live feed for a whole day on
+> this build. A dry-run order proves the plumbing; it says nothing about
+> whether the system would have traded sensibly.
+
+### 6.3 Arm, when you mean it
+
+```sh
+nano .env
+```
+
+```sh
+APPLICATION_MODE=LIVE
+LIVE_TRADING_ENABLED=true
+```
+
+```sh
+docker compose up -d api scanner-worker
+docker compose exec api python scripts/audit_deployment.py
+```
+
+Section 1 now reads **This deployment can place REAL ORDERS**. If it says
+*Half-configured*, only one of the two lines took effect and no order can be
+sent — fix it before continuing.
+
+- [ ] Both lines set, audit confirms armed
+- [ ] Start with the smallest thing that can still teach you something
+
+> 🛑 Money is at risk from this point. Setting one of the two lines does
+> nothing; setting both is the decision.
 
 ---
 

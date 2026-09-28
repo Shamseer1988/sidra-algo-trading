@@ -9,11 +9,12 @@ this document is for.
 **This sets up paper trading.** Every order it places is simulated. No module
 reachable from these steps can send an order to a broker.
 
-**Live trading is a separate, later, deliberate act.** The switch is held shut
-by `LIVE_TRADING_ENABLED`, which the API refuses to start with set —
-unconditionally, not conditionally on anything you configure here. Turning it on
-is `GOING_LIVE_WITH_UPSTOX.md`, and it comes after a paper record exists, not
-before.
+**Live trading is a separate, later, deliberate act.** It needs
+`APPLICATION_MODE=LIVE` and `LIVE_TRADING_ENABLED=true` set together, every
+readiness gate passing, a broker chosen in Settings, and the session armed by
+hand. Nothing in this document sets any of that, and the defaults here are
+paper. Turning it on is `GOING_LIVE_WITH_UPSTOX.md`, and it comes after a paper
+record exists, not before.
 
 Times are IST throughout. The NSE regular session is 09:15–15:30.
 

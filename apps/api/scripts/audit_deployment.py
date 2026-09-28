@@ -45,15 +45,25 @@ async def main() -> int:
     settings = get_settings()
     problems = 0
 
-    heading("1. Runtime mode and the two Release 1 locks")
-    print(f"  APPLICATION_MODE       : {settings.application_mode}")
-    print(f"  LIVE_TRADING_ENABLED   : {settings.live_trading_enabled}")
+    heading("1. Runtime mode")
+    armed = settings.application_mode == "LIVE" and settings.live_trading_enabled
+    print(f"  APPLICATION_MODE         : {settings.application_mode}")
+    print(f"  LIVE_TRADING_ENABLED     : {settings.live_trading_enabled}")
     print(f"  LIVE_COMPLIANCE_APPROVED : {settings.live_compliance_approved}")
     print(f"  LIVE_STATIC_IP_VERIFIED  : {settings.live_static_ip_verified}")
     print(f"  LIVE_SHADOW_ENABLED      : {settings.live_shadow_enabled}")
-    print("  Note: PAPER is the only value that boots in Release 1. The")
-    print("  readiness screen's runtime-mode gate therefore stays red, and no")
-    print("  .env value clears it. That is expected, not a misconfiguration.")
+    # Both are needed together, and the one that is set alone is the dangerous
+    # reading: it looks armed on this screen while nothing can reach a broker.
+    if armed:
+        print(f"{WARN} This deployment can place REAL ORDERS once the readiness")
+        print("  gates pass. Money is at risk here; the environment is no longer")
+        print("  the thing stopping it.")
+    elif settings.application_mode == "LIVE" or settings.live_trading_enabled:
+        print(f"{WARN} Half-configured: live trading needs APPLICATION_MODE=LIVE")
+        print("  and LIVE_TRADING_ENABLED=true together. As set, no order is sent,")
+        print("  and the readiness screen's runtime-mode gate stays red.")
+    else:
+        print(f"{OK} Paper. No order can reach a broker from this configuration.")
 
     heading("2. Upstox credentials (set / unset only, never values)")
     for label, present in (

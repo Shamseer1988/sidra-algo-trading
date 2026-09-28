@@ -16,6 +16,23 @@ class Settings(BaseSettings):
     api_port: int = 8000
     web_origin: AnyHttpUrl = "http://localhost:3000"
     timezone: str = "Asia/Kolkata"
+    # Live trading was refused at import until placement had been proven against
+    # the broker: an order accepted, the order book echoing our tag, the
+    # outbound IP registered, nothing left resting. That evidence now exists, so
+    # these are ordinary settings and the guard has moved to where it can see
+    # the account rather than only the environment file.
+    #
+    # What stops an order today, in the order it is checked:
+    #   * application_mode must be LIVE and live_trading_enabled true, together
+    #   * every gate in services/live_readiness must pass, including a live
+    #     reconciliation that cleared the broker account recently
+    #   * a live broker must be selected in Settings; NONE sends nothing
+    #   * execution_approval_mode decides who authorises, and under
+    #     TELEGRAM_APPROVAL an order nobody approves is refused, never queued
+    #   * the emergency stop and the daily loss limit latch the session shut
+    #
+    # The two attestations below are claims about the world that nothing here
+    # can verify. They are trusted exactly as given.
     application_mode: Literal["PAPER", "REPLAY", "LIVE"] = "PAPER"
     live_trading_enabled: bool = False
     live_compliance_approved: bool = False
@@ -164,8 +181,6 @@ class Settings(BaseSettings):
     def require_sensible_indicator_periods(self) -> "Settings":
         if self.ema_fast_period >= self.ema_slow_period:
             raise ValueError("EMA_FAST_PERIOD must be lower than EMA_SLOW_PERIOD")
-        if self.live_trading_enabled:
-            raise ValueError("LIVE_TRADING_ENABLED must remain false until live activation gates exist")
         if not self.calendar_confirmed_years:
             raise ValueError("NSE_CALENDAR_CONFIRMED_YEARS must contain at least one year")
         if self.universe_min_price >= self.universe_max_price:
@@ -208,25 +223,6 @@ class Settings(BaseSettings):
     def require_market_timezone(cls, value: str) -> str:
         if value != "Asia/Kolkata":
             raise ValueError("Trading calculations must use Asia/Kolkata")
-        return value
-
-    @field_validator("application_mode")
-    @classmethod
-    def prohibit_implicit_live_mode(cls, value: str) -> str:
-        """Refuse LIVE at import time, which crash-loops rather than degrades.
-
-        This is the second of two Release 1 refusals; the other rejects
-        ``live_trading_enabled``. Both must be lifted together at activation,
-        and note what that means until then: ``live_readiness`` asks for
-        ``application_mode == "LIVE"`` in its runtime-mode gate, so that gate
-        cannot be cleared from the environment — the only value that satisfies
-        it is the one that stops the process from starting. That is deliberate,
-        not an oversight, but it does mean an operator reading the readiness
-        screen sees a red gate with no action available. Say so wherever the
-        go-live steps are written down.
-        """
-        if value == "LIVE":
-            raise ValueError("LIVE application mode is not available in Release 1")
         return value
 
 
