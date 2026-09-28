@@ -424,18 +424,36 @@ sent — fix it before continuing.
 
 # Phase 7 — Every trading morning
 
+**Nothing to do.** The `api` container opens the session on weekdays, skipping
+NSE holidays:
+
+| IST | Job | What it does |
+|---|---|---|
+| 08:30 | `upstox_morning_renewal` | Headless Upstox login |
+| 08:45 | `live_session_open` | Reconcile → arm → start the scanner |
+
+Watch Telegram. You get a message either way:
+
+- ✅ **Live session open** — armed, scanning, with the activation expiry.
+- ⛔ **Live session NOT opened** — the step that stopped it and why. Nothing is
+  armed, the scanner did not start, and no order can be placed until resolved.
+
+The job arms only when the reconcile returns `safe_to_trade`. It has no
+"arm anyway" path.
+
+**Take over by hand** on a day it refused, or to stop:
+
 ```sh
 cd "$SIDRA"
-
-# 1. Token fresh — Upstox console says "Token Active"
-
-# 2. Reconcile against the broker
 ./scripts/live-control.sh reconcile        # safe_to_trade must be TRUE
+./scripts/live-control.sh arm "routine live session"   # WITHIN 15 MINUTES
+./scripts/live-control.sh disarm           # stop, any time
+```
 
-# 3. Arm — WITHIN 15 MINUTES of step 2
-./scripts/live-control.sh arm "routine live session"
+**Rehearse without arming** (safe during market hours):
 
-# 4. Start the scanner in the UI
+```sh
+docker compose exec api python scripts/session_open_dryrun.py
 ```
 
 **Two windows:**

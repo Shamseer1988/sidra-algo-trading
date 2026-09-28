@@ -267,6 +267,81 @@ def _make_broker_figures_job(settings: Settings):
     return _job
 
 
+async def send_session_open_alert(settings: Settings, result) -> None:
+    """Tell the operator what the scheduled open did, especially when it did nothing.
+
+    A refusal is the message that matters most: an unattended system that
+    declined to arm looks exactly like one that armed fine, right up until the
+    day ends with no trades and nobody knows why.
+    """
+    try:
+        from app.services.telegram import TelegramNotificationService
+        from app.services.telegram_config import configured_settings
+
+        effective = await configured_settings(settings)
+        if not effective.telegram_is_configured:
+            return
+
+        ist = datetime.now(UTC).astimezone(MARKET_TIMEZONE).strftime("%d-%b-%Y %I:%M %p")
+        if result.opened:
+            expiry = (
+                result.expires_at.astimezone(MARKET_TIMEZONE).strftime("%I:%M %p") if result.expires_at else "unknown"
+            )
+            text = (
+                "\u2705 <b>Live session open</b>\n\n"
+                f"\U0001f550 {ist} IST\n"
+                f"\U0001f4dd {result.detail}\n"
+                f"\u23f3 Activation expires <b>{expiry} IST</b>\n\n"
+                "<i>Real orders can now be placed. Disarm at any time to stop.</i>"
+            )
+        else:
+            findings = "".join(f"\n  \u2022 {item}" for item in result.findings[:5] if item)
+            text = (
+                "\u26d4 <b>Live session NOT opened</b>\n\n"
+                f"\U0001f550 {ist} IST\n"
+                f"\U0001f6d1 Stopped at: <b>{result.step}</b>\n"
+                f"\U0001f4dd {result.detail}{findings}\n\n"
+                "<i>Nothing is armed and the scanner was not started. "
+                "No orders can be placed until this is resolved.</i>"
+            )
+        await TelegramNotificationService(effective).send_message(text, parse_mode="HTML")
+    except Exception as exc:
+        logger.warning("scheduler.session_open_alert_failed", error=str(exc))
+
+
+def _make_session_open_job(settings: Settings, calendar: TradingCalendar):
+    """Reconcile, arm and start the scanner for today, or refuse and report.
+
+    Scheduled after the 08:30 token renewal rather than alongside it: the
+    reconcile needs a broker session, and two jobs racing for one would make
+    the failure mode depend on which finished first.
+    """
+
+    async def _job() -> None:
+        from app.services.live_session_open import open_live_session
+
+        try:
+            result = await open_live_session(settings, calendar)
+        except Exception as exc:
+            logger.exception("scheduler.session_open_unexpected_error")
+            await _persist_audit("scheduler.live_session_open_error", {"error": f"{type(exc).__name__}: {exc}"})
+            from app.services.live_session_open import OpenResult
+
+            result = OpenResult(False, "unexpected", f"{type(exc).__name__}: {exc}")
+        else:
+            await _persist_audit(
+                "scheduler.live_session_opened" if result.opened else "scheduler.live_session_refused",
+                {"step": result.step, "detail": result.detail, "findings": result.findings},
+            )
+        logger.info("scheduler.session_open_finished", opened=result.opened, step=result.step)
+        # A runtime that is not live refuses on every weekday by design; alerting
+        # on that would train the operator to ignore this channel.
+        if result.step != "runtime":
+            await send_session_open_alert(settings, result)
+
+    return _job
+
+
 def init_upstox_scheduler(settings: Settings) -> AsyncIOScheduler | None:
     """Create and configure the APScheduler instance.
 
@@ -298,6 +373,19 @@ def init_upstox_scheduler(settings: Settings) -> AsyncIOScheduler | None:
         name="Broker day figures (18:00 IST)",
         replace_existing=True,
         misfire_grace_time=7200,
+    )
+
+    # 08:45, after the 08:30 renewal has had time to finish and well before the
+    # 09:15 open. The job is inert unless the runtime is configured for live.
+    scheduler.add_job(
+        _make_session_open_job(settings, calendar),
+        trigger=CronTrigger(day_of_week="mon-fri", hour=8, minute=45, timezone="Asia/Kolkata"),
+        id="live_session_open",
+        name="Live session open (08:45 IST)",
+        replace_existing=True,
+        # Deliberately short: a container that comes up at 11:00 must not decide
+        # the morning's reconcile is still good enough to arm on.
+        misfire_grace_time=900,
     )
 
     logger.info(

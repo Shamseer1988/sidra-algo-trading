@@ -454,13 +454,50 @@ the gates; it does not drive them. Use the script:
 It asks for your admin email and password, and every action is audit-logged
 under your user.
 
-**The morning sequence:**
+**The morning sequence — automated.** The `api` container runs two scheduled
+jobs on weekdays, both skipping NSE holidays:
+
+| IST | Job | What it does |
+|---|---|---|
+| 08:30 | `upstox_morning_renewal` | Headless Upstox login; stores a fresh token |
+| 08:45 | `live_session_open` | Reconcile → arm → start the scanner |
+
+The 08:45 job aborts at the first failure and **never improvises**. It arms only
+if the reconcile comes back `safe_to_trade`. Every outcome, success or refusal,
+is sent to Telegram and written to `audit_logs` — a refusal is the message that
+matters most, because a system that declined to arm looks exactly like one that
+armed fine until the day ends with no trades.
+
+It is inert unless `APPLICATION_MODE=LIVE` **and** `LIVE_TRADING_ENABLED=true`.
+A paper deployment runs the job and does nothing, silently, by design.
+
+Arming is attributed to `automation@sidra.local`, an ADMIN row created on first
+run with `is_active=False` and a password generated and discarded on the spot.
+Both the login route and `deps.py` refuse an inactive user, so nothing can sign
+in as it — it exists so an audit row can distinguish "the schedule armed this"
+from "a person armed this".
+
+**Rehearse it without arming anything:**
+
+```sh
+docker compose exec api python scripts/session_open_dryrun.py
+```
+
+Runs the same calendar check, runtime guard, broker login and reconcile the
+scheduled job runs, then stops before the arm. Submits nothing, arms nothing,
+safe during market hours.
+
+**The manual sequence** still works and overrides nothing — use it to take over
+on a day the schedule refused, or to disarm:
 
 1. Token fresh (Step 6).
 2. `./scripts/live-control.sh reconcile` — `safe_to_trade` must be **true**.
 3. `./scripts/live-control.sh arm "…"` — **within 15 minutes** of the reconcile.
    The reconciliation goes stale after that and arming is refused.
 4. Start the scanner.
+
+Re-running the open while already armed is a no-op: it reports the existing
+window rather than stacking a second one.
 
 **About the two windows:**
 
