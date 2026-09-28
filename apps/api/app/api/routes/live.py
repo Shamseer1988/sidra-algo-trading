@@ -1,4 +1,7 @@
-"""Readiness control plane for a future live release; activation is intentionally absent."""
+"""Readiness control plane for live execution.
+
+Activation itself lives in the live-shadow router; this reports the gates.
+"""
 
 from datetime import datetime
 
@@ -44,7 +47,9 @@ def _response(report: LiveReadinessReport) -> LiveReadinessResponse:
     return LiveReadinessResponse(
         status=report.status,
         overall_ready=report.overall_ready,
-        live_execution_available=False,
+        # Every gate including the administrator activation, so this is false
+        # again the moment the arming window lapses.
+        live_execution_available=report.overall_ready,
         checked_at=report.checked_at,
         gates=[LiveGateResponse(**gate.__dict__) for gate in report.gates],
     )

@@ -520,5 +520,5 @@ class PaperScannerOrchestrator:
             instrument_token=candle.instrument_token,
             side=signal.side,
             score=signal.score,
-            live_trading_enabled=False,
+            live_trading_enabled=self._settings.live_trading_enabled,
         )

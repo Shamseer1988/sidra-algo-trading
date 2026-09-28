@@ -63,6 +63,22 @@ export function Dashboard({
   onStop: () => void;
   onRefresh: () => void;
 }) {
+  // Read from the backend rather than asserted. These were Release-1 constants,
+  // which meant the panel kept reporting a locked paper system after the lock
+  // was removed — the one thing this panel must never get wrong.
+  const armed = safety.live_execution_available;
+  const configuredLive = safety.application_mode === "LIVE" && safety.live_trading_enabled;
+  const liveValue = armed ? "OPEN" : configuredLive ? "ARMABLE" : "LOCKED";
+  const liveNote = armed
+    ? "Gates passed and armed; real orders can be sent"
+    : configuredLive
+      ? "Runtime is live; readiness gates still hold submission"
+      : `Runtime is ${safety.application_mode}; no order can reach a broker`;
+  const perimeterHeadline = armed ? "Live submission is open" : "Safety boundary intact";
+  const submissionHint = armed
+    ? "Every readiness gate passed and an administrator has armed submission. Real orders can reach the broker."
+    : "The broker order path exists but at least one readiness gate is holding it shut.";
+
   const alerted = signals.filter((signal) => signal.status === "PAPER_ALERTED").length;
   const longSignals = signals.filter((signal) => signal.side === "LONG").length;
   const shortSignals = signals.length - longSignals;
@@ -72,7 +88,7 @@ export function Dashboard({
       <div className="flex flex-col gap-4 border-b border-slate-800 pb-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <p className="eyebrow">Operations overview</p>
-          <h2 className="page-title">Paper command center</h2>
+          <h2 className="page-title">{configuredLive ? "Live command center" : "Paper command center"}</h2>
           <p className="page-copy">Live operational state from Sidra services. No generated prices or simulated broker status.</p>
         </div>
         <button onClick={onRefresh} className="secondary-button"><RefreshCw className="h-4 w-4" />Refresh state</button>
@@ -89,7 +105,7 @@ export function Dashboard({
         <Metric label="Qualified signals" value={String(signals.length)} note={`${longSignals} long · ${shortSignals} short`} />
         <Metric label="Telegram delivery" value={String(alerted)} note="Paper alerts confirmed" />
         <Metric label="Paper tracking" value={safety.paper_tracking_enabled ? "ACTIVE" : "PAUSED"} note="Journal and notifications" />
-        <Metric label="Live execution" value="LOCKED" note="Gates built; LIVE_TRADING_ENABLED refused" />
+        <Metric label="Live execution" value={liveValue} note={liveNote} />
       </section>
 
       <section className="mt-4 grid gap-4 xl:grid-cols-[1.25fr_.75fr]">
@@ -118,12 +134,14 @@ export function Dashboard({
 
         <article className="panel p-5">
           <div className="flex items-start justify-between">
-            <div><p className="eyebrow">Execution perimeter</p><h3 className="mt-1 text-base font-semibold text-white">Safety boundary intact</h3></div>
-            <LockKeyhole className="h-5 w-5 text-emerald-400" />
+            <div><p className="eyebrow">Execution perimeter</p><h3 className="mt-1 text-base font-semibold text-white">{perimeterHeadline}</h3></div>
+            {armed
+              ? <ShieldAlert className="h-5 w-5 text-rose-400" />
+              : <LockKeyhole className="h-5 w-5 text-emerald-400" />}
           </div>
           <div className="mt-5 space-y-3 text-sm">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-slate-500">Execution mode</span><span className="status-pill status-good">PAPER</span></div>
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-slate-500">Broker submission</span><span className="font-medium text-slate-300" title="The broker order path exists and is locked shut by LIVE_TRADING_ENABLED">Locked</span></div>
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-slate-500">Execution mode</span><span className={`status-pill ${armed ? "status-bad" : "status-good"}`}>{safety.application_mode}</span></div>
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3"><span className="text-slate-500">Broker submission</span><span className={`font-medium ${armed ? "text-rose-300" : "text-slate-300"}`} title={submissionHint}>{armed ? "Open" : "Locked"}</span></div>
             <div className="flex items-center justify-between"><span className="text-slate-500">Emergency protection</span><span className="flex items-center gap-1.5 font-medium text-emerald-300"><ShieldCheck className="h-4 w-4" />Armed</span></div>
           </div>
         </article>

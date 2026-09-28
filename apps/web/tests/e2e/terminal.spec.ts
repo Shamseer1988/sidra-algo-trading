@@ -26,6 +26,7 @@ const MOCK_OVERVIEW = {
 
 const MOCK_SAFETY = {
   paper_tracking_enabled: true,
+  application_mode: "PAPER",
   live_trading_enabled: false,
   live_execution_available: false,
   emergency_stop_active: false,
@@ -1073,16 +1074,38 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByRole("cell", { name: "ORB Retest — Default v1" })).toBeVisible();
   });
 
-  test("5g. Live gates: readiness inspection preserves the hard execution lock", async ({ page }) => {
+  test("5g. Live gates: readiness inspection arms nothing", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
     await go(page, "Live readiness");
     await expect(page.getByRole("heading", { name: "Live readiness gates", exact: true })).toBeVisible();
-    await expect(page.getByText("Live execution hard lock active.")).toBeVisible();
+    // A failing gate means held, and the banner must say so from the gates it
+    // read rather than from a constant that outlived the Release-1 lock.
+    await expect(page.getByText("Live submission is held shut.")).toBeVisible();
     await expect(page.getByText("No broker submission adapter is implemented.")).toBeVisible();
     await page.getByRole("button", { name: "Record review" }).click();
-    await expect(page.getByText("The live execution lock remains active.")).toBeVisible();
+    await expect(page.getByText("Recording a review arms nothing.")).toBeVisible();
+  });
+
+  test("5g2. Live gates: an armed account is not described as held shut", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/live/readiness", async (route: Route) => {
+      await route.fulfill({
+        json: {
+          ...MOCK_LIVE_READINESS,
+          status: "READY",
+          overall_ready: true,
+          live_execution_available: true,
+          gates: MOCK_LIVE_READINESS.gates.map((gate) => ({ ...gate, passed: true })),
+        },
+      });
+    });
+    await page.goto("/");
+
+    await go(page, "Live readiness");
+    await expect(page.getByText("Live submission is open.")).toBeVisible();
+    await expect(page.getByText("Live submission is held shut.")).not.toBeVisible();
   });
 
   test("5h. System health: durable startup reconciliation is observable", async ({ page }) => {
@@ -1261,12 +1284,47 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await page.goto("/");
 
     await go(page, "Risk");
-    // The old copy claimed the live gates did not exist. They do; the lock is
-    // what holds execution shut, and no screen may offer to lift it.
+    // The copy here has been wrong twice: gates that "do not exist", then a
+    // start-up refusal that no longer exists either. On a paper deployment it
+    // must say paper, and no screen may offer to lift the lock.
     await expect(page.getByText(/readiness, activation, approval and reconciliation gates are built/)).toBeVisible();
-    await expect(page.getByText("LIVE_TRADING_ENABLED")).toBeVisible();
+    await expect(page.getByText(/runs in/)).toBeVisible();
+    await expect(page.getByText(/no order can reach a broker from it/)).toBeVisible();
     await expect(page.getByRole("button", { name: "Enable live trading" })).toBeDisabled();
     await expect(page.getByRole("button", { name: "Emergency stop", exact: true })).toBeVisible();
+  });
+
+  test("9g. Risk: an armed deployment is never described as locked", async ({ page }) => {
+    // The regression that matters: a screen telling an operator their money is
+    // safe while the system can place real orders.
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/safety/status", async (route: Route) => {
+      await route.fulfill({
+        json: { ...MOCK_SAFETY, application_mode: "LIVE", live_trading_enabled: true, live_execution_available: true },
+      });
+    });
+    await page.goto("/");
+
+    await go(page, "Risk");
+    await expect(page.getByText("Open", { exact: true })).toBeVisible();
+    await expect(page.getByText(/real orders/)).toBeVisible();
+    await expect(page.getByText(/no order can reach a broker from it/)).not.toBeVisible();
+    // Still not switchable from here, armed or not.
+    await expect(page.getByRole("button", { name: "Enable live trading" })).toBeDisabled();
+  });
+
+  test("9h. Dashboard: the perimeter panel follows the runtime, not a constant", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/safety/status", async (route: Route) => {
+      await route.fulfill({
+        json: { ...MOCK_SAFETY, application_mode: "LIVE", live_trading_enabled: true, live_execution_available: true },
+      });
+    });
+    await page.goto("/");
+
+    await expect(page.getByText("Live submission is open")).toBeVisible();
+    await expect(page.getByText("Safety boundary intact")).not.toBeVisible();
+    await expect(page.getByText("Live command center")).toBeVisible();
   });
   test("10. Strategy detail: says what it is for and how the trade is left", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");

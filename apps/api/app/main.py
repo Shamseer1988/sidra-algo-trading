@@ -59,7 +59,9 @@ def security_header_values(app_env: str) -> dict[str, str]:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    logger.info("application.starting", mode=settings.application_mode, live_trading_enabled=False)
+    logger.info(
+        "application.starting", mode=settings.application_mode, live_trading_enabled=settings.live_trading_enabled
+    )
     if settings.auto_create_schema and settings.app_env == "development":
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)

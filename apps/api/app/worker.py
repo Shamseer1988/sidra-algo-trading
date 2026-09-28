@@ -75,7 +75,9 @@ async def run() -> None:
     market_data_backoff = RestartBackoff()
     loop_backoff = RestartBackoff(maximum_seconds=30)
     calendar = TradingCalendar.from_settings(settings)
-    logger.info("scanner.worker_started", mode=settings.application_mode, live_trading_enabled=False)
+    logger.info(
+        "scanner.worker_started", mode=settings.application_mode, live_trading_enabled=settings.live_trading_enabled
+    )
     await _publish_worker_state(redis, "RUNNING", "Scanner worker supervisor started", 0)
     try:
         while True:
