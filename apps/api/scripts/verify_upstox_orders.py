@@ -261,7 +261,48 @@ async def stage_one(client: UpstoxOrderClient, *, instrument_key: str, price: fl
     return findings
 
 
-async def stage_two(client: UpstoxOrderClient, *, instrument_key: str, price: float, quantity: int) -> str:
+# A cancel is refused once an order is terminal, which includes the ordinary
+# outcome of this test: a limit price outside the circuit band is rejected by
+# the broker's risk engine before it ever rests on the book.
+ALREADY_OVER = {"rejected", "cancelled", "canceled"}
+
+
+async def report_uncancelled(client: UpstoxOrderClient, order_id: str) -> None:
+    """Say what a refused cancel actually means, instead of assuming the worst.
+
+    "Could not cancel" reads as an emergency, and sometimes is one. But the
+    same refusal is the correct and expected answer for an order that was
+    rejected on arrival, and telling an operator to go cancel something that
+    does not exist teaches them to discount the warning for the time it is
+    real. So read the order and report which case this is.
+    """
+    try:
+        details = await client.order_details(order_id)
+    except UpstoxError as exc:
+        print(f"  [WARN] The order could not be read either: {exc}")
+        print("  Treat it as live: CANCEL IT BY HAND IN THE UPSTOX APP NOW.")
+        return
+    status = str(details.get("status") or "").strip().lower()
+    filled = details.get("filled_quantity") or 0
+    message = str(details.get("status_message") or "").strip()
+    print(f"  Order status: {status or 'unknown'}, filled {filled}.")
+    if message:
+        print(f"  Broker said: {message}")
+    if filled:
+        print("  [PROBLEM] This order FILLED, so cancelling is no longer the remedy.")
+        print("  You are holding a position. Square it off by hand in the Upstox app now.")
+        return
+    if status in ALREADY_OVER:
+        print("  [OK] Nothing to cancel: the order was already terminal and never filled.")
+        print("  No position exists and no money moved.")
+        return
+    print("  [WARN] Neither filled nor terminal, so it may still be resting on the book.")
+    print("  CANCEL IT BY HAND IN THE UPSTOX APP NOW.")
+
+
+async def stage_two(
+    client: UpstoxOrderClient, *, instrument_key: str, price: float, quantity: int, findings: dict[str, Any]
+) -> str:
     """Place one real order, find it by our tag, cancel it. Returns a verdict."""
     client_order_id = new_client_order_id()
 
@@ -320,21 +361,30 @@ async def stage_two(client: UpstoxOrderClient, *, instrument_key: str, price: fl
     if result.status == "RESOLVED_PLACED":
         print(f"  [OK] Found by tag as {', '.join(result.broker_order_numbers)}.")
         print("  Automatic recovery from a lost placement response will work.")
+        # Stage one can only leave this undetermined on an empty order book. A
+        # placement answers it outright, and a summary that still read
+        # "UNDETERMINED" under a printed "[OK] Found by tag" would contradict
+        # itself about the one property live recovery depends on.
+        findings["tag_supported"] = True
         verdict = "confirmed"
     else:
         print(f"  [PROBLEM] {result.detail}")
         print("  Recovery from a lost response would need manual intervention.")
+        findings["tag_supported"] = False
         verdict = "tag-not-found"
 
     print("\n  Cancelling...")
+    requested = False
     for order_id in order_ids:
         try:
             await client.cancel_order(order_id)
+            requested = True
             print(f"  Cancellation requested for {order_id}.")
         except UpstoxError as exc:
-            print(f"  [WARN] Could not cancel {order_id}: {exc}")
-            print("  CANCEL IT BY HAND IN THE UPSTOX APP NOW.")
-    print("  A cancellation request is not a cancellation. Confirm in the app.")
+            print(f"  Cancel refused for {order_id}: {exc}")
+            await report_uncancelled(client, order_id)
+    if requested:
+        print("  A cancellation request is not a cancellation. Confirm in the app.")
     return verdict
 
 
@@ -362,6 +412,7 @@ async def run(arguments: argparse.Namespace) -> int:
             instrument_key=arguments.instrument_key,
             price=arguments.price,
             quantity=arguments.quantity,
+            findings=findings,
         )
 
     heading("SUMMARY")
