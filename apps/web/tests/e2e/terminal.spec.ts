@@ -1400,6 +1400,22 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText(/Real orders can now be placed/)).toBeVisible();
   });
 
+  test("9n. Risk: a refusing Arm button is visibly refusing, not just inert", async ({ page }) => {
+    // A safety control that looks clickable and does nothing teaches the
+    // operator that the screen is broken rather than that they are blocked.
+    await setupMockRoutes(page, "ADMIN");
+    await liveRuntime(page);
+    await page.goto("/");
+
+    await go(page, "Risk");
+    const armButton = page.getByRole("button", { name: "Arm live trading" });
+    await expect(armButton).toBeDisabled();
+    const opacity = await armButton.evaluate((node) => getComputedStyle(node).opacity);
+    expect(Number(opacity)).toBeLessThan(0.75);
+    const cursor = await armButton.evaluate((node) => getComputedStyle(node).cursor);
+    expect(cursor).toBe("not-allowed");
+  });
+
   test("9j. Risk: a short reason cannot arm", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await liveRuntime(page);
