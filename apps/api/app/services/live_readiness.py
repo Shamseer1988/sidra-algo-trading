@@ -190,11 +190,31 @@ async def inspect_live_readiness(session: AsyncSession, settings: Settings) -> L
     # leave the report claiming a readiness nobody evaluated.
     overall_ready = all(gate.passed for gate in gates)
     return LiveReadinessReport(
-        status="READY" if overall_ready else "HARD_LOCKED",
+        status=_status_for(gates, overall_ready),
         overall_ready=overall_ready,
         checked_at=datetime.now(UTC),
         gates=gates,
     )
+
+
+def _status_for(gates: list[LiveGate], overall_ready: bool) -> str:
+    """Three states, because two made the normal one look like a fault.
+
+    ``HARD_LOCKED`` dates from the release where the settings validators
+    refused to boot in live mode: it meant "the code will not let this happen".
+    It now fires on a correctly configured deployment every morning before
+    anybody arms, which is the ordinary resting state of the system. A label
+    that cries wolf daily teaches the operator to stop reading it.
+
+    So a runtime that is not configured for live is reported separately from
+    one that is, but is waiting on a gate.
+    """
+    if overall_ready:
+        return "READY"
+    runtime = next((gate for gate in gates if gate.key == "runtime_mode"), None)
+    if runtime is not None and not runtime.passed:
+        return "NOT_CONFIGURED"
+    return "HELD"
 
 
 def _runtime_mode_detail(settings: Settings) -> str:

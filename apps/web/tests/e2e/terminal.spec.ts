@@ -532,6 +532,64 @@ export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" =
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(MOCK_PRESETS) });
   });
 
+  await page.route("**/api/v1/live-shadow/activation", async (route: Route) => {
+    const method = route.request().method();
+    if (method === "POST") {
+      const body = route.request().postDataJSON();
+      await route.fulfill({
+        json: {
+          id: "act-1",
+          armed: true,
+          reason: body.reason,
+          expires_at: new Date(Date.now() + 8 * 3600_000).toISOString(),
+          revoked_at: null,
+          revoked_reason: null,
+          blocking_gates: [],
+        },
+      });
+    } else if (method === "DELETE") {
+      await route.fulfill({
+        json: {
+          id: "act-1",
+          armed: false,
+          reason: "",
+          expires_at: null,
+          revoked_at: new Date().toISOString(),
+          revoked_reason: "Revoked",
+          blocking_gates: [],
+        },
+      });
+    } else {
+      await route.fulfill({
+        json: {
+          id: null,
+          armed: false,
+          reason: "",
+          expires_at: null,
+          revoked_at: null,
+          revoked_reason: null,
+          blocking_gates: ["external_reconciliation"],
+        },
+      });
+    }
+  });
+
+  await page.route("**/api/v1/live-shadow/reconcile", async (route: Route) => {
+    await route.fulfill({
+      json: {
+        id: "rec-1",
+        status: "CLEAN",
+        safe_to_trade: true,
+        internal_orders: 0,
+        external_orders: 0,
+        unknown_orders: 0,
+        detail: "Broker and local state agree.",
+        findings: [],
+        created_at: new Date().toISOString(),
+      },
+    });
+  });
+
   await page.route("**/api/v1/settings/trading", async (route: Route) => {
     if (route.request().method() === "PUT") {
       const body = route.request().postDataJSON();
@@ -1279,38 +1337,133 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByRole("button", { name: "Register webhook" })).toBeVisible();
   });
 
-  test("9f. Risk: the live lock is stated accurately, and still cannot be switched off here", async ({ page }) => {
+  test("9f. Risk: a paper deployment says paper, and offers no way to arm", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
     await go(page, "Risk");
     // The copy here has been wrong twice: gates that "do not exist", then a
-    // start-up refusal that no longer exists either. On a paper deployment it
-    // must say paper, and no screen may offer to lift the lock.
-    await expect(page.getByText(/readiness, activation, approval and reconciliation gates are built/)).toBeVisible();
-    await expect(page.getByText(/runs in/)).toBeVisible();
+    // start-up refusal that no longer exists either.
     await expect(page.getByText(/no order can reach a broker from it/)).toBeVisible();
-    await expect(page.getByRole("button", { name: "Enable live trading" })).toBeDisabled();
+    // Arm is absent entirely on a paper runtime, not merely disabled.
+    await expect(page.getByRole("button", { name: "Arm live trading" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Reconcile" })).toBeDisabled();
     await expect(page.getByRole("button", { name: "Emergency stop", exact: true })).toBeVisible();
   });
+
+  const LIVE_SAFETY = {
+    application_mode: "LIVE",
+    live_trading_enabled: true,
+    live_execution_available: false,
+  };
+
+  async function liveRuntime(page: Page, overrides: Record<string, unknown> = {}) {
+    await page.route("**/api/v1/safety/status", async (route: Route) => {
+      await route.fulfill({ json: { ...MOCK_SAFETY, ...LIVE_SAFETY, ...overrides } });
+    });
+  }
 
   test("9g. Risk: an armed deployment is never described as locked", async ({ page }) => {
     // The regression that matters: a screen telling an operator their money is
     // safe while the system can place real orders.
     await setupMockRoutes(page, "ADMIN");
-    await page.route("**/api/v1/safety/status", async (route: Route) => {
+    await liveRuntime(page, { live_execution_available: true });
+    await page.goto("/");
+
+    await go(page, "Risk");
+    await expect(page.getByText("Armed", { exact: true })).toBeVisible();
+    await expect(page.getByText(/Real orders can reach the broker/)).toBeVisible();
+    await expect(page.getByText(/no order can reach a broker from it/)).not.toBeVisible();
+    // Disarm is always offered; arm is not offered while already armed.
+    await expect(page.getByRole("button", { name: "Disarm" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Arm live trading" })).toHaveCount(0);
+  });
+
+  test("9i. Risk: arming is refused until a reconciliation has passed", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await liveRuntime(page);
+    await page.goto("/");
+
+    await go(page, "Risk");
+    const armButton = page.getByRole("button", { name: "Arm live trading" });
+    // No reconciliation yet, and no reason typed: two independent reasons to refuse.
+    await expect(armButton).toBeDisabled();
+
+    await page.getByRole("button", { name: "Reconcile" }).click();
+    await expect(page.getByText(/Reconciliation passed ·/)).toBeVisible();
+    // Still refused: the reason is required and is checked separately.
+    await expect(armButton).toBeDisabled();
+
+    await page.getByPlaceholder(/at least 8 characters/).fill("first live session");
+    await expect(armButton).toBeEnabled();
+    await armButton.click();
+    await expect(page.getByText(/Real orders can now be placed/)).toBeVisible();
+  });
+
+  test("9j. Risk: a short reason cannot arm", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await liveRuntime(page);
+    await page.goto("/");
+
+    await go(page, "Risk");
+    await page.getByRole("button", { name: "Reconcile" }).click();
+    await expect(page.getByText(/Reconciliation passed ·/)).toBeVisible();
+    await page.getByPlaceholder(/at least 8 characters/).fill("oops");
+    await expect(page.getByRole("button", { name: "Arm live trading" })).toBeDisabled();
+  });
+
+  test("9k. Risk: a blocked reconciliation names the finding and refuses to arm", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await liveRuntime(page);
+    await page.route("**/api/v1/live-shadow/reconcile", async (route: Route) => {
       await route.fulfill({
-        json: { ...MOCK_SAFETY, application_mode: "LIVE", live_trading_enabled: true, live_execution_available: true },
+        json: {
+          id: "rec-2",
+          status: "BLOCKED",
+          safe_to_trade: false,
+          internal_orders: 1,
+          external_orders: 1,
+          unknown_orders: 0,
+          detail: "Trading blocked: 1 blocking (UNTRACKED_BROKER_ORDER), 0 for review.",
+          findings: [{ kind: "UNTRACKED_BROKER_ORDER", severity: "BLOCKING", detail: "Broker order 123 has no local record." }],
+          created_at: new Date().toISOString(),
+        },
       });
     });
     await page.goto("/");
 
     await go(page, "Risk");
-    await expect(page.getByText("Open", { exact: true })).toBeVisible();
-    await expect(page.getByText(/real orders/)).toBeVisible();
-    await expect(page.getByText(/no order can reach a broker from it/)).not.toBeVisible();
-    // Still not switchable from here, armed or not.
-    await expect(page.getByRole("button", { name: "Enable live trading" })).toBeDisabled();
+    await page.getByRole("button", { name: "Reconcile" }).click();
+    await expect(page.getByText(/Reconciliation blocked ·/)).toBeVisible();
+    await expect(page.getByText(/Broker order 123 has no local record/)).toBeVisible();
+    await page.getByPlaceholder(/at least 8 characters/).fill("trying anyway");
+    // A typed reason must not be able to talk past a blocked reconciliation.
+    await expect(page.getByRole("button", { name: "Arm live trading" })).toBeDisabled();
+  });
+
+  test("9l. Risk: a viewer is told arming is not theirs, and sees no arm button", async ({ page }) => {
+    await setupMockRoutes(page, "VIEWER");
+    await liveRuntime(page);
+    await page.goto("/");
+
+    await go(page, "Risk");
+    await expect(page.getByText(/Arming and disarming require an administrator/)).toBeVisible();
+    await expect(page.getByRole("button", { name: "Arm live trading" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Disarm" })).toHaveCount(0);
+  });
+
+  test("9m. Risk: the approval mode is stated where arming is decided", async ({ page }) => {
+    // Whether orders need your thumb is the difference between a system that
+    // trades while you sleep and one that does not. It lived three screens away.
+    await setupMockRoutes(page, "ADMIN");
+    await liveRuntime(page);
+    await page.route("**/api/v1/settings/trading", async (route: Route) => {
+      await route.fulfill({ json: { ...MOCK_CONTROLS, execution_approval_mode: "AUTOMATIC" } });
+    });
+    await page.goto("/");
+
+    await go(page, "Risk");
+    await expect(page.getByText(/orders are sent without asking you/)).toBeVisible();
   });
 
   test("9h. Dashboard: the perimeter panel follows the runtime, not a constant", async ({ page }) => {

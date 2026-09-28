@@ -441,8 +441,13 @@ remaining gates go green.
 Two of the nine gates are not configuration — they have to be done fresh, and
 one of them expires.
 
-**These have no buttons in the web terminal.** The Live readiness screen reports
-the gates; it does not drive them. Use the script:
+**Reconcile, Arm and Disarm are on the Risk screen** of the web terminal, and
+do exactly what the script does — the same endpoints, the same gate re-check,
+the same audit rows. Arming there requires an administrator and a reason of at
+least 8 characters, and is offered only after a reconciliation that passed and
+is still inside its 15-minute window. Disarm is always available.
+
+The script remains for SSH, and for anything scripted:
 
 ```sh
 ./scripts/live-control.sh status                       # what the gates say

@@ -153,7 +153,7 @@ export function AppShell() {
       content = showing === "journal" ? <JournalPanel signals={signals} /> : <HistoryWorkspace canOperate={Boolean(canOperate)} onMessage={setMessage} />;
       break;
     case "risk":
-      content = <RiskCenter safety={safety} canOperate={Boolean(canOperate)} isAdmin={Boolean(isAdmin)} onEmergency={() => void emergencyAction()} onClear={() => void emergencyAction(true)} onPaper={() => void paperAction()} />;
+      content = <RiskCenter safety={safety} canOperate={Boolean(canOperate)} isAdmin={Boolean(isAdmin)} onEmergency={() => void emergencyAction()} onClear={() => void emergencyAction(true)} onPaper={() => void paperAction()} onMessage={setMessage} />;
       break;
     case "settings":
       content = <SettingsPanel tab={showing ?? "trading"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} onNavigate={selectWorkspace} telegram={telegram} onTelegram={() => void telegramAction()} onRegisterWebhook={() => void registerTelegramWebhook()} />;

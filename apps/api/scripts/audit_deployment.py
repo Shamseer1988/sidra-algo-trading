@@ -143,15 +143,39 @@ async def main() -> int:
         print(f"  maximum_daily_trades        : {controls.maximum_daily_trades}")
         print(f"  maximum_open_positions      : {controls.maximum_open_positions}")
         print(f"  daily_loss_limit            : {controls.daily_loss_limit:,.2f}")
+        print(f"  daily_profit_target         : {controls.daily_profit_target:,.2f}")
         print(f"  trade window                : {controls.trade_start_time} - {controls.trade_cutoff_time}")
         print(
             f"  intraday_leverage           : {controls.intraday_leverage_enabled} x{controls.intraday_leverage_multiplier}"
         )
+        # Exposure was absent here, which meant the one ceiling that can bind
+        # before risk-based sizing was the one figure this audit could not show.
+        leverage = controls.intraday_leverage_multiplier if controls.intraday_leverage_enabled else 1.0
+        exposure = capital * controls.maximum_open_exposure_percent * leverage / 100
+        print(f"  maximum_open_exposure_pct   : {controls.maximum_open_exposure_percent}")
+        print(f"  effective exposure ceiling  : {exposure:,.2f}  (capital x pct x {leverage}x)")
+
+        # Planned risk and realised P&L are different quantities, so a loss stop
+        # above the daily budget is not wrong. It is worth stating, because an
+        # operator who chose "4% a day" has usually chosen a floor, not a budget.
+        if controls.daily_loss_limit and capital > 0:
+            loss_percent = controls.daily_loss_limit * 100 / capital
+            if abs(loss_percent - controls.maximum_daily_risk_percent) > 0.01:
+                print(f"  [NOTE] The daily loss stop is {loss_percent:.1f}% of capital while the planned")
+                print(f"         risk budget is {controls.maximum_daily_risk_percent}%. The budget stops new")
+                print("         trades; the loss stop halts the day on realised P&L.")
+
         # Capital here is what position sizing divides; a figure copied from a
         # previous account silently resizes every order.
         if capital > 0:
             print("  Check account_capital matches the funded balance: position")
             print("  sizing divides by it, so a stale figure resizes every order.")
+
+        if controls.execution_approval_mode == "TELEGRAM_APPROVAL":
+            print()
+            print("  [NOTE] Approval mode is TELEGRAM_APPROVAL: every live order")
+            print("         waits for a Telegram tap and is refused if unanswered.")
+            print("         Arming on a schedule does not make order flow automatic.")
 
         heading("5. Indicator periods: which source is actually in use")
         from app.services.indicator_settings import INDICATOR_FIELDS, INDICATOR_KEY

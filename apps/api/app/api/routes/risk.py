@@ -25,6 +25,9 @@ class PaperRiskSummary(BaseModel):
     exposure_limit: float
     current_exposure: float
     exposure_available: float
+    # Surfaced so the screen can say "₹50,000 = 100% of ₹10,000 at 5x" rather
+    # than a bare number the operator has to reverse-engineer.
+    leverage_multiplier: float
     rejected_reservations: int
 
 
@@ -47,7 +50,16 @@ async def summary(_: CurrentUser, session: DbSession, session_date: date | None 
         ).all()
     )
     daily_limit = Decimal(str(controls.account_capital)) * Decimal(str(controls.maximum_daily_risk_percent)) / 100
-    exposure_limit = Decimal(str(controls.account_capital)) * Decimal(str(controls.maximum_open_exposure_percent)) / 100
+    # Leverage belongs in this product, exactly as it does in risk_engine.py.
+    # It was missing here, so the screen reported a fifth of the ceiling the
+    # engine actually enforces -- an understatement, which reads as reassurance
+    # and is the worse direction to be wrong in.
+    leverage = (
+        Decimal(str(controls.intraday_leverage_multiplier)) if controls.intraday_leverage_enabled else Decimal("1")
+    )
+    exposure_limit = (
+        Decimal(str(controls.account_capital)) * Decimal(str(controls.maximum_open_exposure_percent)) * leverage / 100
+    )
     allocated = sum(
         (Decimal(str(item.risk_amount)) for item in reservations if item.status in {"ACTIVE", "SETTLED"}),
         start=Decimal("0"),
@@ -66,5 +78,6 @@ async def summary(_: CurrentUser, session: DbSession, session_date: date | None 
         exposure_limit=float(exposure_limit),
         current_exposure=float(exposure),
         exposure_available=float(max(Decimal("0"), exposure_limit - exposure)),
+        leverage_multiplier=float(leverage),
         rejected_reservations=sum(item.status == "REJECTED" for item in reservations),
     )

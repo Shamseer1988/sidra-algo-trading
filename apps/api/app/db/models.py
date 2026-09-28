@@ -204,7 +204,7 @@ class LiveReadinessCheck(Base):
     __table_args__ = (Index("ix_live_readiness_checks_created_status", "created_at", "status"),)
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    status: Mapped[str] = mapped_column(String(30), default="HARD_LOCKED", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="HELD", index=True)
     overall_ready: Mapped[bool] = mapped_column(default=False)
     gate_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     checked_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

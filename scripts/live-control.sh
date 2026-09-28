@@ -2,10 +2,10 @@
 #
 # Reconcile, arm and disarm live submission.
 #
-# These four operations have no buttons in the web terminal: the Live readiness
-# screen reports the gates but does not drive them. Doing them by hand means a
-# login, a cookie jar and a CSRF header, which is a bad thing to ask somebody to
-# type correctly while a market is open. Hence this.
+# The Risk screen in the web terminal now drives these too, against the same
+# endpoints. This script remains for SSH and for scripted use, where doing it
+# by hand means a login, a cookie jar and a CSRF header — a bad thing to ask
+# somebody to type correctly while a market is open. Hence this.
 #
 # It reads and writes nothing itself — every action is an HTTP call to the API
 # you already run, performed as you, and audit-logged there under your user.

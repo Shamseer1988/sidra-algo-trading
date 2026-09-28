@@ -1,6 +1,8 @@
 "use client";
 
-import { BellRing, LockKeyhole, ShieldAlert, Webhook } from "lucide-react";
+import { BellRing, ShieldAlert, Webhook } from "lucide-react";
+
+import type { ReactNode } from "react";
 
 import type { SafetyStatus, TelegramStatus } from "../../components/api";
 
@@ -24,6 +26,7 @@ export function SafetyControls({
   onEmergency,
   onClear,
   onPaper,
+  liveControls,
 }: {
   safety: SafetyStatus;
   canOperate: boolean;
@@ -31,9 +34,8 @@ export function SafetyControls({
   onEmergency: () => void;
   onClear: () => void;
   onPaper: () => void;
+  liveControls: ReactNode;
 }) {
-  const liveConfigured = safety.application_mode === "LIVE" && safety.live_trading_enabled;
-
   return (
     <div className="mt-6 grid gap-4 xl:grid-cols-3">
       <article className={`panel p-6 ${safety.emergency_stop_active ? "glass-danger" : ""}`}>
@@ -75,54 +77,7 @@ export function SafetyControls({
         )}
       </article>
 
-      <article className={`panel p-6 ${safety.live_execution_available ? "glass-danger" : ""}`}>
-        <div className="flex items-start justify-between">
-          <div>
-            <p className="eyebrow">Live trading</p>
-            <h3 className="mt-1 text-lg font-semibold text-white">
-              {safety.live_execution_available ? "Open" : liveConfigured ? "Held by the gates" : "Locked"}
-            </h3>
-          </div>
-          {safety.live_execution_available
-            ? <ShieldAlert className="h-5 w-5 text-rose-400" />
-            : <LockKeyhole className="h-5 w-5 text-slate-500" />}
-        </div>
-        {/* This card has twice described a world that had moved on: first gates
-            that "do not exist", then a start-up refusal that was removed with
-            them. Both read as reassurance, which is the worst way to be wrong.
-            So it now states the runtime it is actually running in, and keeps
-            only the part that is still true — arming does not happen here. */}
-        <p className="mt-3 text-sm leading-6 text-slate-400">
-          {safety.live_execution_available ? (
-            <>
-              Every readiness gate has passed and an administrator has armed submission, so qualifying signals can
-              reach the broker as <b className="text-rose-300">real orders</b>. The activation expires on its own;
-              disarm to end it sooner.
-            </>
-          ) : liveConfigured ? (
-            <>
-              This deployment is configured for live trading
-              (<span className="font-mono text-slate-300">{safety.application_mode}</span>, with
-              <span className="font-mono text-slate-300"> LIVE_TRADING_ENABLED</span> set). Nothing is submitted
-              until every readiness gate passes and an administrator arms a window that expires on its own.
-            </>
-          ) : (
-            <>
-              The readiness, activation, approval and reconciliation gates are built and enforced. This deployment
-              runs in <span className="font-mono text-slate-300">{safety.application_mode}</span>, so no order can
-              reach a broker from it.
-            </>
-          )}
-        </p>
-        <p className="mt-3 text-xs leading-5 text-slate-500">
-          Arming is deliberately absent from every screen. It is granted through the activation endpoint, which
-          re-checks each gate and records who armed it and why.
-        </p>
-        <button disabled className="secondary-button mt-6">
-          <LockKeyhole className="h-4 w-4" />
-          Enable live trading
-        </button>
-      </article>
+      {liveControls}
     </div>
   );
 }
