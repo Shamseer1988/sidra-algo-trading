@@ -284,3 +284,65 @@ async def test_an_empty_day_says_so() -> None:
         taken = await count_filled_entries(session, SESSION)
     assert taken.total == 0
     assert "nothing filled yet" in taken.explain(4)
+
+
+# --- one trade is one signal, not one order ---------------------------------
+#
+# Phases 1 and 3 gave a live trade three submissions: the entry, the protective
+# stop behind it, and the exit that closes it. Counting rows made a single round
+# trip consume three of the day's four trades, so the system would have stopped
+# after one complete trade and an entry -- silently, and with the operator
+# reading "4 of 4 used" after one round trip.
+
+
+async def live_submission_for(signal_id, *, status: str = "ACCEPTED", price_type: str = "MARKET") -> None:
+    async with SessionLocal() as session:
+        session.add(
+            LiveOrderSubmission(
+                client_order_id=f"sidra-{uuid4().hex[:12]}",
+                paper_signal_id=signal_id,
+                broker="UPSTOX",
+                exchange="NSE_EQ",
+                trading_symbol=TOKEN,
+                product="I",
+                price_type=price_type,
+                transaction_type="SELL",
+                quantity=10,
+                price=Decimal("100"),
+                status=status,
+                created_at=datetime(2026, 9, 24, 5, 0, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+
+async def test_an_entry_its_stop_and_its_exit_are_one_trade() -> None:
+    """The regression: three rows, one trade."""
+    signal = await new_signal()
+    await live_submission_for(signal.id, price_type="MARKET")
+    await live_submission_for(signal.id, price_type="SL-M")
+    await live_submission_for(signal.id, price_type="MARKET")
+    assert await count() == 1
+
+
+async def test_two_trades_on_the_same_signal_are_still_one() -> None:
+    signal = await new_signal()
+    for _ in range(5):
+        await live_submission_for(signal.id)
+    assert await count() == 1
+
+
+async def test_separate_signals_are_separate_trades() -> None:
+    first = await new_signal()
+    second = await new_signal()
+    await live_submission_for(first.id)
+    await live_submission_for(first.id, price_type="SL-M")
+    await live_submission_for(second.id)
+    assert await count() == 2
+
+
+async def test_an_order_with_no_signal_still_uses_the_ceiling() -> None:
+    """Excluding it would let an order placed outside a signal escape the day's limit."""
+    await live_submission(status="ACCEPTED")
+    await live_submission(status="ACCEPTED")
+    assert await count() == 2

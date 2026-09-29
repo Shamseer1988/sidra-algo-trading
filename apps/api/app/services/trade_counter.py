@@ -34,7 +34,7 @@ three paper trades deserves to know what the fourth was.
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import LiveOrderSubmission, PaperOrder
@@ -78,8 +78,9 @@ class TradeCount:
             parts.append(f"{self.paper_fills} paper entr{'y' if self.paper_fills == 1 else 'ies'} filled")
         if self.live_submissions:
             parts.append(
-                f"{self.live_submissions} live order{'' if self.live_submissions == 1 else 's'} placed "
-                "(live fills are not tracked yet, so an accepted order counts even if it did not fill)"
+                f"{self.live_submissions} live trade{'' if self.live_submissions == 1 else 's'} placed "
+                "(counted per signal, so an entry and the orders that close it are one trade; "
+                "live fills are not tracked yet, so an accepted entry counts even if it did not fill)"
             )
         detail = "; ".join(parts) if parts else "nothing filled yet"
         return f"{self.total} of {ceiling} used — {detail}."
@@ -98,8 +99,16 @@ async def count_filled_entries(session: AsyncSession, session_date: date) -> Tra
         )
     )
     start, end = session_bounds_utc(session_date)
+    # Distinct signals, not rows. One trade now writes three submissions -- the
+    # entry, the protective stop behind it, and the exit that closes it -- and
+    # counting rows made a single round trip consume three of the day's four
+    # trades. They share a signal, so the signal is the trade.
+    # Falling back to the row id rather than dropping signal-less rows: an order
+    # placed outside a signal still exists at the exchange, and excluding it
+    # would let one escape the day's ceiling entirely.
+    trade_key = func.coalesce(cast(LiveOrderSubmission.paper_signal_id, String), cast(LiveOrderSubmission.id, String))
     live = await session.scalar(
-        select(func.count(LiveOrderSubmission.id)).where(
+        select(func.count(func.distinct(trade_key))).where(
             LiveOrderSubmission.created_at >= start,
             LiveOrderSubmission.created_at < end,
             LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
