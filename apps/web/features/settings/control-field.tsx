@@ -130,6 +130,16 @@ export function ControlField({
       </p>
 
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-500">
+        {/*
+          The stored key, shown because every diagnostic names controls that way
+          and this screen names them the other way. An operator told to change
+          `maximum_daily_risk_percent` was searching a page whose only word for
+          it is "Daily planned-risk budget", and concluded the setting did not
+          exist. One vocabulary on both sides costs a line.
+        */}
+        <span className="font-mono text-slate-600" title="The name this control has in the audit script and the database">
+          {spec.key}
+        </span>
         {range && <span>Allowed: {range}</span>}
         <span className={EFFECT_TONE[spec.effect]}>
           <Clock className="mr-1 inline h-3 w-3" />
