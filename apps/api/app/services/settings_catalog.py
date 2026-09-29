@@ -202,6 +202,21 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
         effect=IMMEDIATE,
     ),
     SettingSpec(
+        key="live_entry_order_type",
+        group=ACCOUNT,
+        label="Live entry order type",
+        help=(
+            "How a live entry is priced once it is authorised. MARKET fills, and pays the spread plus "
+            "whatever the price moved while the approval was pending. LIMIT caps the price at the signal's "
+            "entry and may never fill after an approval delay, so an order you approved can produce no "
+            "position. Neither is safer in general. This does not decide whether live trading happens — "
+            "the approval mode and the readiness gates do."
+        ),
+        unit=CHOICE,
+        choices=("MARKET", "LIMIT"),
+        effect=IMMEDIATE,
+    ),
+    SettingSpec(
         key="execution_approval_mode",
         group=ACCOUNT,
         label="Approval mode",

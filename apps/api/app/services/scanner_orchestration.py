@@ -318,6 +318,31 @@ class PaperScannerOrchestrator:
             ),
         )
 
+    async def _offer_live_entry(self, signal: PaperSignal) -> None:
+        """Hand the signal to the live path, if this deployment has one.
+
+        A separate session from the paper write: submit_live_order owns its own
+        transaction so the order intent is durable before the request leaves,
+        and sharing the scanner's session would undo that guarantee.
+        """
+        if self._settings.application_mode != "LIVE" or not self._settings.live_trading_enabled:
+            return
+        from app.services.live_entry_bridge import offer_live_entry
+
+        async with SessionLocal() as session:
+            outcome = await offer_live_entry(session, self._settings, self._redis, signal)
+        if outcome.acted:
+            self._logger.info(
+                "scanner.live_entry_offered", signal_id=str(signal.id), step=outcome.step, detail=outcome.detail
+            )
+        else:
+            # Logged at warning even for an ordinary refusal: on a deployment
+            # configured for live, a signal that produced no live order is the
+            # thing an operator most needs to be able to find afterwards.
+            self._logger.warning(
+                "scanner.live_entry_refused", signal_id=str(signal.id), step=outcome.step, detail=outcome.detail
+            )
+
     async def _alert(self, signal: PaperSignal) -> None:
         telegram_settings = await configured_settings(self._settings)
         if not telegram_settings.telegram_is_configured:
@@ -500,6 +525,11 @@ class PaperScannerOrchestrator:
             ex=STATE_TTL_SECONDS,
         )
         await self._alert(signal)
+        # After the paper record and the paper alert, never before. The
+        # operator's record is the system of record and completes regardless;
+        # this call cannot raise, so a live-path failure costs the live order
+        # and nothing else.
+        await self._offer_live_entry(signal)
         await self._redis.publish(
             SCANNER_EVENTS_CHANNEL,
             json.dumps(

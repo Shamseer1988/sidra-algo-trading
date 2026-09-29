@@ -171,6 +171,12 @@ async def main() -> int:
             print("  Check account_capital matches the funded balance: position")
             print("  sizing divides by it, so a stale figure resizes every order.")
 
+        print(f"  live_entry_order_type       : {controls.live_entry_order_type}")
+        if controls.live_entry_order_type == "LIMIT":
+            print("  [NOTE] Live entries are LIMIT at the signal price. After an")
+            print("         approval delay the price may have moved past it, so an")
+            print("         order you approved can produce no position.")
+
         if controls.execution_approval_mode == "TELEGRAM_APPROVAL":
             print()
             print("  [NOTE] Approval mode is TELEGRAM_APPROVAL: every live order")

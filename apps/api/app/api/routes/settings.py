@@ -46,6 +46,13 @@ EXECUTION_APPROVAL_MODES = frozenset({"DISABLED", "TELEGRAM_APPROVAL", "AUTOMATI
 # broker is selected, which is a refusal rather than a fallback: a system that
 # picked one for you is a system that could pick the wrong one.
 LIVE_BROKERS = frozenset({"NONE", "UPSTOX", "FIRSTOCK"})
+
+# How a live entry is priced. MARKET fills, and pays the spread plus whatever
+# moved while the approval was pending; LIMIT caps the price at the signal's
+# entry and may therefore never fill after an approval delay. Neither is safer
+# in general -- one risks a worse price, the other risks no position on a signal
+# the operator approved -- so it is a setting rather than a constant.
+LIVE_ENTRY_ORDER_TYPES = frozenset({"MARKET", "LIMIT"})
 # The CAUTIOUS PAPER START profile, and the reason each number is what it is.
 #
 # The previous defaults contradicted themselves: 1% of 10,000 is 100 of planned
@@ -78,6 +85,7 @@ DEFAULT_TRADING_CONTROLS = {
     "intraday_leverage_multiplier": 5.0,
     "execution_approval_mode": "DISABLED",
     "live_broker": "NONE",
+    "live_entry_order_type": "MARKET",
     "daily_profit_target": 2000.0,
     "daily_loss_limit": 400.0,
 }
@@ -117,6 +125,9 @@ class TradingControls(BaseModel):
     # other is one where changing your mind about a broker silently changes
     # who has to approve.
     live_broker: str = Field(default="NONE")
+    # Read only when a live entry is actually built. Changing it never turns
+    # live submission on or off; that is the approval mode and the gates.
+    live_entry_order_type: str = Field(default="MARKET")
 
     # Realised-plus-open session P&L at which the day stops, in rupees. Zero
     # disables the limit. Deliberately rupees rather than a percentage: a daily
@@ -159,6 +170,14 @@ class TradingControls(BaseModel):
         normalized = value.strip().upper()
         if normalized not in LIVE_BROKERS:
             raise ValueError(f"live_broker must be one of {sorted(LIVE_BROKERS)}")
+        return normalized
+
+    @field_validator("live_entry_order_type")
+    @classmethod
+    def validate_live_entry_order_type(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in LIVE_ENTRY_ORDER_TYPES:
+            raise ValueError(f"live_entry_order_type must be one of {sorted(LIVE_ENTRY_ORDER_TYPES)}")
         return normalized
 
 
