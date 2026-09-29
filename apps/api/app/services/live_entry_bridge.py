@@ -191,6 +191,14 @@ async def _offer(
         )
         return BridgeOutcome(True, "approval_requested", f"Approval {approval.reference_id} requested.")
 
+    # Explicit rather than "everything that is not TELEGRAM_APPROVAL". The
+    # fall-through worked while AUTOMATIC was the only other value, but it
+    # failed open: a mode added later -- a review queue, a scheduled window --
+    # would have placed orders unasked on the day it was introduced. In this
+    # module an unrecognised instruction is a refusal.
+    if mode != AUTOMATIC:
+        return BridgeOutcome(False, "approval_mode", f"Unrecognised approval mode {mode!r}; nothing was sent.")
+
     decision, submission = await submit_live_order(
         session,
         settings,

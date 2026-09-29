@@ -292,3 +292,50 @@ def test_the_scanner_offers_a_live_entry_on_a_qualified_signal() -> None:
     # the operator's record must complete regardless of the live outcome.
     assert scanner.index("await self._alert(signal)") < scanner.index("await self._offer_live_entry(signal)")
     assert "from app.services.live_entry_bridge import offer_live_entry" in scanner
+
+
+# --- the AUTOMATIC path -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_automatic_does_not_claim_an_operator_approved(wiring, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under AUTOMATIC nobody approved, and saying otherwise would forge consent.
+
+    authorize_live_submission adds the operator_approval gate only under
+    TELEGRAM_APPROVAL, so passing operator_approved=True here would be a lie
+    that no gate would catch.
+    """
+    captured = {}
+
+    async def submit(*_args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(authorized=True, reason="Authorised"), SimpleNamespace(status="SENT")
+
+    wiring.controls = controls(approval="AUTOMATIC")
+    monkeypatch.setattr(module, "submit_live_order", submit)
+    await run(wiring)
+    assert "operator_approved" not in captured
+    assert captured["approval_mode"] == "AUTOMATIC"
+    assert captured["paper_signal_id"] is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["REVIEW", "SCHEDULED", "automatic_typo", ""])
+async def test_an_unrecognised_approval_mode_never_submits(wiring, mode: str) -> None:
+    """The dispatch used to fall through: anything that was not TELEGRAM_APPROVAL
+    submitted. A mode added later would have placed orders unasked."""
+    wiring.controls = controls(approval=mode)
+    outcome = await run(wiring)
+    assert outcome.acted is False
+    assert outcome.step == "approval_mode"
+    assert wiring.submitted is None
+    assert wiring.requested is None
+
+
+@pytest.mark.asyncio
+async def test_lowercase_automatic_from_a_hand_edited_row_still_submits(wiring) -> None:
+    """The settings validator upper-cases, but a row written by hand may not have."""
+    wiring.controls = controls(approval="automatic")
+    outcome = await run(wiring)
+    assert outcome.acted is True
+    assert outcome.step == "submitted"
