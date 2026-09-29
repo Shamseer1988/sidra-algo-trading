@@ -45,23 +45,48 @@ state between intent and submission.
 
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ExecutionReconciliation, OmsOrder
+from app.db.models import ExecutionReconciliation, LiveOrderSubmission, OmsOrder
 from app.services.broker_adapter import (
     OPEN_STATUSES,
     STATUS_UNREADABLE,
     TERMINAL_STATUSES,
     BrokerAdapter,
 )
+from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
+from app.services.trading_calendar import MARKET_TIMEZONE
 
 # Our own terminal states, from services/oms.py.
 OMS_TERMINAL_STATUSES = frozenset({"FILLED", "CANCELLED", "REJECTED"})
 
 BLOCKING = "BLOCKING"
 REVIEW = "REVIEW"
+
+
+@dataclass(frozen=True)
+class LocalOrder:
+    """One of our records of an order, whichever table it came from.
+
+    Two tables hold orders and they mean different things. ``OmsOrder`` models a
+    lifecycle and reaches FILLED or CANCELLED; ``LiveOrderSubmission`` records a
+    single submission attempt and is never updated again, because nothing polls
+    fills. Reading them as the same thing is how the first live order this
+    system placed came back as UNTRACKED_BROKER_ORDER: the reconciler looked
+    only at OmsOrder, and live submission writes the other table.
+
+    ``tracks_lifecycle`` keeps them apart where it matters. Applying the status
+    divergence checks to a submission would report every filled order as a
+    disagreement, because our row says ACCEPTED for ever and the broker's says
+    COMPLETE — which is not a divergence, it is the order working.
+    """
+
+    identifier: str
+    status: str
+    tracks_lifecycle: bool
 
 
 @dataclass(frozen=True)
@@ -95,6 +120,27 @@ class LiveReconciliationReport:
         review = len(self.findings) - blocking
         kinds = ", ".join(sorted({item.kind for item in self.blocking})) or "none"
         return f"Trading blocked: {blocking} blocking ({kinds}), {review} for review."[:255]
+
+
+def _plausible_range(submissions: list[LiveOrderSubmission], symbol: str) -> tuple[Decimal, Decimal]:
+    """The most long and the most short our own orders today could have left.
+
+    Counted from submissions the broker accepted, because a rejected one created
+    nothing. Gross rather than net on each side so a partially filled exit still
+    falls inside the range: we sent a buy for 143 and a sell for 143, so any net
+    from -143 to +143 is ours, whatever filled.
+    """
+    gross_long = Decimal("0")
+    gross_short = Decimal("0")
+    for submission in submissions:
+        if submission.trading_symbol != symbol or submission.status not in LIVE_PLACED_STATUSES:
+            continue
+        quantity = Decimal(str(submission.quantity or 0))
+        if submission.transaction_type == "BUY":
+            gross_long += quantity
+        elif submission.transaction_type == "SELL":
+            gross_short += quantity
+    return gross_long, gross_short
 
 
 async def reconcile_live_execution(
@@ -133,7 +179,33 @@ async def reconcile_live_execution(
         )
 
     oms_orders = list((await session.scalars(select(OmsOrder))).all())
-    by_broker_id = {order.broker_order_id: order for order in oms_orders if order.broker_order_id}
+    by_broker_id: dict[str, LocalOrder] = {
+        order.broker_order_id: LocalOrder(str(order.id), order.status, tracks_lifecycle=True)
+        for order in oms_orders
+        if order.broker_order_id
+    }
+
+    # Scoped to today because the broker's order book is. An accepted submission
+    # from last week is not missing from a book that never claimed to hold it,
+    # and unscoped rows would accumulate into a permanent wall of findings.
+    start, end = session_bounds_utc(checked_at.astimezone(MARKET_TIMEZONE).date())
+    submissions = list(
+        (
+            await session.scalars(
+                select(LiveOrderSubmission).where(
+                    LiveOrderSubmission.created_at >= start,
+                    LiveOrderSubmission.created_at < end,
+                )
+            )
+        ).all()
+    )
+    for submission in submissions:
+        for number in submission.broker_order_numbers or []:
+            # An OmsOrder wins: it is the richer record, and only one of the two
+            # can answer a question about the order's lifecycle.
+            by_broker_id.setdefault(
+                str(number), LocalOrder(str(submission.id), submission.status, tracks_lifecycle=False)
+            )
 
     unknown_orders = 0
     for order in oms_orders:
@@ -147,6 +219,21 @@ async def reconcile_live_execution(
                 detail="Submission outcome was never established; resolve from the order book before trading.",
                 oms_order_id=str(order.id),
                 broker_order_number=order.broker_order_id,
+            )
+        )
+    for submission in submissions:
+        if submission.status != "UNKNOWN":
+            continue
+        unknown_orders += 1
+        findings.append(
+            Finding(
+                kind="UNKNOWN_SUBMISSION",
+                severity=BLOCKING,
+                detail=(
+                    f"Live submission {submission.client_order_id} never learned its outcome; "
+                    "find it in the order book by that tag before trading."
+                ),
+                oms_order_id=str(submission.id),
             )
         )
 
@@ -170,7 +257,7 @@ async def reconcile_live_execution(
                         "Whether it is still working cannot be established."
                     ),
                     broker_order_number=number,
-                    oms_order_id=str(local.id) if local is not None else None,
+                    oms_order_id=local.identifier if local is not None else None,
                 )
             )
             continue
@@ -186,6 +273,12 @@ async def reconcile_live_execution(
             )
             continue
 
+        if not local.tracks_lifecycle:
+            # We know we sent it and the broker owns it from here. Our row does
+            # not move, so comparing the two statuses would manufacture a
+            # disagreement out of an order simply working.
+            continue
+
         local_terminal = local.status in OMS_TERMINAL_STATUSES
         broker_working = status in OPEN_STATUSES
         if local_terminal and broker_working:
@@ -195,7 +288,7 @@ async def reconcile_live_execution(
                     severity=BLOCKING,
                     detail=f"Local state is {local.status} but the broker still shows {status}.",
                     broker_order_number=number,
-                    oms_order_id=str(local.id),
+                    oms_order_id=local.identifier,
                 )
             )
         elif not local_terminal and status in TERMINAL_STATUSES:
@@ -205,7 +298,7 @@ async def reconcile_live_execution(
                     severity=BLOCKING,
                     detail=f"Broker reports {status} but local state is still {local.status}.",
                     broker_order_number=number,
-                    oms_order_id=str(local.id),
+                    oms_order_id=local.identifier,
                 )
             )
 
@@ -218,7 +311,7 @@ async def reconcile_live_execution(
                 severity=REVIEW,
                 detail=f"Local order {order.status} references broker order {number}, absent from the order book.",
                 broker_order_number=number,
-                oms_order_id=str(order.id),
+                oms_order_id=order.identifier,
             )
         )
 
@@ -239,13 +332,34 @@ async def reconcile_live_execution(
             continue
         if net == 0:
             continue
+
+        # What our own orders could have produced, from the submissions we know
+        # we placed today. A net inside that range is exposure this system
+        # created; outside it, something else did, and that is the case the
+        # finding was always meant to catch.
+        gross_long, gross_short = _plausible_range(submissions, symbol)
+        if net == gross_long - gross_short:
+            continue
+        if -gross_short <= net <= gross_long:
+            findings.append(
+                Finding(
+                    kind="PARTIAL_POSITION",
+                    severity=REVIEW,
+                    detail=(
+                        f"Broker holds net {net} in {symbol}; our orders today net to "
+                        f"{gross_long - gross_short}. Consistent with a partial fill."
+                    ),
+                )
+            )
+            continue
         findings.append(
             Finding(
                 kind="UNEXPLAINED_POSITION",
                 severity=BLOCKING,
                 detail=(
-                    f"Broker holds net {net} in {symbol}. Live position tracking is not implemented, "
-                    "so any open exposure is unexplained and must be reviewed before trading."
+                    f"Broker holds net {net} in {symbol}, outside anything our orders today could "
+                    f"have produced (at most {gross_long} long, {gross_short} short). "
+                    "Review before trading."
                 ),
             )
         )
@@ -255,7 +369,7 @@ async def reconcile_live_execution(
     return LiveReconciliationReport(
         status=status,
         safe_to_trade=not blocking,
-        internal_orders=len(oms_orders),
+        internal_orders=len(oms_orders) + len(submissions),
         external_orders=len(broker_orders),
         unknown_orders=unknown_orders,
         checked_at=checked_at,

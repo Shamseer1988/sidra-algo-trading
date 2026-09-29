@@ -30,14 +30,27 @@ class FakeScalars:
 
 
 class FakeSession:
-    """Only the two calls reconciliation makes: scalars() for orders, add/flush."""
+    """Only the calls reconciliation makes: scalars() for orders, add/flush.
 
-    def __init__(self, oms_orders: list[object] | None = None) -> None:
-        self._oms_orders = oms_orders or []
+    Two queries now, not one: OmsOrder rows and today's LiveOrderSubmission
+    rows. They are returned in call order, which is fragile but honest — the
+    alternative is parsing the query, and a fake that inspected SQL would break
+    on a refactor that changed nothing real.
+    """
+
+    def __init__(
+        self,
+        oms_orders: list[object] | None = None,
+        submissions: list[object] | None = None,
+    ) -> None:
+        self._results = [oms_orders or [], submissions or []]
+        self._call = 0
         self.added: list[object] = []
 
     async def scalars(self, _query: object) -> FakeScalars:
-        return FakeScalars(self._oms_orders)
+        rows = self._results[min(self._call, len(self._results) - 1)]
+        self._call += 1
+        return FakeScalars(rows)
 
     def add(self, value: object) -> None:
         self.added.append(value)
@@ -281,3 +294,143 @@ def test_report_checked_at_is_timezone_aware() -> None:
         checked_at=datetime.now(UTC),
     )
     assert report.checked_at.tzinfo is not None
+
+
+# --- our own live orders and positions --------------------------------------
+#
+# The first live order this system placed came back UNTRACKED_BROKER_ORDER and
+# the position it opened came back UNEXPLAINED_POSITION, so the account blocked
+# itself permanently after one fill and could not have placed an exit. The
+# reconciler was reading OmsOrder only, and live submission writes the other
+# table. These tests are that day, written down.
+
+
+def submission(
+    *,
+    broker_order_numbers: list[str] | None = None,
+    status: str = "ACCEPTED",
+    symbol: str = "RVNL",
+    side: str = "SELL",
+    quantity: int = 143,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid4(),
+        client_order_id="sidra-abc",
+        broker_order_numbers=broker_order_numbers or [],
+        status=status,
+        trading_symbol=symbol,
+        transaction_type=side,
+        quantity=quantity,
+        created_at=datetime.now(UTC),
+    )
+
+
+async def test_an_order_we_placed_is_not_reported_as_untracked() -> None:
+    """The regression: the reconciler looked in the wrong table."""
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(broker_order_numbers=["260929000341027"])]),
+        adapter_for(orders=[{"orderNumber": "260929000341027", "status": "COMPLETE", "tradingSymbol": "RVNL"}]),
+    )
+    assert "UNTRACKED_BROKER_ORDER" not in kinds(report)
+
+
+async def test_a_filled_order_is_not_a_status_divergence() -> None:
+    """Our submission row says ACCEPTED for ever; the broker says COMPLETE.
+
+    That is the order working, not a disagreement. Treating the two tables
+    alike would report every filled order as divergent.
+    """
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(broker_order_numbers=["1"])]),
+        adapter_for(orders=[{"orderNumber": "1", "status": "COMPLETE", "tradingSymbol": "RVNL"}]),
+    )
+    assert "STATUS_DIVERGENCE" not in kinds(report)
+    assert report.safe_to_trade is True
+
+
+async def test_an_order_nobody_placed_is_still_untracked() -> None:
+    """The check must keep catching what it was built for."""
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(broker_order_numbers=["1"])]),
+        adapter_for(orders=[{"orderNumber": "999", "status": "OPEN", "tradingSymbol": "RVNL"}]),
+    )
+    assert "UNTRACKED_BROKER_ORDER" in kinds(report)
+    assert report.safe_to_trade is False
+
+
+async def test_a_submission_with_no_outcome_blocks() -> None:
+    report = await reconcile_live_execution(FakeSession([], [submission(status="UNKNOWN")]), adapter_for())
+    assert "UNKNOWN_SUBMISSION" in kinds(report)
+    assert report.safe_to_trade is False
+
+
+# --- positions ---------------------------------------------------------------
+
+
+async def test_a_position_our_orders_explain_is_clean() -> None:
+    """143 sold, 143 short. That is the trade, not an anomaly."""
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(side="SELL", quantity=143)]),
+        adapter_for(positions=[{"tradingSymbol": "RVNL", "netQuantity": "-143"}]),
+    )
+    assert report.findings == []
+    assert report.safe_to_trade is True
+
+
+async def test_a_partial_fill_is_review_not_blocking() -> None:
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(side="SELL", quantity=143)]),
+        adapter_for(positions=[{"tradingSymbol": "RVNL", "netQuantity": "-100"}]),
+    )
+    assert "PARTIAL_POSITION" in kinds(report)
+    assert report.safe_to_trade is True
+
+
+async def test_a_partially_filled_exit_is_still_accounted_for() -> None:
+    """Sold 143 then bought 143 back. Any net between them is ours."""
+    report = await reconcile_live_execution(
+        FakeSession(
+            [],
+            [submission(side="SELL", quantity=143), submission(side="BUY", quantity=143)],
+        ),
+        adapter_for(positions=[{"tradingSymbol": "RVNL", "netQuantity": "-43"}]),
+    )
+    assert "UNEXPLAINED_POSITION" not in kinds(report)
+    assert report.safe_to_trade is True
+
+
+async def test_exposure_larger_than_we_could_have_created_blocks() -> None:
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(side="SELL", quantity=143)]),
+        adapter_for(positions=[{"tradingSymbol": "RVNL", "netQuantity": "-500"}]),
+    )
+    assert "UNEXPLAINED_POSITION" in kinds(report)
+    assert report.safe_to_trade is False
+
+
+async def test_exposure_in_the_wrong_direction_blocks() -> None:
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(side="SELL", quantity=143)]),
+        adapter_for(positions=[{"tradingSymbol": "RVNL", "netQuantity": "50"}]),
+    )
+    assert "UNEXPLAINED_POSITION" in kinds(report)
+    assert report.safe_to_trade is False
+
+
+async def test_a_position_in_a_symbol_we_never_traded_blocks() -> None:
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(symbol="RVNL")]),
+        adapter_for(positions=[{"tradingSymbol": "ADANIENT", "netQuantity": "-8"}]),
+    )
+    assert "UNEXPLAINED_POSITION" in kinds(report)
+    assert report.safe_to_trade is False
+
+
+async def test_a_rejected_submission_explains_no_exposure() -> None:
+    """A rejected order created nothing, so it cannot account for a position."""
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(status="REJECTED", side="SELL", quantity=143)]),
+        adapter_for(positions=[{"tradingSymbol": "RVNL", "netQuantity": "-143"}]),
+    )
+    assert "UNEXPLAINED_POSITION" in kinds(report)
+    assert report.safe_to_trade is False
