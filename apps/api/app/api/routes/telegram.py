@@ -1,6 +1,8 @@
 import contextlib
 import hmac
+import html
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -146,6 +148,52 @@ def _callback_parts(payload: dict[str, Any]) -> tuple[str | None, str | None]:
     return data if isinstance(data, str) else None, callback_id if isinstance(callback_id, str) else None
 
 
+@dataclass(frozen=True)
+class CallbackReply:
+    """What to tell the operator, and how loudly.
+
+    The kind is carried rather than inferred from the text, because the heading
+    is the part read first and a cheerful tick over a refusal is worse than no
+    reply at all -- which is the state this whole reply exists to end.
+    """
+
+    kind: str
+    text: str
+
+
+SUBMITTED_KIND = "submitted"
+REJECTED_KIND = "rejected"
+BLOCKED_KIND = "blocked"
+ERROR_KIND = "error"
+INFO_KIND = "info"
+STOPPED_KIND = "stopped"
+
+# Heading per kind. Deliberately blunt: the operator is reading this on a phone,
+# possibly in a meeting, and needs the outcome in one word.
+_REPLY_HEADINGS = {
+    SUBMITTED_KIND: "\u2705 <b>APPROVED — ORDER SENT</b>",
+    REJECTED_KIND: "\u26d4 <b>REJECTED</b>",
+    BLOCKED_KIND: "\U0001f6ab <b>NOT SENT</b>",
+    ERROR_KIND: "\u26a0\ufe0f <b>ERROR</b>",
+    INFO_KIND: "\u2139\ufe0f <b>RECORDED</b>",
+    STOPPED_KIND: "\U0001f6d1 <b>EMERGENCY STOP</b>",
+}
+
+# decide_live_approval's vocabulary, mapped to how it should read.
+_LIVE_STATUS_KINDS = {
+    "SUBMITTED": SUBMITTED_KIND,
+    "APPROVED": SUBMITTED_KIND,
+    "REJECTED": REJECTED_KIND,
+    "EXPIRED": BLOCKED_KIND,
+    "BLOCKED": BLOCKED_KIND,
+}
+
+
+def _reply_message(reply: CallbackReply) -> str:
+    heading = _REPLY_HEADINGS.get(reply.kind, _REPLY_HEADINGS[INFO_KIND])
+    return f"{heading}\n\n{html.escape(reply.text)}"
+
+
 async def _handle_live_decision(
     session: DbSession,
     settings: AppSettings,
@@ -153,7 +201,7 @@ async def _handle_live_decision(
     reference_id: str,
     action: str,
     decided_by: str | None,
-) -> str:
+) -> CallbackReply:
     """Act on a live approval tap, and never let a failure read as success.
 
     Every failure path here returns a message saying nothing was sent, because
@@ -166,7 +214,7 @@ async def _handle_live_decision(
     try:
         adapter = await live_order_adapter(settings, session, controls.live_broker)
     except Exception as exc:  # no broker selected, unreachable, credentials missing
-        return f"Could not reach the broker; nothing was sent. ({exc})"
+        return CallbackReply(ERROR_KIND, f"Could not reach the broker; nothing was sent. ({exc})")
 
     redis = Redis.from_url(str(settings.redis_url), decode_responses=True)
     try:
@@ -182,10 +230,45 @@ async def _handle_live_decision(
         )
     except Exception:
         logger.exception("Live approval decision failed for %s", reference_id)
-        return "The decision could not be completed. Check the order book before retrying."
+        return CallbackReply(ERROR_KIND, "The decision could not be completed. Check the order book before retrying.")
     finally:
         await redis.aclose()
-    return result.detail
+    return CallbackReply(_LIVE_STATUS_KINDS.get(result.status, BLOCKED_KIND), result.detail)
+
+
+async def _deliver_reply(
+    notifier: TelegramNotificationService,
+    callback_id: str | None,
+    reply: CallbackReply,
+    *,
+    announce: bool,
+) -> None:
+    """Answer the tap twice, and never fail the webhook for it.
+
+    ``announce`` is false for a sender who is not on the allow list. The toast
+    goes back to whoever tapped, but the chat message goes to the operator's
+    chat -- so announcing a refusal would let anyone who found the bot post into
+    it at will. They get told no; the operator is not made to read it.
+
+    answerCallbackQuery clears the spinner on the button, but it is a toast
+    lasting a second or two: an operator who looked away has no way to find out
+    what their tap did. The chat message is the durable record they can scroll
+    back to, and it is what makes an approval feel answered rather than
+    swallowed.
+
+    Both are suppressed rather than raised. Telegram retries a webhook that did
+    not return 200, and a retry re-enters the handler -- so an error raised here,
+    after the decision is already committed, would risk the operator's answer
+    being processed twice over a failure that was only cosmetic.
+    """
+    if callback_id:
+        with contextlib.suppress(TelegramError):
+            # Telegram truncates this hard; the chat message carries the full text.
+            await notifier.answer_callback(callback_id, reply.text[:200])
+    if not announce:
+        return
+    with contextlib.suppress(TelegramError):
+        await notifier.send_message(_reply_message(reply), parse_mode="HTML")
 
 
 @router.post("/webhook", status_code=status.HTTP_200_OK)
@@ -244,7 +327,7 @@ async def inbound_webhook(
         )
     )
     callback_data, callback_id = _callback_parts(payload)
-    response_text = "Command rejected"
+    reply = CallbackReply(ERROR_KIND, "Command rejected: this sender is not on the allow list.")
     if accepted and callback_data:
         parts = callback_data.split(":")
         # Live approvals carry their own prefix so that a live decision can never
@@ -255,7 +338,7 @@ async def inbound_webhook(
             and parts[1] in {APPROVE_ACTION, REJECT_ACTION}
             and 1 <= len(parts[2]) <= 40
         ):
-            response_text = await _handle_live_decision(
+            reply = await _handle_live_decision(
                 session, settings, reference_id=parts[2], action=parts[1], decided_by=sender_id
             )
             session.add(
@@ -294,7 +377,12 @@ async def inbound_webhook(
                     metadata_json={"reference_id": reference_id, "decision": parts[1], "sender_id": sender_id},
                 )
             )
-            response_text = "Approval recorded. No order will be sent in this release."
+            reply = CallbackReply(
+                INFO_KIND,
+                "Paper signal "
+                + ("approved" if parts[1] == "approve" else "rejected")
+                + ". This is the paper journal; no live order is sent from this message.",
+            )
         elif callback_data == "sentinel:emergency_stop":
             redis = Redis.from_url(str(settings.redis_url), decode_responses=True)
             try:
@@ -302,7 +390,7 @@ async def inbound_webhook(
             finally:
                 await redis.aclose()
             session.add(AuditLog(event_type="telegram.emergency_stop", metadata_json={"sender_id": sender_id}))
-            response_text = "Emergency stop engaged. Scanner has been stopped."
+            reply = CallbackReply(STOPPED_KIND, "Emergency stop engaged. The scanner has been stopped.")
     elif (
         accepted
         and isinstance(message.get("text"), str)
@@ -314,9 +402,13 @@ async def inbound_webhook(
         finally:
             await redis.aclose()
         session.add(AuditLog(event_type="telegram.emergency_stop", metadata_json={"sender_id": sender_id}))
-        response_text = "Emergency stop engaged. Scanner has been stopped."
+        reply = CallbackReply(STOPPED_KIND, "Emergency stop engaged. The scanner has been stopped.")
     await session.commit()
-    if callback_id:
-        with contextlib.suppress(TelegramError):
-            await TelegramNotificationService(settings).answer_callback(callback_id, response_text)
+
+    # Two deliveries, deliberately. answerCallbackQuery clears the spinner on the
+    # button but is a toast that lasts a second or two; an operator who looked
+    # away has no way to find out what their tap did. The chat message is the
+    # durable record they can scroll back to, and it is what makes an approval
+    # feel answered rather than swallowed.
+    await _deliver_reply(TelegramNotificationService(settings), callback_id, reply, announce=bool(accepted))
     return {"ok": True}
