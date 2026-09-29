@@ -39,7 +39,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.db.models import AuditLog, User, UserRole
+from app.db.models import AuditLog, ExecutionReconciliation, User, UserRole
 from app.db.session import SessionLocal
 from app.services.auth import hash_password
 from app.services.live_activation import LiveActivationError, activate_live_trading, current_activation
@@ -113,6 +113,90 @@ async def _start_scanner(settings: Settings, session: AsyncSession, user: User) 
             metadata_json={"requested_at": datetime.now(UTC).isoformat(), "source": "scheduled_open"},
         )
     )
+
+
+@dataclass
+class RefreshOutcome:
+    """What a mid-session reconciliation found, and whether that is news."""
+
+    ran: bool
+    safe_to_trade: bool
+    step: str
+    detail: str
+    changed: bool = False
+    findings: list[str] = field(default_factory=list)
+
+
+async def refresh_reconciliation(settings: Settings, calendar: TradingCalendar) -> RefreshOutcome:
+    """Keep the reconciliation gate inside its own freshness window. Never raises.
+
+    A reconciliation is valid for fifteen minutes -- ``RECONCILIATION_FRESHNESS``
+    in live_readiness and ``RECONCILIATION_MAX_AGE`` in live_risk, which agree
+    deliberately. The scheduled open reconciles once and arms for eight hours,
+    so without this the verdict expires at 09:00 and every order for the rest of
+    the session is refused: the arming window and the freshness window differ by
+    a factor of thirty-two, and only one of them is visible on the Risk screen.
+
+    Reconciling is not free -- it is broker API calls -- so this runs only when
+    the account is armed, on a trading day, while the exchange is open. A paper
+    deployment, a disarmed one and a Sunday all cost nothing.
+
+    Silence on success is deliberate. A message every ten minutes saying
+    "still fine" is a message nobody reads, and this channel also carries the
+    one saying trading has stopped.
+    """
+    try:
+        return await _refresh(settings, calendar)
+    except Exception as exc:  # noqa: BLE001 - a scheduled job must not die on one bad run
+        logger.exception("live_session_open.refresh_failed")
+        return RefreshOutcome(False, False, "error", f"{type(exc).__name__}: {exc}")
+
+
+async def _refresh(settings: Settings, calendar: TradingCalendar) -> RefreshOutcome:
+    from app.services.trading_calendar import MarketPhase
+
+    now = datetime.now(UTC)
+    status = calendar.status_at(now)
+    if not status.trading_day:
+        return RefreshOutcome(False, False, "calendar", f"Not a trading day: {status.reason}")
+    if status.phase not in {MarketPhase.OPEN, MarketPhase.PRE_OPEN}:
+        return RefreshOutcome(False, False, "closed", f"Exchange is {status.phase}; nothing to keep fresh.")
+    if settings.application_mode != "LIVE" or not settings.live_trading_enabled:
+        return RefreshOutcome(False, False, "runtime", f"Runtime is {settings.application_mode}.")
+
+    async with SessionLocal() as session:
+        activation = await current_activation(session)
+        if activation is None:
+            return RefreshOutcome(False, False, "disarmed", "Nothing is armed; not spending broker calls.")
+
+        previous = await session.scalar(
+            select(ExecutionReconciliation)
+            .where(ExecutionReconciliation.mode == "LIVE")
+            .order_by(ExecutionReconciliation.created_at.desc())
+            .limit(1)
+        )
+        was_safe = bool(previous.safe_to_trade) if previous is not None else False
+
+        try:
+            adapter = await live_report_adapter(settings, session)
+        except BrokerNotSelectedError as exc:
+            return RefreshOutcome(False, False, "broker", f"No live broker selected: {exc}")
+        except Exception as exc:
+            return RefreshOutcome(False, False, "broker", f"Broker unreachable: {type(exc).__name__}: {exc}")
+
+        report = await reconcile_live_execution(session, adapter)
+        record = await persist_live_reconciliation(session, report)
+        await session.commit()
+
+        findings = [item.get("detail", "") for item in (record.findings or [])]
+        return RefreshOutcome(
+            True,
+            bool(record.safe_to_trade),
+            "reconciled",
+            record.detail,
+            changed=bool(record.safe_to_trade) != was_safe,
+            findings=findings,
+        )
 
 
 async def open_live_session(settings: Settings, calendar: TradingCalendar, *, dry_run: bool = False) -> OpenResult:

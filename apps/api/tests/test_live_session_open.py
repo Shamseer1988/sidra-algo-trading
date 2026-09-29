@@ -268,3 +268,146 @@ async def test_a_dry_run_still_reports_a_blocked_reconciliation(monkeypatch: pyt
     result = await module.open_live_session(settings(), calendar(), dry_run=True)
     assert result.step == "reconcile"
     assert wiring.armed is None
+
+
+# --- keeping the reconciliation fresh ---------------------------------------
+#
+# A reconciliation is valid for fifteen minutes; the scheduled open reconciles
+# once and arms for eight hours. Without a refresh the verdict expires at 09:00
+# and every signal for the rest of the session is refused -- armed, healthy, and
+# unable to trade. That is what happened on the first live day.
+
+
+def market(phase: str = "OPEN", trading: bool = True) -> SimpleNamespace:
+    from app.services.trading_calendar import MarketPhase
+
+    return SimpleNamespace(
+        status_at=lambda _ts: SimpleNamespace(
+            trading_day=trading,
+            phase=getattr(MarketPhase, phase),
+            reason="Regular session" if trading else "Exchange holiday",
+        )
+    )
+
+
+def test_the_two_freshness_windows_agree_and_are_shorter_than_an_activation() -> None:
+    """The bug was a mismatch nobody had written down. Now it fails a test."""
+    from app.core.config import Settings
+    from app.services.live_readiness import RECONCILIATION_FRESHNESS
+    from app.services.live_risk import RECONCILIATION_MAX_AGE
+
+    assert RECONCILIATION_FRESHNESS == RECONCILIATION_MAX_AGE, (
+        "The readiness gate and the risk engine must expire a reconciliation together; "
+        "if they drift, one will authorise what the other refuses."
+    )
+    ttl_minutes = Settings.model_fields["live_activation_ttl_minutes"].default
+    assert RECONCILIATION_FRESHNESS.total_seconds() / 60 < ttl_minutes, (
+        "An activation outlives a reconciliation, so something must refresh it during the session."
+    )
+
+
+@pytest.fixture
+def refresh_wiring(monkeypatch: pytest.MonkeyPatch):
+    state = SimpleNamespace(session=FakeSession(), armed=True, previous_safe=True, record=None, reconciled=False)
+    state.record = reconciliation(safe=True)
+
+    monkeypatch.setattr(module, "SessionLocal", lambda: state.session)
+    monkeypatch.setattr(module, "live_report_adapter", _async(object()))
+
+    async def current(_session):
+        return SimpleNamespace(expires_at=datetime.now(UTC) + timedelta(hours=2)) if state.armed else None
+
+    async def reconcile(_session, _adapter):
+        state.reconciled = True
+        return object()
+
+    async def persist(_session, _report):
+        return state.record
+
+    async def scalar(*_args, **_kwargs):
+        return SimpleNamespace(safe_to_trade=state.previous_safe)
+
+    state.session.scalar = scalar
+    monkeypatch.setattr(module, "current_activation", current)
+    monkeypatch.setattr(module, "reconcile_live_execution", reconcile)
+    monkeypatch.setattr(module, "persist_live_reconciliation", persist)
+    return state
+
+
+@pytest.mark.asyncio
+async def test_an_open_armed_session_is_refreshed(refresh_wiring) -> None:
+    result = await module.refresh_reconciliation(settings(), market())
+    assert result.ran is True
+    assert result.safe_to_trade is True
+    assert refresh_wiring.reconciled is True
+
+
+@pytest.mark.asyncio
+async def test_a_disarmed_session_spends_no_broker_calls(refresh_wiring) -> None:
+    refresh_wiring.armed = False
+    result = await module.refresh_reconciliation(settings(), market())
+    assert result.ran is False
+    assert result.step == "disarmed"
+    assert refresh_wiring.reconciled is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["CLOSED", "POST_MARKET"])
+async def test_a_closed_exchange_is_not_refreshed(refresh_wiring, phase: str) -> None:
+    result = await module.refresh_reconciliation(settings(), market(phase=phase))
+    assert result.ran is False
+    assert result.step == "closed"
+    assert refresh_wiring.reconciled is False
+
+
+@pytest.mark.asyncio
+async def test_a_holiday_is_not_refreshed(refresh_wiring) -> None:
+    result = await module.refresh_reconciliation(settings(), market(trading=False))
+    assert result.ran is False
+    assert refresh_wiring.reconciled is False
+
+
+@pytest.mark.asyncio
+async def test_a_paper_runtime_is_not_refreshed(refresh_wiring) -> None:
+    result = await module.refresh_reconciliation(settings(mode="PAPER", enabled=False), market())
+    assert result.ran is False
+    assert result.step == "runtime"
+    assert refresh_wiring.reconciled is False
+
+
+@pytest.mark.asyncio
+async def test_going_from_clean_to_blocked_is_reported_as_a_change(refresh_wiring) -> None:
+    """The message that matters: trading has just stopped."""
+    refresh_wiring.previous_safe = True
+    refresh_wiring.record = reconciliation(safe=False)
+    result = await module.refresh_reconciliation(settings(), market())
+    assert result.ran is True
+    assert result.safe_to_trade is False
+    assert result.changed is True
+    assert result.findings == ["Broker order 123 (REJECTED) has no local record."]
+
+
+@pytest.mark.asyncio
+async def test_still_clean_is_not_news(refresh_wiring) -> None:
+    """Ten-minute 'still fine' messages are how an alert channel stops being read."""
+    refresh_wiring.previous_safe = True
+    refresh_wiring.record = reconciliation(safe=True)
+    result = await module.refresh_reconciliation(settings(), market())
+    assert result.changed is False
+
+
+@pytest.mark.asyncio
+async def test_recovery_is_reported(refresh_wiring) -> None:
+    refresh_wiring.previous_safe = False
+    refresh_wiring.record = reconciliation(safe=True)
+    result = await module.refresh_reconciliation(settings(), market())
+    assert result.changed is True
+    assert result.safe_to_trade is True
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_broker_does_not_kill_the_job(refresh_wiring, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(module, "live_report_adapter", _async(RuntimeError("timeout")))
+    result = await module.refresh_reconciliation(settings(), market())
+    assert result.ran is False
+    assert result.step == "broker"

@@ -342,6 +342,65 @@ def _make_session_open_job(settings: Settings, calendar: TradingCalendar):
     return _job
 
 
+def _make_reconciliation_refresh_job(settings: Settings, calendar: TradingCalendar):
+    """Keep the reconciliation gate inside its fifteen-minute window all session.
+
+    Without this the 08:45 verdict expires at 09:00 and every signal for the
+    rest of the day is refused -- armed, healthy, and unable to trade. Ten
+    minutes leaves five of margin against a slow broker call.
+    """
+
+    async def _job() -> None:
+        from app.services.live_session_open import refresh_reconciliation
+
+        result = await refresh_reconciliation(settings, calendar)
+        if not result.ran:
+            logger.debug("scheduler.reconciliation_refresh_skipped", step=result.step, detail=result.detail)
+            return
+        logger.info("scheduler.reconciliation_refreshed", safe=result.safe_to_trade, detail=result.detail)
+        # Only a change is news. A message every ten minutes saying "still fine"
+        # is one nobody reads, and this channel also carries "trading stopped".
+        if not result.changed:
+            return
+        await _persist_audit(
+            "scheduler.reconciliation_state_changed",
+            {"safe_to_trade": result.safe_to_trade, "detail": result.detail},
+        )
+        await _send_reconciliation_alert(settings, result)
+
+    return _job
+
+
+async def _send_reconciliation_alert(settings: Settings, result) -> None:
+    try:
+        from app.services.telegram import TelegramNotificationService
+        from app.services.telegram_config import configured_settings
+
+        effective = await configured_settings(settings)
+        if not effective.telegram_is_configured:
+            return
+        ist = datetime.now(UTC).astimezone(MARKET_TIMEZONE).strftime("%d-%b-%Y %I:%M %p")
+        if result.safe_to_trade:
+            text = (
+                "\u2705 <b>Reconciliation cleared</b>\n\n"
+                f"\U0001f550 {ist} IST\n"
+                f"\U0001f4dd {result.detail}\n\n"
+                "<i>Broker and local state agree again. Trading can resume.</i>"
+            )
+        else:
+            findings = "".join(f"\n  \u2022 {item}" for item in result.findings[:5] if item)
+            text = (
+                "\u26d4 <b>Reconciliation BLOCKED — trading stopped</b>\n\n"
+                f"\U0001f550 {ist} IST\n"
+                f"\U0001f4dd {result.detail}{findings}\n\n"
+                "<i>No further orders can be placed until this clears. "
+                "The activation is still armed; the gate is what is refusing.</i>"
+            )
+        await TelegramNotificationService(effective).send_message(text, parse_mode="HTML")
+    except Exception as exc:
+        logger.warning("scheduler.reconciliation_alert_failed", error=str(exc))
+
+
 def init_upstox_scheduler(settings: Settings) -> AsyncIOScheduler | None:
     """Create and configure the APScheduler instance.
 
@@ -386,6 +445,19 @@ def init_upstox_scheduler(settings: Settings) -> AsyncIOScheduler | None:
         # Deliberately short: a container that comes up at 11:00 must not decide
         # the morning's reconcile is still good enough to arm on.
         misfire_grace_time=900,
+    )
+
+    # Every ten minutes while the exchange is open. The job is inert unless the
+    # deployment is live AND armed, so a paper or disarmed one spends nothing.
+    scheduler.add_job(
+        _make_reconciliation_refresh_job(settings, calendar),
+        trigger=CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/10", timezone="Asia/Kolkata"),
+        id="live_reconciliation_refresh",
+        name="Live reconciliation refresh (every 10 min, 09:00-15:59 IST)",
+        replace_existing=True,
+        # A refresh that is late has already been overtaken by the next one.
+        misfire_grace_time=120,
+        max_instances=1,
     )
 
     logger.info(

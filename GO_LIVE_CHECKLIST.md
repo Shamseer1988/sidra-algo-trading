@@ -431,6 +431,7 @@ NSE holidays:
 |---|---|---|
 | 08:30 | `upstox_morning_renewal` | Headless Upstox login |
 | 08:45 | `live_session_open` | Reconcile → arm → start the scanner |
+| every 10 min | `live_reconciliation_refresh` | Keeps the reconcile gate fresh, 09:00–15:59 |
 
 Watch Telegram. You get a message either way:
 

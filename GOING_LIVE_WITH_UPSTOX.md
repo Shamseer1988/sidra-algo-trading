@@ -466,12 +466,22 @@ jobs on weekdays, both skipping NSE holidays:
 |---|---|---|
 | 08:30 | `upstox_morning_renewal` | Headless Upstox login; stores a fresh token |
 | 08:45 | `live_session_open` | Reconcile → arm → start the scanner |
+| every 10 min, 09:00–15:59 | `live_reconciliation_refresh` | Re-reconcile so the gate stays inside its window |
 
 The 08:45 job aborts at the first failure and **never improvises**. It arms only
 if the reconcile comes back `safe_to_trade`. Every outcome, success or refusal,
 is sent to Telegram and written to `audit_logs` — a refusal is the message that
 matters most, because a system that declined to arm looks exactly like one that
 armed fine until the day ends with no trades.
+
+**Why the refresh exists.** A reconciliation is valid for **15 minutes**
+(`RECONCILIATION_FRESHNESS` in `live_readiness`, `RECONCILIATION_MAX_AGE` in
+`live_risk` — they agree deliberately). An activation lasts **8 hours**. Without
+a refresh the 08:45 verdict expires at 09:00 and every signal for the rest of
+the session is refused: armed, healthy, and unable to trade. The refresh runs
+only when the deployment is live **and** armed **and** the exchange is open, so
+a paper or disarmed deployment spends no broker calls. It is silent unless the
+verdict changes — you are told when trading stops, and when it resumes.
 
 It is inert unless `APPLICATION_MODE=LIVE` **and** `LIVE_TRADING_ENABLED=true`.
 A paper deployment runs the job and does nothing, silently, by design.
