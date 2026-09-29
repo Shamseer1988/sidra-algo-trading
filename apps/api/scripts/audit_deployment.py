@@ -171,6 +171,30 @@ async def main() -> int:
             print("  Check account_capital matches the funded balance: position")
             print("  sizing divides by it, so a stale figure resizes every order.")
 
+        # How far a stop is placed and how far a target sits. These decide
+        # whether a signal arrives with a 50-paisa stop that noise takes out
+        # before the trade has a chance, and they were the one part of the risk
+        # picture this audit could not show -- which meant a settings change to
+        # them could not be confirmed from here at all.
+        print()
+        print(f"  stop_atr_multiple           : {controls.stop_atr_multiple}")
+        print(f"  min_stop_distance_percent   : {controls.min_stop_distance_percent}")
+        print(f"  minimum_rr                  : {controls.minimum_rr}")
+        # A percent is hard to read as money, and the stop distance is what
+        # actually gets compared against ordinary noise.
+        for sample in (100.0, 500.0, 1000.0):
+            floor = sample * controls.min_stop_distance_percent / 100
+            print(
+                f"      percent floor on a {sample:,.0f} entry : {floor:,.2f}  target {floor * controls.minimum_rr:,.2f}"
+            )
+        print("  The stop is the WIDEST of the structural level, ATR x multiple")
+        print("  and the percent floor, so these two are floors, not the stop.")
+        print("  The ATR floor is measured on candle_timeframe_seconds candles")
+        print("  (section 5): on 60s candles, ATR x multiple is minutes of range,")
+        print("  not a day's, which is how a stop ends up a rupee wide.")
+        print("  minimum_rr here is the ACCOUNT value and every strategy carries")
+        print("  its own, which always wins. Section 6 shows what will be used.")
+
         print(f"  live_entry_order_type       : {controls.live_entry_order_type}")
         if controls.live_entry_order_type == "LIMIT":
             print("  [NOTE] Live entries are LIMIT at the signal price. After an")
@@ -192,7 +216,7 @@ async def main() -> int:
             value = (stored.value or {}).get(field) if stored else getattr(settings, field, None)
             print(f"  {field:26}: {value}")
 
-        heading("6. Square-off time, per strategy")
+        heading("6. Exit geometry, per strategy: square-off, stop floors, reward:risk")
         # Parse through the application's own model rather than reaching into
         # the stored JSON: the row is a bare list, a reader that assumed a
         # wrapper object would be wrong, and a reader that guesses the shape
@@ -217,10 +241,26 @@ async def main() -> int:
             else:
                 missing += 1
                 print(f"{BAD} {name:34} NO SQUARE-OFF  enabled={configuration.enabled}")
+            # Resolved the same way execution resolves it, through the model,
+            # rather than reprinting the account value and hoping it reaches
+            # here. A per-strategy override silently replacing an account
+            # setting is exactly the change an audit has to be able to see.
+            effective = configuration.effective_controls(controls.model_dump())
+            for label, key, account_value in (
+                ("stop_atr_multiple", "stop_atr_multiple", controls.stop_atr_multiple),
+                ("min_stop_distance_pct", "min_stop_distance_percent", controls.min_stop_distance_percent),
+                ("minimum_rr", "minimum_rr", controls.minimum_rr),
+            ):
+                value = effective.get(key)
+                source = "account" if value == account_value else f"strategy OVERRIDE, account has {account_value}"
+                print(f"      {label:22}: {value}  ({source})")
         problems += missing
         if missing:
             print("  Nothing closes a position because the session is ending.")
             print("  Live, the broker squares off MIS at its own time and price.")
+        print("  The values above are what a signal from that strategy will use.")
+        print("  A strategy override is not a fault; an override you did not")
+        print("  intend is, because changing the account setting will not move it.")
 
     heading("SUMMARY")
     if problems:
