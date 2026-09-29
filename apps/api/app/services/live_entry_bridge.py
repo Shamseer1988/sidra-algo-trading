@@ -110,6 +110,52 @@ def _order_request(signal: PaperSignal, controls: Any) -> LiveOrderRequest:
     )
 
 
+async def _announce_automatic(settings: Settings, signal: PaperSignal, decision, submission) -> None:
+    """Tell the operator what an unattended order did. Never raises.
+
+    Under TELEGRAM_APPROVAL the operator is asked, so they know an order exists
+    and the reply tells them how it ended. Under AUTOMATIC nobody is asked --
+    and the first live order placed this way was rejected by the broker without
+    a single message being sent. The operator found out by reading container
+    logs. Automatic means nobody is asked, not nobody is told.
+    """
+    try:
+        from app.services.telegram import TelegramNotificationService
+        from app.services.telegram_config import configured_settings
+
+        effective = await configured_settings(settings)
+        if not effective.telegram_is_configured:
+            return
+
+        numbers = ", ".join(getattr(submission, "broker_order_numbers", None) or []) or "none"
+        status = getattr(submission, "status", "UNKNOWN")
+        if not decision.authorized:
+            text = (
+                "\U0001f6ab <b>LIVE ORDER NOT SENT</b>\n\n"
+                f"\U0001f4ca {signal.instrument_token}  {signal.side}  {signal.quantity}\n"
+                f"\U0001f4dd {decision.reason}"
+            )
+        elif status in {"REJECTED", "FAILED", "UNKNOWN"}:
+            reason = getattr(submission, "failure_message", None) or status
+            text = (
+                "\u26d4 <b>LIVE ORDER REJECTED</b>\n\n"
+                f"\U0001f4ca {signal.instrument_token}  {signal.side}  {signal.quantity}\n"
+                f"\U0001f4dd {reason}\n\n"
+                "<i>Placed automatically; the broker refused it. No position was opened.</i>"
+            )
+        else:
+            text = (
+                "\u2705 <b>LIVE ORDER SENT</b>\n\n"
+                f"\U0001f4ca {signal.instrument_token}  {signal.side}  {signal.quantity}\n"
+                f"\U0001f9fe Broker order: {numbers}\n"
+                f"\U0001f4dd Status: {status}\n\n"
+                "<i>Placed automatically. Disarm to stop further orders.</i>"
+            )
+        await TelegramNotificationService(effective).send_message(text, parse_mode="HTML")
+    except Exception:  # noqa: BLE001 - an alert must not undo a placed order
+        logger.exception("live_entry_bridge.announce_failed signal_id=%s", signal.id)
+
+
 async def offer_live_entry(
     session: AsyncSession,
     settings: Settings,
@@ -214,6 +260,10 @@ async def _offer(
         decision.authorized,
         getattr(submission, "status", None),
     )
+    # Sent after the order, and never allowed to undo it: the order is already
+    # at the broker by this point, so a failed alert is a reporting problem, not
+    # a trading one.
+    await _announce_automatic(settings, signal, decision, submission)
     if not decision.authorized:
         return BridgeOutcome(False, "refused", decision.reason)
     return BridgeOutcome(True, "submitted", f"Live order submitted: {getattr(submission, 'status', 'unknown')}")

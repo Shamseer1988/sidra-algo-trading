@@ -228,6 +228,43 @@ async def test_the_tag_and_instrument_token_reach_the_request(
     assert body["slice"] is False
 
 
+async def test_a_market_order_carries_no_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Upstox rejects a priced market order outright: UDAPI1040, "Price not required".
+
+    This is not a cosmetic nicety. The first live order this system ever placed
+    was a MARKET order carrying the signal's entry price, and the broker refused
+    it. The price is deliberately kept upstream -- the margin endpoint needs a
+    real number -- so it must be dropped here, at the protocol boundary.
+    """
+    fake = respond(200, {"status": "success", "data": {"order_ids": ["1"]}}, monkeypatch=monkeypatch)
+    await order_client().place_order(**{**PLACE, "order_type": "MARKET", "price": 2833.20})
+    assert fake.calls[0][1]["json"]["price"] == 0.0
+
+
+async def test_a_stop_market_order_carries_no_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SL-M is priced by the exchange too; only the trigger is ours to set."""
+    fake = respond(200, {"status": "success", "data": {"order_ids": ["1"]}}, monkeypatch=monkeypatch)
+    await order_client().place_order(**{**PLACE, "order_type": "SL-M", "price": 418.0, "trigger_price": 415.0})
+    body = fake.calls[0][1]["json"]
+    assert body["price"] == 0.0
+    assert body["trigger_price"] == 415.0
+
+
+async def test_a_limit_order_keeps_its_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fix must not silently un-price the orders that need one."""
+    fake = respond(200, {"status": "success", "data": {"order_ids": ["1"]}}, monkeypatch=monkeypatch)
+    await order_client().place_order(**PLACE)
+    assert fake.calls[0][1]["json"]["price"] == 418.0
+
+
+async def test_a_stop_limit_order_keeps_its_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = respond(200, {"status": "success", "data": {"order_ids": ["1"]}}, monkeypatch=monkeypatch)
+    await order_client().place_order(**{**PLACE, "order_type": "SL", "trigger_price": 415.0})
+    body = fake.calls[0][1]["json"]
+    assert body["price"] == 418.0
+    assert body["trigger_price"] == 415.0
+
+
 # --- cancellation ---------------------------------------------------------
 
 

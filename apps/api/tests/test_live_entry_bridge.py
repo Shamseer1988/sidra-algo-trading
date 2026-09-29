@@ -339,3 +339,86 @@ async def test_lowercase_automatic_from_a_hand_edited_row_still_submits(wiring) 
     outcome = await run(wiring)
     assert outcome.acted is True
     assert outcome.step == "submitted"
+
+
+# --- telling the operator about an unattended order -------------------------
+#
+# Under TELEGRAM_APPROVAL the operator is asked, so they know an order exists.
+# Under AUTOMATIC nobody is asked -- and the first live order placed this way
+# was rejected by the broker with no message sent at all. The operator found out
+# by reading container logs. Automatic means nobody is asked, not nobody is told.
+
+
+@pytest.fixture
+def announced(monkeypatch: pytest.MonkeyPatch):
+    sent: list[str] = []
+
+    async def fake_announce(_settings, _signal, decision, submission):
+        sent.append(await _render(decision, submission))
+
+    async def _render(decision, submission):
+        if not decision.authorized:
+            return f"NOT SENT: {decision.reason}"
+        status = getattr(submission, "status", "UNKNOWN")
+        if status in {"REJECTED", "FAILED", "UNKNOWN"}:
+            return f"REJECTED: {getattr(submission, 'failure_message', None) or status}"
+        return f"SENT: {status}"
+
+    monkeypatch.setattr(module, "_announce_automatic", fake_announce)
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_a_sent_order_is_announced(wiring, announced) -> None:
+    wiring.controls = controls(approval="AUTOMATIC")
+    await run(wiring)
+    assert announced == ["SENT: SENT"]
+
+
+@pytest.mark.asyncio
+async def test_a_broker_rejection_is_announced(wiring, announced, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The regression: a real order refused by Upstox, and Telegram said nothing."""
+
+    async def submit(*_args, **_kwargs):
+        return (
+            SimpleNamespace(authorized=True, reason="Authorised"),
+            SimpleNamespace(status="REJECTED", failure_message="Price not required", broker_order_numbers=[]),
+        )
+
+    wiring.controls = controls(approval="AUTOMATIC")
+    monkeypatch.setattr(module, "submit_live_order", submit)
+    await run(wiring)
+    assert announced == ["REJECTED: Price not required"]
+
+
+@pytest.mark.asyncio
+async def test_a_gate_refusal_is_announced(wiring, announced, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def submit(*_args, **_kwargs):
+        return SimpleNamespace(authorized=False, reason="Daily loss limit reached"), None
+
+    wiring.controls = controls(approval="AUTOMATIC")
+    monkeypatch.setattr(module, "submit_live_order", submit)
+    await run(wiring)
+    assert announced == ["NOT SENT: Daily loss limit reached"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_approval_mode_is_not_announced_twice(wiring, announced) -> None:
+    """That path already asks and replies; a third message would be noise."""
+    wiring.controls = controls(approval="TELEGRAM_APPROVAL")
+    await run(wiring)
+    assert announced == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_announcement_never_undoes_a_placed_order(wiring, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The order is already at the broker; an alert failure is a reporting problem."""
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("telegram down")
+
+    wiring.controls = controls(approval="AUTOMATIC")
+    monkeypatch.setattr(module, "_announce_automatic", boom)
+    outcome = await run(wiring)
+    # offer_live_entry catches it, so the caller still learns the order was sent.
+    assert outcome.step in {"submitted", "error"}

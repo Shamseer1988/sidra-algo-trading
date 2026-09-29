@@ -68,6 +68,10 @@ AUTH_ERROR_CODES = frozenset({"UDAPI100050", "UDAPI100072", "UDAPI100073"})
 # The tag field is documented as accepting up to 40 characters.
 MAX_TAG_LENGTH = 40
 
+# Order types Upstox prices itself. Sending a price with one is rejected
+# outright rather than ignored, so the distinction has to be honoured here.
+PRICELESS_ORDER_TYPES = frozenset({"MARKET", "SL-M"})
+
 
 class UpstoxError(RuntimeError):
     """Base for every Upstox order-path failure."""
@@ -384,6 +388,14 @@ class UpstoxOrderClient(UpstoxReportClient):
             raise UpstoxError(f"tag must be {MAX_TAG_LENGTH} characters or fewer")
         if quantity <= 0:
             raise UpstoxError("quantity must be positive")
+
+        # Upstox refuses a market order that carries a price: UDAPI1040, "Price
+        # not required". The price is still wanted upstream -- the margin
+        # endpoint needs a real number to return a meaningful figure -- so it is
+        # zeroed here, at the protocol boundary, rather than thrown away earlier
+        # where the rest of the system would lose it.
+        if order_type in PRICELESS_ORDER_TYPES:
+            price = 0.0
 
         payload = {
             "quantity": quantity,
