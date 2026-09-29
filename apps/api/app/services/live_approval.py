@@ -42,6 +42,7 @@ from app.db.models import LiveOrderApproval, LiveOrderSubmission
 from app.services.broker_adapter import BrokerAdapter, BrokerOrderDescription
 from app.services.live_execution import submit_live_order
 from app.services.live_orders import LiveOrderRequest
+from app.services.live_protection import protect_after_fill
 from app.services.telegram import TelegramError, TelegramNotificationService
 
 logger = logging.getLogger(__name__)
@@ -274,6 +275,15 @@ async def decide_live_approval(
         if submission and submission.broker_order_numbers
         else f"Sent; outcome {submission.status if submission else 'unknown'}."
     )
+
+    # The same stop an automatic entry gets. An order approved by hand is not a
+    # safer order -- it is the same order with a different authoriser -- and the
+    # position it opens is exposed in exactly the same way.
+    if submission is not None:
+        protection = await protect_after_fill(session, settings, adapter, submission)
+        detail = (
+            f"{detail} {protection.detail}" if protection.protected else f"{detail} NOT PROTECTED: {protection.detail}"
+        )
     return ApprovalDecisionResult(SUBMITTED, detail, submission)
 
 

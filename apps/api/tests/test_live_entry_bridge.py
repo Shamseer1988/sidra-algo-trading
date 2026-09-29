@@ -114,6 +114,11 @@ def wiring(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(module, "live_order_adapter", adapter)
     monkeypatch.setattr(module, "request_live_approval", request_approval)
     monkeypatch.setattr(module, "submit_live_order", submit)
+
+    async def protect(_session, _settings, _adapter, _submission):
+        return SimpleNamespace(protected=True, detail="Stop at 2850.00", quantity=143, step="stopped")
+
+    monkeypatch.setattr(module, "protect_after_fill", protect)
     return state
 
 
@@ -353,7 +358,7 @@ async def test_lowercase_automatic_from_a_hand_edited_row_still_submits(wiring) 
 def announced(monkeypatch: pytest.MonkeyPatch):
     sent: list[str] = []
 
-    async def fake_announce(_settings, _signal, decision, submission):
+    async def fake_announce(_settings, _signal, decision, submission, protection=None):
         sent.append(await _render(decision, submission))
 
     async def _render(decision, submission):

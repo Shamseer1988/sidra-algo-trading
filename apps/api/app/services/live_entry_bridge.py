@@ -49,6 +49,7 @@ from app.services.live_approval import request_live_approval
 from app.services.live_execution import submit_live_order
 from app.services.live_execution_gateway import BrokerNotSelectedError, live_order_adapter
 from app.services.live_orders import LiveOrderRequest
+from app.services.live_protection import protect_after_fill
 from app.services.live_readiness import inspect_live_readiness
 from app.services.live_shadow import product_for, transaction_type_for
 
@@ -110,7 +111,7 @@ def _order_request(signal: PaperSignal, controls: Any) -> LiveOrderRequest:
     )
 
 
-async def _announce_automatic(settings: Settings, signal: PaperSignal, decision, submission) -> None:
+async def _announce_automatic(settings: Settings, signal: PaperSignal, decision, submission, protection=None) -> None:
     """Tell the operator what an unattended order did. Never raises.
 
     Under TELEGRAM_APPROVAL the operator is asked, so they know an order exists
@@ -143,12 +144,24 @@ async def _announce_automatic(settings: Settings, signal: PaperSignal, decision,
                 f"\U0001f4dd {reason}\n\n"
                 "<i>Placed automatically; the broker refused it. No position was opened.</i>"
             )
+        elif protection is not None and not protection.protected:
+            # The loudest message this system sends. An open position with
+            # nothing behind it is the state that prompted this whole module.
+            text = (
+                "\U0001f6a8 <b>POSITION NOT PROTECTED</b>\n\n"
+                f"\U0001f4ca {signal.instrument_token}  {signal.side}  {protection.quantity or signal.quantity}\n"
+                f"\U0001f9fe Broker order: {numbers}\n"
+                f"\U0001f4dd {protection.detail}\n\n"
+                "<i>Check this position in the broker app now.</i>"
+            )
         else:
+            stop_line = f"\U0001f6d1 {protection.detail}\n" if protection is not None else ""
             text = (
                 "\u2705 <b>LIVE ORDER SENT</b>\n\n"
                 f"\U0001f4ca {signal.instrument_token}  {signal.side}  {signal.quantity}\n"
                 f"\U0001f9fe Broker order: {numbers}\n"
-                f"\U0001f4dd Status: {status}\n\n"
+                f"\U0001f4dd Status: {status}\n"
+                f"{stop_line}\n"
                 "<i>Placed automatically. Disarm to stop further orders.</i>"
             )
         await TelegramNotificationService(effective).send_message(text, parse_mode="HTML")
@@ -260,10 +273,18 @@ async def _offer(
         decision.authorized,
         getattr(submission, "status", None),
     )
+    # Before the alert, because a position must not exist unprotected for any
+    # longer than it has to -- not even for the length of a Telegram round trip.
+    protection = None
+    if decision.authorized and submission is not None:
+        protection = await protect_after_fill(session, settings, adapter, submission)
+
     # Sent after the order, and never allowed to undo it: the order is already
     # at the broker by this point, so a failed alert is a reporting problem, not
     # a trading one.
-    await _announce_automatic(settings, signal, decision, submission)
+    await _announce_automatic(settings, signal, decision, submission, protection)
     if not decision.authorized:
         return BridgeOutcome(False, "refused", decision.reason)
+    if protection is not None and not protection.protected:
+        return BridgeOutcome(True, "unprotected", f"Order sent but not protected: {protection.detail}")
     return BridgeOutcome(True, "submitted", f"Live order submitted: {getattr(submission, 'status', 'unknown')}")
