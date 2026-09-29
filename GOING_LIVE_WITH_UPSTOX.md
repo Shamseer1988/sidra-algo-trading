@@ -467,12 +467,31 @@ jobs on weekdays, both skipping NSE holidays:
 | 08:30 | `upstox_morning_renewal` | Headless Upstox login; stores a fresh token |
 | 08:45 | `live_session_open` | Reconcile → arm → start the scanner |
 | every 10 min, 09:00–15:59 | `live_reconciliation_refresh` | Re-reconcile so the gate stays inside its window |
+| every minute, 09:00–15:59 | `live_exit_sweep` | Target exit and square-off; cancels the resting stop first |
 
 The 08:45 job aborts at the first failure and **never improvises**. It arms only
 if the reconcile comes back `safe_to_trade`. Every outcome, success or refusal,
 is sent to Telegram and written to `audit_logs` — a refusal is the message that
 matters most, because a system that declined to arm looks exactly like one that
 armed fine until the day ends with no trades.
+
+**How a live trade ends.** Three ways, and the first is the only one that
+survives this system being switched off:
+
+1. **The stop**, an SL-M resting at the broker, placed as soon as the entry
+   fills. It is at the exchange, so it protects the position even if the NAS
+   loses power.
+2. **The target**, measured on completed candles — the same granularity the
+   paper journal uses, so the two answer "why did it close there" alike.
+3. **Square-off**, at the strategy's `square_off_time`, rather than leaving it
+   to the broker's own auto-square-off at its own time and price.
+
+For 2 and 3 the resting stop is **cancelled first**. If that cancel fails, no
+exit is sent at all: an exit beside a live stop risks both filling, which would
+leave the position reversed rather than flat. You are told instead.
+
+The sweep deliberately does **not** check whether the system is armed.
+Disarming stops new entries; a position already open still has to be closeable.
 
 **Why the refresh exists.** A reconciliation is valid for **15 minutes**
 (`RECONCILIATION_FRESHNESS` in `live_readiness`, `RECONCILIATION_MAX_AGE` in

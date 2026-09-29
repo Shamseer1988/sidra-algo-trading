@@ -401,6 +401,61 @@ async def _send_reconciliation_alert(settings: Settings, result) -> None:
         logger.warning("scheduler.reconciliation_alert_failed", error=str(exc))
 
 
+def _make_exit_sweep_job(settings: Settings, calendar: TradingCalendar):
+    """Close positions that have reached their target or their square-off time.
+
+    Every minute, because a square-off at 15:15 that happens at 15:20 is not a
+    square-off. The sweep is inert on a paper deployment and when the exchange
+    is closed, and it deliberately does not check whether the system is armed:
+    disarming stops new entries, and a position already open still has to be
+    closeable.
+    """
+
+    async def _job() -> None:
+        from app.services.live_exit_manager import sweep_live_exits
+
+        result = await sweep_live_exits(settings, calendar)
+        if not result.ran:
+            logger.debug("scheduler.exit_sweep_skipped", step=result.step, detail=result.detail)
+            return
+        logger.info("scheduler.exit_swept", detail=result.detail)
+        for item in result.noteworthy:
+            logger.info(
+                "scheduler.exit_decision", symbol=item.symbol, step=item.step, acted=item.acted, detail=item.detail
+            )
+            await _persist_audit(
+                "scheduler.live_exit", {"symbol": item.symbol, "step": item.step, "detail": item.detail}
+            )
+        if result.noteworthy:
+            await _send_exit_alert(settings, result)
+
+    return _job
+
+
+async def _send_exit_alert(settings: Settings, result) -> None:
+    """Only what the operator needs to read. A sweep that held everything is silent."""
+    try:
+        from app.services.telegram import TelegramNotificationService
+        from app.services.telegram_config import configured_settings
+
+        effective = await configured_settings(settings)
+        if not effective.telegram_is_configured:
+            return
+        ist = datetime.now(UTC).astimezone(MARKET_TIMEZONE).strftime("%d-%b-%Y %I:%M %p")
+        lines = []
+        for item in result.noteworthy:
+            icon = "\u2705" if item.acted else "\U0001f6a8"
+            lines.append(f"{icon} <b>{item.symbol}</b> — {item.detail}")
+        body = "\n".join(lines)
+        problems = [item for item in result.noteworthy if not item.acted]
+        heading = "\U0001f6a8 <b>EXIT NEEDS ATTENTION</b>" if problems else "\u2705 <b>POSITION CLOSED</b>"
+        await TelegramNotificationService(effective).send_message(
+            f"{heading}\n\n\U0001f550 {ist} IST\n{body}", parse_mode="HTML"
+        )
+    except Exception as exc:
+        logger.warning("scheduler.exit_alert_failed", error=str(exc))
+
+
 def init_upstox_scheduler(settings: Settings) -> AsyncIOScheduler | None:
     """Create and configure the APScheduler instance.
 
@@ -457,6 +512,19 @@ def init_upstox_scheduler(settings: Settings) -> AsyncIOScheduler | None:
         replace_existing=True,
         # A refresh that is late has already been overtaken by the next one.
         misfire_grace_time=120,
+        max_instances=1,
+    )
+
+    # Every minute while the exchange is open. A square-off at 15:15 that happens
+    # at 15:20 is not a square-off, and the broker's own auto-square-off runs at
+    # its own time and its own price.
+    scheduler.add_job(
+        _make_exit_sweep_job(settings, calendar),
+        trigger=CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*", timezone="Asia/Kolkata"),
+        id="live_exit_sweep",
+        name="Live exit sweep (every minute, 09:00-15:59 IST)",
+        replace_existing=True,
+        misfire_grace_time=30,
         max_instances=1,
     )
 
