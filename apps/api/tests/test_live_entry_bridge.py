@@ -47,6 +47,22 @@ class FakeSession:
         return None
 
 
+class FakeRedis:
+    """Enough of Redis for the refusal throttle, including being broken."""
+
+    def __init__(self) -> None:
+        self.keys: dict[str, str] = {}
+        self.fail = False
+
+    async def set(self, key, value, ex=None, nx=False):  # noqa: ANN001, ARG002
+        if self.fail:
+            raise RuntimeError("redis down")
+        if nx and key in self.keys:
+            return None
+        self.keys[key] = value
+        return True
+
+
 def settings(*, mode: str = "LIVE", enabled: bool = True) -> SimpleNamespace:
     return SimpleNamespace(application_mode=mode, live_trading_enabled=enabled)
 
@@ -108,6 +124,7 @@ def wiring(monkeypatch: pytest.MonkeyPatch):
 
     state.controls = controls()
     state.readiness = readiness()
+    state.redis = FakeRedis()
     monkeypatch.setattr(module, "_controls", fake_controls)
     monkeypatch.setattr(module, "_already_handled", already)
     monkeypatch.setattr(module, "inspect_live_readiness", inspect)
@@ -123,7 +140,7 @@ def wiring(monkeypatch: pytest.MonkeyPatch):
 
 
 async def run(state, *, sig=None, sett=None):
-    return await module.offer_live_entry(FakeSession(), sett or settings(), object(), sig or signal())
+    return await module.offer_live_entry(FakeSession(), sett or settings(), state.redis, sig or signal())
 
 
 @pytest.mark.asyncio
@@ -427,3 +444,279 @@ async def test_a_failed_announcement_never_undoes_a_placed_order(wiring, monkeyp
     outcome = await run(wiring)
     # offer_live_entry catches it, so the caller still learns the order was sent.
     assert outcome.step in {"submitted", "error"}
+
+
+# --- telling the operator about a refusal that happened BEFORE the ask -------
+#
+# The gap these close: every refusal above reached Telegram only because an
+# order had already been attempted. Everything earlier -- a gate that lapsed
+# after arming, an instrument the broker cannot name, a broker that stopped
+# answering -- returned quietly into a container log. Under TELEGRAM_APPROVAL
+# that is the entire pre-ask path, so an armed operator saw the paper alert,
+# then no approval buttons, and had nothing to distinguish "the system declined"
+# from "the system is broken".
+
+
+@pytest.fixture
+def refusal_alerts(monkeypatch: pytest.MonkeyPatch):
+    """Capture what _announce_refusal actually sends, exercising its real logic.
+
+    Patched at the Telegram boundary rather than by replacing the function, so
+    the announce/silence classification, the throttle and the message body are
+    all under test rather than stubbed past.
+    """
+    sent: list[str] = []
+
+    class FakeNotifier:
+        def __init__(self, _settings) -> None:  # noqa: ANN001
+            pass
+
+        async def send_message(self, text, keyboard=None, parse_mode=None):  # noqa: ANN001, ARG002
+            sent.append(text)
+
+    async def fake_configured(_settings):
+        return SimpleNamespace(telegram_is_configured=True)
+
+    import app.services.telegram as telegram_module
+    import app.services.telegram_config as telegram_config_module
+
+    monkeypatch.setattr(telegram_module, "TelegramNotificationService", FakeNotifier)
+    monkeypatch.setattr(telegram_config_module, "configured_settings", fake_configured)
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_a_lapsed_gate_under_telegram_approval_is_not_silent(wiring, refusal_alerts) -> None:
+    """The regression: armed, a gate lapses, and the operator is told nothing.
+
+    This is the exact shape of the reconciliation going stale mid-session. The
+    signal is refused before request_live_approval runs, so no approval message
+    is sent either -- which left the operator watching for buttons that were
+    never coming.
+    """
+    wiring.controls = controls(approval="TELEGRAM_APPROVAL")
+    wiring.readiness = readiness(False, ("broker_reconciliation",))
+    outcome = await run(wiring)
+
+    assert outcome.acted is False
+    assert wiring.requested is None
+    assert len(refusal_alerts) == 1
+    assert "broker_reconciliation" in refusal_alerts[0]
+    assert "LIVE ENTRY BLOCKED" in refusal_alerts[0]
+    # It must say what to do, not only what happened.
+    assert "Risk screen" in refusal_alerts[0]
+
+
+@pytest.mark.asyncio
+async def test_the_pre_ask_silence_is_fixed_for_automatic_too(wiring, refusal_alerts) -> None:
+    """The gap was never approval-mode specific.
+
+    _announce_automatic runs only after submit_live_order, so under AUTOMATIC a
+    gate refusal was exactly as silent as it was under TELEGRAM_APPROVAL.
+    """
+    wiring.controls = controls(approval="AUTOMATIC")
+    wiring.readiness = readiness(False, ("administrator_activation",))
+    outcome = await run(wiring)
+
+    assert outcome.step == "gates"
+    assert wiring.submitted is None
+    assert len(refusal_alerts) == 1
+    assert "administrator_activation" in refusal_alerts[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("step", "setup"),
+    [
+        ("instrument", lambda state: setattr(state, "adapter", FakeAdapter(FakeDescription(resolved=False)))),
+        ("broker_unavailable", None),
+    ],
+)
+async def test_an_actionable_pre_ask_refusal_reaches_the_operator(
+    wiring, refusal_alerts, monkeypatch: pytest.MonkeyPatch, step: str, setup
+) -> None:
+    if setup is not None:
+        setup(wiring)
+    else:
+
+        async def unavailable(*_args, **_kwargs):
+            raise module.BrokerNotSelectedError("Upstox token expired")
+
+        monkeypatch.setattr(module, "live_order_adapter", unavailable)
+
+    outcome = await run(wiring)
+    assert outcome.step == step
+    assert len(refusal_alerts) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_error_is_announced_not_just_logged(wiring, refusal_alerts, monkeypatch) -> None:
+    """The path nobody writes an alert for, which is why it is announced centrally."""
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("broker exploded")
+
+    monkeypatch.setattr(module, "live_order_adapter", boom)
+    outcome = await run(wiring)
+    assert outcome.step == "error"
+    assert "broker exploded" in refusal_alerts[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "prepare"),
+    [
+        ("paper deployment", lambda state: None),
+        ("approval disabled", lambda state: setattr(state, "controls", controls(approval="DISABLED"))),
+        ("no broker chosen", lambda state: setattr(state, "controls", controls(broker="NONE"))),
+        ("already handled", lambda state: setattr(state, "handled", True)),
+    ],
+)
+async def test_a_refusal_by_configuration_stays_silent(wiring, refusal_alerts, label: str, prepare) -> None:
+    """Otherwise a deployment that declines by design alerts on every signal.
+
+    An alert the operator has no reason to act on is worse than none: it is what
+    teaches them to stop reading these messages, which would reproduce the
+    original silence by a different route.
+    """
+    prepare(wiring)
+    sett = settings(mode="PAPER") if label == "paper deployment" else settings()
+    outcome = await run(wiring, sett=sett)
+    assert outcome.acted is False
+    assert refusal_alerts == []
+
+
+@pytest.mark.asyncio
+async def test_the_same_reason_is_announced_once_not_once_per_signal(wiring, refusal_alerts) -> None:
+    """A failing gate refuses every signal of the session; it is one message."""
+    wiring.readiness = readiness(False, ("broker_reconciliation",))
+    for _ in range(4):
+        await run(wiring)
+    assert len(refusal_alerts) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_different_reason_is_still_announced_inside_the_window(wiring, refusal_alerts) -> None:
+    """Throttled per reason, not per path: a second, different failure is news."""
+    wiring.readiness = readiness(False, ("broker_reconciliation",))
+    await run(wiring)
+    wiring.readiness = readiness(False, ("administrator_activation",))
+    await run(wiring)
+    assert len(refusal_alerts) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_unavailable_throttle_still_sends_the_alert(wiring, refusal_alerts) -> None:
+    """Fails toward telling the operator. A duplicate is a nuisance; silence is the bug."""
+    wiring.redis.fail = True
+    wiring.readiness = readiness(False, ("broker_reconciliation",))
+    await run(wiring)
+    await run(wiring)
+    assert len(refusal_alerts) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_undelivered_approval_is_not_reported_as_asked(wiring, refusal_alerts, monkeypatch) -> None:
+    """request_live_approval returns the row whether or not Telegram took it.
+
+    Treating a BLOCKED approval as "requested" would tell the scanner an
+    operator had been asked when nobody was, and the row would sit unanswered
+    looking like an operator who ignored it.
+    """
+
+    async def blocked(_session, _settings, **_kwargs):
+        return SimpleNamespace(reference_id="ref-2", status=module.BLOCKED, block_reason="Telegram alert failed: 403")
+
+    monkeypatch.setattr(module, "request_live_approval", blocked)
+    outcome = await run(wiring)
+    assert outcome.acted is False
+    assert outcome.step == "approval_undelivered"
+    assert "403" in outcome.detail
+    # Telegram just refused the keyboard message; a plain one may still land.
+    assert len(refusal_alerts) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_refusal_alert_never_changes_the_outcome(
+    wiring, refusal_alerts, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """By this point the decision not to trade is already made and recorded."""
+
+    class BrokenNotifier:
+        def __init__(self, _settings) -> None:  # noqa: ANN001
+            pass
+
+        async def send_message(self, *_args, **_kwargs):
+            raise RuntimeError("telegram down")
+
+    import app.services.telegram as telegram_module
+
+    monkeypatch.setattr(telegram_module, "TelegramNotificationService", BrokenNotifier)
+    wiring.readiness = readiness(False, ("broker_reconciliation",))
+    outcome = await run(wiring)
+    assert outcome.step == "gates"
+    assert refusal_alerts == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_telegram_row_falls_back_to_the_environment(
+    wiring, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The alert must survive the database being the thing that broke.
+
+    configured_settings reads an encrypted row. On the path reporting a fault
+    that may itself be a database fault, letting that read raise would lose the
+    message to the very failure it describes.
+    """
+    sent: list[str] = []
+
+    class FakeNotifier:
+        def __init__(self, used) -> None:  # noqa: ANN001
+            self.used = used
+
+        async def send_message(self, text, keyboard=None, parse_mode=None):  # noqa: ANN001, ARG002
+            sent.append(text)
+
+    async def unreadable(_settings):
+        raise RuntimeError("database unreachable")
+
+    import app.services.telegram as telegram_module
+    import app.services.telegram_config as telegram_config_module
+
+    monkeypatch.setattr(telegram_config_module, "configured_settings", unreadable)
+    monkeypatch.setattr(telegram_module, "TelegramNotificationService", FakeNotifier)
+
+    wiring.readiness = readiness(False, ("broker_reconciliation",))
+    sett = settings()
+    sett.telegram_is_configured = True
+    outcome = await run(wiring, sett=sett)
+    assert outcome.step == "gates"
+    assert len(sent) == 1
+
+
+def test_every_refusal_this_module_can_return_is_classified() -> None:
+    """The completeness guard.
+
+    The original defect was not a wrong classification but an absent one: a
+    refusal nobody decided about is a refusal nobody hears. Rather than trusting
+    that whoever adds the next `BridgeOutcome(False, ...)` remembers to classify
+    it, this reads the steps back out of the source and fails if one belongs to
+    neither set.
+    """
+    import re
+    from pathlib import Path
+
+    source = (Path(module.__file__)).read_text()
+    steps = set(re.findall(r"BridgeOutcome\(\s*False,\s*\n?\s*[\"'](\w+)[\"']", source))
+    assert steps, "no refusal steps found -- the pattern this test scans for has moved"
+
+    classified = module.ANNOUNCED_REFUSALS | module.SILENT_REFUSALS
+    unclassified = steps - classified
+    assert not unclassified, (
+        f"These refusals are neither announced nor deliberately silent: {sorted(unclassified)}. "
+        "Add each to ANNOUNCED_REFUSALS or SILENT_REFUSALS; defaulting to silence is the bug."
+    )
+
+
+def test_the_two_refusal_sets_do_not_overlap() -> None:
+    assert not (module.ANNOUNCED_REFUSALS & module.SILENT_REFUSALS)

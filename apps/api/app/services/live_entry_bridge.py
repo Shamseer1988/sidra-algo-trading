@@ -19,8 +19,16 @@ same reason.
 its output is evidence. This path's output is money, and an operator who
 approved a signal and saw nothing happen cannot tell a refusal from a bug --
 which is exactly the state this module was written to end. Every refusal is
-logged with its reason, and a refusal after the point where an operator was
-asked is reported to them.
+logged with its reason, and a refusal the operator would not otherwise see is
+sent to Telegram.
+
+That last part originally covered only the refusals *after* an order was
+attempted, which left the whole pre-ask path silent: under TELEGRAM_APPROVAL an
+operator who had armed the system saw a paper alert, no approval buttons, and
+no explanation, because the gate check that stopped it returned quietly into a
+container log. ``ANNOUNCED_REFUSALS`` below names which refusals are sent and,
+just as deliberately, which are not -- a deployment configured not to trade live
+must not alert on every signal it declines by design.
 
 **The gates are re-read here, not trusted from earlier.** ``overall_ready``
 covers the activation, the reconciliation and the runtime together, and it is
@@ -37,6 +45,7 @@ whether to *ask*.
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
+from hashlib import sha256
 from typing import Any
 
 from redis.asyncio import Redis
@@ -45,7 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import ApplicationSetting, LiveOrderApproval, LiveOrderSubmission, PaperSignal
-from app.services.live_approval import request_live_approval
+from app.services.live_approval import BLOCKED, request_live_approval
 from app.services.live_execution import submit_live_order
 from app.services.live_execution_gateway import BrokerNotSelectedError, live_order_adapter
 from app.services.live_orders import LiveOrderRequest
@@ -58,6 +67,68 @@ logger = logging.getLogger(__name__)
 TELEGRAM_APPROVAL = "TELEGRAM_APPROVAL"
 AUTOMATIC = "AUTOMATIC"
 DISABLED = "DISABLED"
+
+# Which refusals reach the operator, and why the rest do not.
+#
+# The module docstring says silence is not an acceptable refusal, and until now
+# that held only for refusals *after* an order was attempted. Everything before
+# that point -- a lapsed gate, an unnameable instrument, a broker that stopped
+# answering -- returned quietly and was visible only in container logs. Under
+# TELEGRAM_APPROVAL that is the whole of the pre-ask path, so an operator armed
+# and waiting saw a paper alert, no approval buttons, and nothing to explain it.
+#
+# The test for inclusion is whether the refusal contradicts what the operator
+# believes. A deployment configured not to trade live refuses every signal by
+# design; saying so each time would bury the refusals that matter. A gate that
+# failed after the operator armed the system is the opposite: it is the message
+# they most need and the one they were least likely to get.
+ANNOUNCED_REFUSALS = frozenset(
+    {
+        "gates",  # armed, then something lapsed
+        "instrument",  # the symbol cannot be named at this broker
+        "signal",  # the signal itself will not convert to an order
+        "broker_unavailable",  # a broker was chosen and did not answer
+        "approval_undelivered",  # the ask itself never reached Telegram
+        "error",  # a bug on this path
+    }
+)
+
+# Deliberately NOT announced. Spelled out as a set rather than left implicit,
+# because "not in the announce set" is how the original silence happened: a
+# refusal nobody classified is a refusal nobody hears. A test asserts that every
+# step this module can return appears in one set or the other, so a refusal
+# added later cannot join the silent ones by omission.
+SILENT_REFUSALS = frozenset(
+    {
+        "runtime",  # this deployment is paper; every signal would alert
+        "approval_mode",  # DISABLED, or an unrecognised mode: a configuration choice
+        "broker",  # no broker selected: likewise deliberate
+        "duplicate",  # a re-delivered candle -- the deduplication working
+        "refused",  # _announce_automatic already reported it, with more detail
+        "unprotected",  # likewise, and far more loudly than this would
+    }
+)
+
+# One message per distinct reason, not per signal. A failing gate refuses every
+# signal for the rest of the session, and five hours of identical alerts is how
+# an operator learns to swipe these away without reading them -- which would
+# reproduce the silence this exists to end, by a different route.
+REFUSAL_REPEAT_SECONDS = 1800
+
+_REFUSAL_HEADINGS = {
+    "gates": "⛔ <b>LIVE ENTRY BLOCKED</b>",
+    "instrument": "\U0001f6ab <b>LIVE ENTRY SKIPPED</b>",
+    "signal": "\U0001f6ab <b>LIVE ENTRY SKIPPED</b>",
+    "broker_unavailable": "\U0001f6ab <b>LIVE ENTRY SKIPPED</b>",
+    "approval_undelivered": "\U0001f6ab <b>APPROVAL NOT DELIVERED</b>",
+    "error": "\U0001f6a8 <b>LIVE ENTRY FAILED</b>",
+}
+
+_REFUSAL_HINTS = {
+    "gates": "Clear this on the Risk screen or every further signal today is skipped too.",
+    "broker_unavailable": "Check the broker connection; further signals will be skipped until it answers.",
+    "error": "This is a fault on the live path, not a trading decision. Check the API logs.",
+}
 
 
 @dataclass(frozen=True)
@@ -169,6 +240,93 @@ async def _announce_automatic(settings: Settings, signal: PaperSignal, decision,
         logger.exception("live_entry_bridge.announce_failed signal_id=%s", signal.id)
 
 
+async def _should_announce(redis: Redis, outcome: BridgeOutcome) -> bool:
+    """True at most once per ``REFUSAL_REPEAT_SECONDS`` for a given reason.
+
+    Keyed on the reason rather than the signal, because the same failing gate
+    refuses every signal of the session and the operator needs to be told once,
+    not eleven times. A different reason -- the gate clears and the broker then
+    stops answering -- is a different key and is announced on its own.
+
+    **A Redis that cannot answer sends the message.** A duplicate alert is a
+    nuisance; a suppressed one is the failure this whole function exists to end,
+    so the unavailable case fails toward telling the operator.
+    """
+    digest = sha256(f"{outcome.step}:{outcome.detail}".encode()).hexdigest()[:16]
+    try:
+        return bool(await redis.set(f"live:bridge:refusal:{digest}", "1", ex=REFUSAL_REPEAT_SECONDS, nx=True))
+    except Exception:  # noqa: BLE001 - never let the throttle silence the alert
+        logger.warning("live_entry_bridge.refusal_throttle_unavailable step=%s", outcome.step)
+        return True
+
+
+async def _telegram_settings(settings: Settings) -> Settings:
+    """The Telegram configuration, preferring the stored one but never requiring it.
+
+    ``configured_settings`` reads an encrypted row from the database. On the
+    path that reports a failure that may itself *be* a database failure, letting
+    that read raise would lose the alert to the very fault it describes. The
+    environment's own token is the fallback, which is what ``request_live_approval``
+    has always used.
+    """
+    try:
+        from app.services.telegram_config import configured_settings
+
+        return await configured_settings(settings)
+    except Exception:  # noqa: BLE001 - a stored override is a preference, not a requirement
+        logger.warning("live_entry_bridge.telegram_config_unreadable; falling back to environment settings")
+        return settings
+
+
+async def _announce_refusal(
+    settings: Settings,
+    redis: Redis,
+    signal: PaperSignal,
+    outcome: BridgeOutcome,
+) -> None:
+    """Tell the operator about a refusal they would otherwise only find in logs.
+
+    Never raises, and never changes the outcome: by the time this runs the
+    decision not to trade has already been made and recorded. A failed alert is
+    a reporting problem, exactly as it is on the automatic path.
+
+    The instrument token is printed rather than the broker's symbol, matching
+    what ``_announce_automatic`` already sends. Resolving the symbol needs a
+    database read, and adding one to the path that reports a failure -- possibly
+    a database failure -- would risk losing the message to the very fault it is
+    describing.
+    """
+    if outcome.step not in ANNOUNCED_REFUSALS:
+        return
+    try:
+        from app.services.telegram import TelegramNotificationService
+
+        # Throttled before anything is read, so a gate that is down for the rest
+        # of the session costs one database round trip rather than one per
+        # signal.
+        if not await _should_announce(redis, outcome):
+            logger.info("live_entry_bridge.refusal_alert_suppressed signal_id=%s step=%s", signal.id, outcome.step)
+            return
+
+        effective = await _telegram_settings(settings)
+        if not effective.telegram_is_configured:
+            return
+
+        heading = _REFUSAL_HEADINGS.get(outcome.step, "\U0001f6ab <b>LIVE ENTRY SKIPPED</b>")
+        hint = _REFUSAL_HINTS.get(outcome.step, "")
+        text = (
+            f"{heading}\n\n"
+            f"\U0001f4ca {signal.instrument_token}  {signal.side}  {signal.quantity}\n"
+            f"\U0001f4dd {outcome.detail}\n\n"
+            "<i>The paper signal was recorded. No live order was placed"
+            f"{' and none was offered for approval' if outcome.step != 'approval_undelivered' else ''}.</i>"
+            + (f"\n<i>{hint}</i>" if hint else "")
+        )
+        await TelegramNotificationService(effective).send_message(text, parse_mode="HTML")
+    except Exception:  # noqa: BLE001 - an alert must not become a second failure
+        logger.exception("live_entry_bridge.refusal_announce_failed signal_id=%s step=%s", signal.id, outcome.step)
+
+
 async def offer_live_entry(
     session: AsyncSession,
     settings: Settings,
@@ -177,10 +335,18 @@ async def offer_live_entry(
 ) -> BridgeOutcome:
     """Ask for, or place, a live entry for this signal. Never raises."""
     try:
-        return await _offer(session, settings, redis, signal)
+        outcome = await _offer(session, settings, redis, signal)
     except Exception as exc:  # noqa: BLE001 - paper execution must not be lost to this
         logger.exception("live_entry_bridge.unexpected_error signal_id=%s", signal.id)
-        return BridgeOutcome(False, "error", f"{type(exc).__name__}: {exc}")
+        outcome = BridgeOutcome(False, "error", f"{type(exc).__name__}: {exc}")
+    # Announced here rather than beside each refusal so that a refusal added
+    # later is covered by default, and so the unexpected-error path above -- the
+    # one nobody writes an alert for -- is covered at all. Only refusals: an
+    # outcome that acted has either asked the operator or already reported
+    # itself through _announce_automatic.
+    if not outcome.acted:
+        await _announce_refusal(settings, redis, signal, outcome)
+    return outcome
 
 
 async def _offer(
@@ -220,7 +386,11 @@ async def _offer(
     try:
         adapter = await live_order_adapter(settings, session)
     except BrokerNotSelectedError as exc:
-        return BridgeOutcome(False, "broker", str(exc))
+        # A different step from the "no broker selected" refusal above, although
+        # the exception type is the same. That one is a configuration choice and
+        # is silent; this one happens after a broker *was* chosen and could not
+        # be reached, which the operator needs to hear about.
+        return BridgeOutcome(False, "broker_unavailable", str(exc))
 
     # Resolved before anything is written or asked. An instrument this broker
     # cannot name is a refusal the operator should read, not an exception thrown
@@ -248,6 +418,19 @@ async def _offer(
             approval.reference_id,
             approval.status,
         )
+        # request_live_approval marks the row BLOCKED when the Telegram send
+        # failed, and returned it either way. Reporting that as "asked" would be
+        # the same lie this module was written to stop: nobody was asked, the
+        # approval will never be answered, and the operator has been told
+        # nothing. Whether the follow-up alert gets through is doubtful when
+        # Telegram just refused the first one -- but a plain message without a
+        # keyboard is a different request, and it costs one attempt to find out.
+        if approval.status == BLOCKED:
+            return BridgeOutcome(
+                False,
+                "approval_undelivered",
+                approval.block_reason or "The approval request could not be delivered; nobody was asked.",
+            )
         return BridgeOutcome(True, "approval_requested", f"Approval {approval.reference_id} requested.")
 
     # Explicit rather than "everything that is not TELEGRAM_APPROVAL". The
