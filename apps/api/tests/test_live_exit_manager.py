@@ -342,3 +342,88 @@ def test_the_position_is_matched_to_the_latest_entry_not_the_first() -> None:
     body = source[source.index("async def _signal_for") : source.index("async def _resting_stops")]
     assert "created_at.desc()" in body
     assert "created_at.asc()" not in body
+
+
+# --- matching a position to the entry that opened it ------------------------
+#
+# On 30-Sep this reported "BHARTIARTL - 7 open with no entry of ours behind it"
+# once a minute, for a position it had opened itself minutes earlier. The match
+# was a SQL equality between the position book's symbol and the submission's
+# trading_symbol -- "BHARTIARTL" against "NSE_EQ|INE397D01024" -- so the entry
+# was never found, the target and square-off were never applied, and the
+# position went unmanaged.
+#
+# The test above pins the ordering by reading the source, because the match was
+# inside a query no fake could answer honestly. Moving the match out of SQL is
+# what makes these possible, and the absence of exactly this coverage is why
+# the bug reached a live account.
+
+
+class MatchSession:
+    """Answers the day's submissions, then hands back the signal they name."""
+
+    def __init__(self, submissions, signal) -> None:
+        self._submissions = submissions
+        self._signal = signal
+        self.requested: list = []
+
+    async def scalars(self, _statement):  # noqa: ANN001
+        return list(self._submissions)
+
+    async def get(self, _model, pk):  # noqa: ANN001
+        self.requested.append(pk)
+        return self._signal
+
+
+def entry(symbol: str, token: str | None, signal_id: str = "sig-1"):
+    return SimpleNamespace(trading_symbol=symbol, instrument_token=token, paper_signal_id=signal_id)
+
+
+def held(symbol: str, token: str | None):
+    from app.services.broker_adapter import BrokerPositionRecord
+
+    return BrokerPositionRecord(symbol=symbol, net_quantity=Decimal("-7"), instrument_token=token)
+
+
+BHARTI = "NSE_EQ|INE397D01024"
+
+# Real bounds: the statement is still built for real, so a window of None would
+# fail inside SQLAlchemy rather than exercising the match.
+WINDOW = (datetime(2026, 9, 30, tzinfo=UTC), datetime(2026, 10, 1, tzinfo=UTC))
+
+
+@pytest.mark.asyncio
+async def test_the_entry_is_found_when_the_broker_renames_the_instrument() -> None:
+    """The regression: our own entry, reported as belonging to nobody."""
+    wanted = object()
+    session = MatchSession([entry(BHARTI, BHARTI)], wanted)
+    found = await module._signal_for(session, held("BHARTIARTL", BHARTI), *WINDOW)
+    assert found is wanted, "the entry that opened this position was not matched to it"
+
+
+@pytest.mark.asyncio
+async def test_a_position_from_another_instrument_finds_no_entry() -> None:
+    """A wrong match would close a position against the wrong target."""
+    session = MatchSession([entry(BHARTI, BHARTI)], object())
+    found = await module._signal_for(session, held("RELIANCE", "NSE_EQ|INE002A01018"), *WINDOW)
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_the_most_recent_matching_entry_wins() -> None:
+    """The query orders newest first; the match must take the first one it sees."""
+    session = MatchSession(
+        [entry(BHARTI, BHARTI, "newest"), entry(BHARTI, BHARTI, "older")],
+        object(),
+    )
+    await module._signal_for(session, held("BHARTIARTL", BHARTI), *WINDOW)
+    assert session.requested == ["newest"]
+
+
+@pytest.mark.asyncio
+async def test_a_broker_without_tokens_still_matches_on_symbol() -> None:
+    """Firstock resolves real symbols; that path must keep working."""
+    wanted = object()
+    session = MatchSession([entry("RVNL", "NSE_EQ|INE415G01027")], wanted)
+    found = await module._signal_for(session, held("RVNL", None), *WINDOW)
+    assert found is wanted

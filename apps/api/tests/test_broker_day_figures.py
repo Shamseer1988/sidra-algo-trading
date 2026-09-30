@@ -195,9 +195,7 @@ async def test_a_second_fetch_appends_rather_than_replacing():
     async with SessionLocal() as session:
         rows = list(
             (
-                await session.scalars(
-                    select(BrokerDaySnapshot).where(BrokerDaySnapshot.session_date == SESSION_DATE)
-                )
+                await session.scalars(select(BrokerDaySnapshot).where(BrokerDaySnapshot.session_date == SESSION_DATE))
             ).all()
         )
     assert len(rows) == 2
@@ -225,9 +223,7 @@ async def test_the_history_screen_compares_against_the_newest_fetch():
 
     from app.services.trade_history import reconcile_day
 
-    status, _ = reconcile_day(
-        live_trades=1, local_gross=Decimal("500"), local_charges=Decimal("40"), snapshot=newest
-    )
+    status, _ = reconcile_day(live_trades=1, local_gross=Decimal("500"), local_charges=Decimal("40"), snapshot=newest)
     assert status == MATCHED
 
 
@@ -236,8 +232,6 @@ async def test_an_unreported_figure_is_stored_as_absent_not_zero():
         await figures.record(session, SESSION_DATE, figures.DayFigures(None, Decimal("40"), None, None, {}))
         await session.commit()
     async with SessionLocal() as session:
-        row = await session.scalar(
-            select(BrokerDaySnapshot).where(BrokerDaySnapshot.session_date == SESSION_DATE)
-        )
+        row = await session.scalar(select(BrokerDaySnapshot).where(BrokerDaySnapshot.session_date == SESSION_DATE))
     assert row.realized_pnl is None
     assert row.charges == Decimal("40.0000")

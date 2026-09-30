@@ -56,6 +56,7 @@ from app.services.broker_adapter import (
     STATUS_UNREADABLE,
     TERMINAL_STATUSES,
     BrokerAdapter,
+    BrokerPositionRecord,
 )
 from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
 from app.services.trading_calendar import MARKET_TIMEZONE
@@ -122,18 +123,27 @@ class LiveReconciliationReport:
         return f"Trading blocked: {blocking} blocking ({kinds}), {review} for review."[:255]
 
 
-def _plausible_range(submissions: list[LiveOrderSubmission], symbol: str) -> tuple[Decimal, Decimal]:
+def _plausible_range(submissions: list[LiveOrderSubmission], position: BrokerPositionRecord) -> tuple[Decimal, Decimal]:
     """The most long and the most short our own orders today could have left.
 
     Counted from submissions the broker accepted, because a rejected one created
     nothing. Gross rather than net on each side so a partially filled exit still
     falls inside the range: we sent a buy for 143 and a sell for 143, so any net
     from -143 to +143 is ours, whatever filled.
+
+    Matched on the instrument token. This used to compare the position's symbol
+    against the submission's ``trading_symbol``, which on Upstox are
+    "BHARTIARTL" and "NSE_EQ|INE397D01024" -- never equal, so the range came
+    back (0, 0) and a position this system had just opened itself was reported
+    as UNEXPLAINED_POSITION and blocked all further trading. The gate was right
+    to block on what it was told; it was being told the wrong thing.
     """
     gross_long = Decimal("0")
     gross_short = Decimal("0")
     for submission in submissions:
-        if submission.trading_symbol != symbol or submission.status not in LIVE_PLACED_STATUSES:
+        if submission.status not in LIVE_PLACED_STATUSES:
+            continue
+        if not position.identifies(submission.instrument_token, submission.trading_symbol):
             continue
         quantity = Decimal(str(submission.quantity or 0))
         if submission.transaction_type == "BUY":
@@ -337,7 +347,7 @@ async def reconcile_live_execution(
         # we placed today. A net inside that range is exposure this system
         # created; outside it, something else did, and that is the case the
         # finding was always meant to catch.
-        gross_long, gross_short = _plausible_range(submissions, symbol)
+        gross_long, gross_short = _plausible_range(submissions, position)
         if net == gross_long - gross_short:
             continue
         if -gross_short <= net <= gross_long:

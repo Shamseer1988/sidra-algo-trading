@@ -113,7 +113,7 @@ async def _latest_close(session: AsyncSession, instrument_token: str) -> Decimal
     return _decimal(candle.close) if candle is not None else None
 
 
-async def _signal_for(session: AsyncSession, symbol: str, start, end) -> PaperSignal | None:  # noqa: ANN001
+async def _signal_for(session: AsyncSession, position, start, end) -> PaperSignal | None:  # noqa: ANN001
     """The trade this position belongs to, by the entry we placed for it today.
 
     Entries only: a stop carries the same signal, and taking the latest row
@@ -123,11 +123,17 @@ async def _signal_for(session: AsyncSession, symbol: str, start, end) -> PaperSi
     trades are allowed and only one position is held at a time -- and the
     position open now belongs to the latest entry. Taking the earliest would
     manage the second trade against the first one's target and square-off time.
+
+    Candidates are filtered in Python rather than by a SQL equality on the
+    symbol. The position book and the order record name the same instrument
+    differently -- "BHARTIARTL" against "NSE_EQ|INE397D01024" -- so the SQL
+    match found nothing and every position this system opened was reported as
+    having no entry behind it, once a minute, while going unmanaged. The day's
+    rows are few, so reading them and matching on the token costs nothing.
     """
-    submission = await session.scalar(
+    rows = await session.scalars(
         select(LiveOrderSubmission)
         .where(
-            LiveOrderSubmission.trading_symbol == symbol,
             LiveOrderSubmission.created_at >= start,
             LiveOrderSubmission.created_at < end,
             LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
@@ -135,11 +141,11 @@ async def _signal_for(session: AsyncSession, symbol: str, start, end) -> PaperSi
             LiveOrderSubmission.paper_signal_id.isnot(None),
         )
         .order_by(LiveOrderSubmission.created_at.desc())
-        .limit(1)
     )
-    if submission is None:
-        return None
-    return await session.get(PaperSignal, submission.paper_signal_id)
+    for submission in rows:
+        if position.identifies(submission.instrument_token, submission.trading_symbol):
+            return await session.get(PaperSignal, submission.paper_signal_id)
+    return None
 
 
 async def _resting_stops(session: AsyncSession, signal_id, start, end) -> list[LiveOrderSubmission]:  # noqa: ANN001
@@ -255,7 +261,7 @@ async def _sweep(settings: Settings, calendar: TradingCalendar) -> ExitSweepOutc
                 continue
             if net == 0:
                 continue
-            exits.append(await _consider(session, adapter, record.symbol, net, now, start, end))
+            exits.append(await _consider(session, adapter, record, net, now, start, end))
 
     return ExitSweepOutcome(True, "swept", f"{len(exits)} position(s) considered.", exits)
 
@@ -263,7 +269,7 @@ async def _sweep(settings: Settings, calendar: TradingCalendar) -> ExitSweepOutc
 async def _consider(
     session: AsyncSession,
     adapter: BrokerAdapter,
-    symbol: str,
+    position,  # noqa: ANN001 - BrokerPositionRecord; imported for typing would be circular at runtime
     net: Decimal,
     now: datetime,
     start,  # noqa: ANN001
@@ -271,8 +277,9 @@ async def _consider(
 ) -> PositionExit:
     quantity = int(abs(net))
     long = net > 0
+    symbol = position.symbol
 
-    signal = await _signal_for(session, symbol, start, end)
+    signal = await _signal_for(session, position, start, end)
     if signal is None:
         return PositionExit(
             symbol,

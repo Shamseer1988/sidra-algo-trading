@@ -310,6 +310,7 @@ def submission(
     broker_order_numbers: list[str] | None = None,
     status: str = "ACCEPTED",
     symbol: str = "RVNL",
+    token: str = "NSE_EQ|INE415G01027",
     side: str = "SELL",
     quantity: int = 143,
 ) -> SimpleNamespace:
@@ -319,6 +320,10 @@ def submission(
         broker_order_numbers=broker_order_numbers or [],
         status=status,
         trading_symbol=symbol,
+        # Carried separately from the symbol because the two are not
+        # interchangeable: on Upstox the submission's symbol IS the token, and
+        # the position book's is not.
+        instrument_token=token,
         transaction_type=side,
         quantity=quantity,
         created_at=datetime.now(UTC),
@@ -434,3 +439,63 @@ async def test_a_rejected_submission_explains_no_exposure() -> None:
     )
     assert "UNEXPLAINED_POSITION" in kinds(report)
     assert report.safe_to_trade is False
+
+
+# --- the 30-Sep block -------------------------------------------------------
+#
+# A BHARTIARTL short this system opened itself came back UNEXPLAINED_POSITION
+# with "at most 0 long, 0 short", and blocked all trading for the rest of the
+# session. _plausible_range compared the position's symbol against the
+# submission's trading_symbol. On Upstox those are "BHARTIARTL" and
+# "NSE_EQ|INE397D01024", because UpstoxAdapter.describe() puts the token in the
+# symbol field. They never matched, so our own order contributed nothing to the
+# range and the gate concluded something else had opened the position.
+#
+# The gate behaved correctly on the facts it was given. The facts were wrong.
+
+
+def upstox_adapter_for(positions, orders=None):
+    return UpstoxAdapter(FakeBroker(orders=orders or [], positions=positions))
+
+
+BHARTI_TOKEN = "NSE_EQ|INE397D01024"
+
+
+async def test_a_position_we_opened_is_not_unexplained_when_upstox_renames_it() -> None:
+    """The regression that stopped a live session after one fill."""
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(symbol=BHARTI_TOKEN, token=BHARTI_TOKEN, side="SELL", quantity=7)]),
+        upstox_adapter_for([{"trading_symbol": "BHARTIARTL", "instrument_token": BHARTI_TOKEN, "quantity": -7}]),
+    )
+    assert "UNEXPLAINED_POSITION" not in kinds(report), report.summary()
+    assert report.safe_to_trade, report.summary()
+
+
+async def test_exposure_we_did_not_create_still_blocks_under_upstox_naming() -> None:
+    """The safety property must survive the fix: a stranger's position still blocks."""
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(symbol=BHARTI_TOKEN, token=BHARTI_TOKEN, side="SELL", quantity=7)]),
+        upstox_adapter_for(
+            [{"trading_symbol": "RELIANCE", "instrument_token": "NSE_EQ|INE002A01018", "quantity": -50}]
+        ),
+    )
+    assert "UNEXPLAINED_POSITION" in kinds(report)
+    assert not report.safe_to_trade
+
+
+async def test_more_than_we_could_have_opened_still_blocks_under_upstox_naming() -> None:
+    """Matching the instrument must not stop the quantity from being checked."""
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(symbol=BHARTI_TOKEN, token=BHARTI_TOKEN, side="SELL", quantity=7)]),
+        upstox_adapter_for([{"trading_symbol": "BHARTIARTL", "instrument_token": BHARTI_TOKEN, "quantity": -70}]),
+    )
+    assert "UNEXPLAINED_POSITION" in kinds(report)
+
+
+async def test_a_position_book_without_a_token_still_matches_on_symbol() -> None:
+    """Firstock names its orders properly; that path must keep working."""
+    report = await reconcile_live_execution(
+        FakeSession([], [submission(symbol="RVNL", token="NSE_EQ|INE415G01027", side="SELL", quantity=143)]),
+        adapter_for(positions=[{"tradingSymbol": "RVNL", "netQuantity": -143}]),
+    )
+    assert "UNEXPLAINED_POSITION" not in kinds(report), report.summary()

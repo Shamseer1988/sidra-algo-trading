@@ -173,12 +173,42 @@ class BrokerPositionRecord:
     ``day_pnl`` is realised plus unrealised for this position, and follows the
     same rule for the same reason: the daily stop is computed from it, and a
     position whose P&L we cannot read is a day whose P&L we cannot bound.
+
+    ``instrument_token`` exists because ``symbol`` could not be joined against
+    anything. An order is placed against a token; the position book reports a
+    tradable name. On Upstox those are "NSE_EQ|INE397D01024" and "BHARTIARTL",
+    and every piece of code that tried to match an order to the position it
+    opened compared one against the other and concluded there was no position:
+    no protective stop was placed behind a real fill, the reconciler called the
+    position unexplained and blocked trading, and the exit manager reported an
+    entry it could not find. One live short, three failures, one mismatch.
+
+    So the token travels with the row and is the join key; ``symbol`` is for
+    operators to read. It is optional only because a broker may not return it,
+    and a row without one still has to be reportable.
     """
 
     symbol: str
     net_quantity: Decimal | None
     day_pnl: Decimal | None = None
+    instrument_token: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+    def identifies(self, token: str | None, symbol: str | None) -> bool:
+        """Whether this row is the position that order opened.
+
+        Token first, because it is exact. Symbol only as a fallback, and only
+        when neither side is empty -- matching two blanks would make every
+        unidentifiable row match every order.
+        """
+        if token and self.instrument_token and self.instrument_token == token:
+            return True
+        if token and self.symbol and self.symbol == token:
+            # A broker that reports the token in the symbol field, which is what
+            # this adapter's own describe() does. Matching it keeps a row
+            # identifiable rather than silently unmatched.
+            return True
+        return bool(symbol and self.symbol and self.symbol == symbol)
 
 
 @dataclass(frozen=True)
@@ -201,6 +231,18 @@ class MarginQuote:
         if not self.readable or self.required is None or self.available is None:
             return False
         return self.required <= self.available
+
+
+def _text_or_none(value: Any) -> str | None:
+    """A broker string, or None for absent and blank alike.
+
+    Empty is folded into None deliberately: an empty token that compared equal
+    to another empty token would make two unidentifiable positions match.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
@@ -449,6 +491,9 @@ class UpstoxAdapter:
                     symbol=str(raw.get("trading_symbol") or raw.get("instrument_token") or "unknown"),
                     net_quantity=_decimal_or_none(raw.get("quantity")),
                     day_pnl=_combined_pnl(raw, total_keys=("pnl",), parts=("realised", "unrealised")),
+                    # The field orders are actually placed against, and so the
+                    # only one an order can be matched back to.
+                    instrument_token=_text_or_none(raw.get("instrument_token")),
                     raw=raw,
                 )
             )
@@ -633,6 +678,7 @@ class FirstockAdapter:
                 BrokerPositionRecord(
                     symbol=str(raw.get("tradingSymbol") or "unknown"),
                     net_quantity=_decimal_or_none(raw.get("netQuantity")),
+                    instrument_token=_text_or_none(raw.get("token") or raw.get("instrumentToken")),
                     # Firstock's own reference contradicts itself here: the prose
                     # names unrealizedMTOM and the sample response shows totalMTM.
                     # Both spellings are tried rather than picking the one that

@@ -73,8 +73,16 @@ def unknown(detail: str = "timeout"):
     return SimpleNamespace(status="UNKNOWN", broker_order_ids=[], detail=detail, failure_code=None, failure_name=None)
 
 
-def position(net, symbol: str = "RVNL"):
-    return [SimpleNamespace(symbol=symbol, net_quantity=net, day_pnl=None, raw={})]
+def position(net, symbol: str = "RVNL", token: str | None = "NSE_EQ|INE415G01027"):
+    """A real BrokerPositionRecord, not a stand-in.
+
+    Built from the actual dataclass because the matching logic lives on it. A
+    SimpleNamespace here would have passed while the live system could not join
+    an order to the position it had just opened.
+    """
+    from app.services.broker_adapter import BrokerPositionRecord
+
+    return [BrokerPositionRecord(symbol=symbol, net_quantity=net, day_pnl=None, instrument_token=token, raw={})]
 
 
 class FakeSession:
@@ -103,8 +111,14 @@ def signal(stop: str = "2850.00", token: str = "NSE_EQ|INE415G01027"):
     return SimpleNamespace(id=uuid4(), instrument_token=token, stop_price=Decimal(stop), side="SHORT")
 
 
-def submission(product: str = "I", symbol: str = "RVNL"):
-    return SimpleNamespace(client_order_id="sidra-1", paper_signal_id=uuid4(), trading_symbol=symbol, product=product)
+def submission(product: str = "I", symbol: str = "RVNL", token: str = "NSE_EQ|INE415G01027"):
+    return SimpleNamespace(
+        client_order_id="sidra-1",
+        paper_signal_id=uuid4(),
+        trading_symbol=symbol,
+        instrument_token=token,
+        product=product,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -318,3 +332,95 @@ def test_protection_does_not_route_an_exit_through_the_entry_gates() -> None:
     # A call, not a mention: the docstring names it to explain why it is absent.
     assert "submit_live_order(" not in source
     assert "prepare_submission(" in source and "send_prepared_order(" in source
+
+
+# --- the 30-Sep live failure ------------------------------------------------
+#
+# A real BHARTIARTL short filled at the broker and this returned "Nothing
+# filled; there is no position to protect." No stop was placed behind a live
+# position. The cause was not the fill poll being too short: it polled six
+# times over nine seconds and compared the wrong two strings every time.
+#
+# An order is placed against an instrument token. The Upstox position book
+# reports a tradable name. UpstoxAdapter.describe() puts the token in `symbol`,
+# so the submission's trading_symbol was "NSE_EQ|INE397D01024" while the
+# position book said "BHARTIARTL" -- and _held_quantity's symbol comparison can
+# only fail by returning zero, which reads exactly like "flat".
+
+
+def bharti_position(net=Decimal("-7")):
+    """The position book row as Upstox actually returned it that morning."""
+    from app.services.broker_adapter import BrokerPositionRecord
+
+    return [
+        BrokerPositionRecord(
+            symbol="BHARTIARTL",
+            net_quantity=net,
+            day_pnl=Decimal("1.40"),
+            instrument_token="NSE_EQ|INE397D01024",
+            raw={},
+        )
+    ]
+
+
+def bharti_submission():
+    """The submission as describe() actually wrote it: token in the symbol field."""
+    return submission(symbol="NSE_EQ|INE397D01024", token="NSE_EQ|INE397D01024")
+
+
+@pytest.mark.asyncio
+async def test_a_filled_short_is_protected_when_the_broker_names_it_differently() -> None:
+    """The regression. A live position must never be read as an unfilled order."""
+    adapter = FakeAdapter([bharti_position()])
+    outcome = await protect(
+        adapter,
+        sig=signal(stop="1779.02", token="NSE_EQ|INE397D01024"),
+        sub=bharti_submission(),
+    )
+
+    assert outcome.protected is True
+    assert outcome.step == "stopped", f"expected a stop to be placed, got {outcome.step}: {outcome.detail}"
+    assert outcome.quantity == 7
+    assert adapter.submitted, "no protective order reached the broker"
+    placed = adapter.submitted[0]
+    # A short is closed by buying, and the stop is sized from the broker's book.
+    assert placed.side == "BUY"
+    assert placed.quantity == 7
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_unfilled_order_is_still_reported_flat() -> None:
+    """The fix must not make every unfilled order look like a position."""
+    adapter = FakeAdapter([[]])
+    outcome = await protect(adapter, sub=bharti_submission())
+    assert outcome.step == "flat"
+    assert adapter.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_a_position_in_another_instrument_is_not_mistaken_for_ours() -> None:
+    """Matching must stay specific; a wrong match would stop the wrong position."""
+    from app.services.broker_adapter import BrokerPositionRecord
+
+    other = [
+        BrokerPositionRecord(
+            symbol="RELIANCE",
+            net_quantity=Decimal("-50"),
+            day_pnl=None,
+            instrument_token="NSE_EQ|INE002A01018",
+            raw={},
+        )
+    ]
+    adapter = FakeAdapter([other])
+    outcome = await protect(adapter, sub=bharti_submission())
+    assert outcome.step == "flat"
+    assert adapter.submitted == []
+
+
+def test_two_unidentifiable_rows_do_not_match_each_other() -> None:
+    """Empty must never equal empty, or every unknown position matches every order."""
+    from app.services.broker_adapter import BrokerPositionRecord
+
+    blank = BrokerPositionRecord(symbol="", net_quantity=Decimal("1"), instrument_token=None)
+    assert blank.identifies(None, None) is False
+    assert blank.identifies("", "") is False

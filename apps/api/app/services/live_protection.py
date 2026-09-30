@@ -97,8 +97,15 @@ def _net_quantity(raw: Any) -> Decimal | None:
         return None
 
 
-async def _held_quantity(adapter: BrokerAdapter, symbol: str) -> Decimal | None:
-    """The broker's own net quantity for this symbol, or None if unreadable.
+async def _held_quantity(adapter: BrokerAdapter, token: str, symbol: str | None) -> Decimal | None:
+    """The broker's own net quantity for this position, or None if unreadable.
+
+    Matched on the instrument token, because matching on the symbol did not
+    work and the way it failed was silent. An order is placed against
+    "NSE_EQ|INE397D01024"; the Upstox position book calls the same position
+    "BHARTIARTL". Comparing the two found nothing, and "found nothing" is
+    indistinguishable here from "flat" -- so a real 7-share short was read as an
+    unfilled order and left with no stop behind it.
 
     None and zero are kept apart on purpose. Zero means flat, which is safe and
     needs no stop; unreadable means the exposure is unknown, which is the
@@ -106,9 +113,8 @@ async def _held_quantity(adapter: BrokerAdapter, symbol: str) -> Decimal | None:
     to do nothing.
     """
     for record in await adapter.normalised_positions():
-        if record.symbol != symbol:
-            continue
-        return record.net_quantity
+        if record.identifies(token, symbol):
+            return record.net_quantity
     return Decimal("0")
 
 
@@ -194,10 +200,13 @@ async def _protect(
     if signal is None:
         return ProtectionOutcome(False, "no_signal", "The signal behind this submission is gone.")
 
+    # The token is what the order was placed against and what the position book
+    # can be joined on; the symbol is what the alert should say.
+    token = submission.instrument_token
     symbol = submission.trading_symbol
     net: Decimal | None = Decimal("0")
     for attempt in range(FILL_POLL_ATTEMPTS):
-        net = await _held_quantity(adapter, symbol)
+        net = await _held_quantity(adapter, token, symbol)
         if net is None or net != 0:
             break
         if attempt < FILL_POLL_ATTEMPTS - 1:
