@@ -266,7 +266,7 @@ async def test_the_explanation_names_where_the_budget_went() -> None:
     detail = taken.explain(4)
     assert "2 of 4 used" in detail
     assert "1 paper entry filled" in detail
-    assert "1 live order placed" in detail
+    assert "1 live trade placed" in detail
     # The gap is stated rather than hidden: live fills are not tracked yet.
     assert "did not fill" in detail
 
@@ -346,3 +346,90 @@ async def test_an_order_with_no_signal_still_uses_the_ceiling() -> None:
     await live_submission(status="ACCEPTED")
     await live_submission(status="ACCEPTED")
     assert await count() == 2
+
+
+# --- the paper journal is not a second trade --------------------------------
+#
+# On a live deployment the scanner queues a paper entry for every signal it
+# accepts, and the live path submits that same signal to the broker. Summing the
+# two tables charged one round trip to the budget twice, so with a ceiling of
+# two the first live trade of the morning ended the trading day and no further
+# signal could be taken. The operator was left waiting for a signal that the
+# counter had already ruled out.
+#
+# The money is at risk once. The paper row is a journal of that trade.
+
+
+async def filled_entry_for(signal_id) -> None:
+    """The paper entry the scanner queues for every signal, once it fills."""
+    async with SessionLocal() as session:
+        session.add(
+            PaperOrder(
+                paper_signal_id=signal_id,
+                client_order_id=f"paper:{signal_id}:entry",
+                instrument_token=TOKEN,
+                session_date=SESSION,
+                strategy_version="orb-retest-v1@1",
+                side="SELL",
+                order_type="MARKET",
+                order_role="ENTRY",
+                quantity=10,
+                filled_quantity=10,
+                status="FILLED",
+                eligible_after=datetime(2026, 9, 24, 4, 0, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+
+async def test_one_signal_traded_on_paper_and_live_is_one_trade() -> None:
+    """The regression: one live trade spent the whole two-trade day."""
+    signal = await new_signal()
+    await filled_entry_for(signal.id)
+    await live_submission_for(signal.id)
+    assert await count() == 1
+
+
+async def test_a_single_live_trade_does_not_exhaust_a_ceiling_of_two() -> None:
+    """Stated as the operator experiences it, because that is how it was found."""
+    signal = await new_signal()
+    await filled_entry_for(signal.id)
+    await live_submission_for(signal.id)
+    async with SessionLocal() as session:
+        taken = await count_filled_entries(session, SESSION)
+    assert taken.remaining(2) == 1, taken.explain(2)
+
+
+async def test_the_explanation_says_the_two_sides_are_one_trade() -> None:
+    """An operator reading 1 of 2 beside a paper row and a live row deserves why."""
+    signal = await new_signal()
+    await filled_entry_for(signal.id)
+    await live_submission_for(signal.id)
+    async with SessionLocal() as session:
+        detail = (await count_filled_entries(session, SESSION)).explain(2)
+    assert "1 of 2 used" in detail
+    assert "same trade" in detail
+
+
+async def test_two_different_signals_are_still_two_trades() -> None:
+    """The ceiling must keep working; deduplication is per signal, not blanket."""
+    first, second = await new_signal(), await new_signal()
+    await filled_entry_for(first.id)
+    await live_submission_for(first.id)
+    await filled_entry_for(second.id)
+    await live_submission_for(second.id)
+    assert await count() == 2
+
+
+async def test_a_paper_only_signal_still_uses_a_trade() -> None:
+    """Nothing about the fix may let a paper trade escape the ceiling."""
+    signal = await new_signal()
+    await filled_entry_for(signal.id)
+    assert await count() == 1
+
+
+async def test_a_live_order_with_no_paper_entry_still_uses_a_trade() -> None:
+    """Nor a live one. Overlap is subtracted, never the counts themselves."""
+    signal = await new_signal()
+    await live_submission_for(signal.id)
+    assert await count() == 1

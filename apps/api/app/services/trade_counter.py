@@ -19,8 +19,16 @@ restart, a worker crash or a Redis flush cannot lose it and cannot double it.
 There is no counter to reconcile because there is no counter — which is the
 cheapest way to satisfy "reconcile counts after restart".
 
-**Account-wide.** Every strategy and both brokers share the four. A per-strategy
-cap is a different control (``max_trades_per_day``) and is applied separately.
+**Account-wide, and counted once.** Every strategy and both brokers share the
+four. A per-strategy cap is a different control (``max_trades_per_day``) and is
+applied separately.
+
+Once, because a live deployment records the same trade twice: the scanner
+queues a paper entry for every signal it accepts, and the live path submits that
+same signal to the broker. Summing the two tables charged one round trip to the
+budget twice, so with a ceiling of two the first live trade of the morning ended
+the day and no further signal could be taken. The paper row is a journal of the
+live trade, not a second trade, and the money is only at risk once.
 
 One honest gap, called out rather than hidden. Live fills are not tracked yet:
 the live layer records submissions and their broker outcome, not executions. So
@@ -60,14 +68,24 @@ def session_bounds_utc(session_date: date) -> tuple[datetime, datetime]:
 
 @dataclass(frozen=True)
 class TradeCount:
-    """What the day has used, split by where it came from."""
+    """What the day has used, split by where it came from.
+
+    ``both`` is the number of signals that appear in each side. On a live
+    deployment that is normally every live trade: the scanner queues a paper
+    entry for every signal it accepts and the live path submits the same signal
+    to the broker, so one trade lands in both tables. Adding the two counts made
+    a single round trip spend two of the day's trades, and with a ceiling of two
+    the first live trade of the morning ended the day.
+    """
 
     paper_fills: int
     live_submissions: int
+    both: int = 0
 
     @property
     def total(self) -> int:
-        return self.paper_fills + self.live_submissions
+        """Distinct trades. A signal traded on paper and live is one trade."""
+        return self.paper_fills + self.live_submissions - self.both
 
     def remaining(self, ceiling: int) -> int:
         return max(0, ceiling - self.total)
@@ -82,14 +100,25 @@ class TradeCount:
                 "(counted per signal, so an entry and the orders that close it are one trade; "
                 "live fills are not tracked yet, so an accepted entry counts even if it did not fill)"
             )
+        if self.both:
+            parts.append(
+                f"{self.both} of those {'is the same trade' if self.both == 1 else 'are the same trades'} "
+                "on both sides, counted once"
+            )
         detail = "; ".join(parts) if parts else "nothing filled yet"
         return f"{self.total} of {ceiling} used — {detail}."
 
 
 async def count_filled_entries(session: AsyncSession, session_date: date) -> TradeCount:
-    """Today's trades, counted from fills rather than intentions."""
-    paper = await session.scalar(
-        select(func.count(func.distinct(PaperOrder.id))).where(
+    """Today's trades, counted from fills rather than intentions.
+
+    The keys are read rather than counted, because the two tables overlap and
+    only the keys can say by how much. On a live deployment the scanner queues a
+    paper entry for every signal it accepts *and* the live path submits the same
+    signal, so summing two counts charged one trade to the budget twice.
+    """
+    paper_rows = await session.scalars(
+        select(PaperOrder.paper_signal_id).where(
             PaperOrder.session_date == session_date,
             PaperOrder.order_role == "ENTRY",
             # Greater than zero, not "is filled": a partially filled entry is a
@@ -98,6 +127,8 @@ async def count_filled_entries(session: AsyncSession, session_date: date) -> Tra
             PaperOrder.filled_quantity > 0,
         )
     )
+    paper_keys = {str(value) for value in paper_rows if value is not None}
+
     start, end = session_bounds_utc(session_date)
     # Distinct signals, not rows. One trade now writes three submissions -- the
     # entry, the protective stop behind it, and the exit that closes it -- and
@@ -107,11 +138,19 @@ async def count_filled_entries(session: AsyncSession, session_date: date) -> Tra
     # placed outside a signal still exists at the exchange, and excluding it
     # would let one escape the day's ceiling entirely.
     trade_key = func.coalesce(cast(LiveOrderSubmission.paper_signal_id, String), cast(LiveOrderSubmission.id, String))
-    live = await session.scalar(
-        select(func.count(func.distinct(trade_key))).where(
+    live_rows = await session.scalars(
+        select(trade_key)
+        .where(
             LiveOrderSubmission.created_at >= start,
             LiveOrderSubmission.created_at < end,
             LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
         )
+        .distinct()
     )
-    return TradeCount(paper_fills=int(paper or 0), live_submissions=int(live or 0))
+    live_keys = {str(value) for value in live_rows if value is not None}
+
+    return TradeCount(
+        paper_fills=len(paper_keys),
+        live_submissions=len(live_keys),
+        both=len(paper_keys & live_keys),
+    )
