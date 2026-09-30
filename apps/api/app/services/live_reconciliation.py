@@ -15,9 +15,18 @@ returns an unexpected shape all fail closed rather than open.
 Why blocking is the right default for each finding:
 
 ``UNTRACKED_BROKER_ORDER``
-    The broker has a live order we have no record of. Either something else is
-    trading this account, or we lost a submission response. Adding orders on top
-    of an exposure we cannot explain is how a small problem becomes a large one.
+    The broker has an order we have no record of. Either something else is
+    trading this account, or we lost a submission response. Blocking while it is
+    still working, because adding orders on top of an exposure we cannot explain
+    is how a small problem becomes a large one.
+
+    Review, not blocking, once it has finished. The reason to block is unexplained
+    exposure, and a finished order's exposure is already in the position book,
+    where ``UNEXPLAINED_POSITION`` reads it directly and blocks on it. Blocking
+    here too checks the same fact by a proxy that never clears -- the order book
+    keeps the row all day -- so a single manual square-off ended live trading
+    until the next session. It stays visible, and the exposure check remains the
+    thing that stops trading.
 
 ``UNEXPLAINED_POSITION``
     Net quantity at the broker with no local position to account for it. Same
@@ -273,11 +282,38 @@ async def reconcile_live_execution(
             continue
 
         if local is None:
+            # An order that has already finished is not the same risk as one
+            # still working, and treating them alike made this gate impossible
+            # to clear. A working order we have no record of is exposure about
+            # to arrive that nothing here can account for: still blocking. A
+            # finished one has already had its effect, and that effect is
+            # exposure, which the position check below reads from the broker's
+            # own book and blocks on independently. Blocking here as well
+            # checks the same fact twice -- once directly, where it clears when
+            # the account is flat, and once by proxy, where it never clears at
+            # all, because the order book keeps the row for the rest of the day.
+            #
+            # The case that forced this: the operator squared off an unprotected
+            # position by hand, exactly as this system's own alert told them to,
+            # and the resulting COMPLETE order blocked all trading until the
+            # next session. A safety gate that punishes following its own
+            # instruction gets worked around, and a gate that is worked around
+            # protects nothing.
+            #
+            # Anything neither open nor terminal still blocks: an unrecognised
+            # status is not evidence that an order has finished.
+            settled = status in TERMINAL_STATUSES
             findings.append(
                 Finding(
                     kind="UNTRACKED_BROKER_ORDER",
-                    severity=BLOCKING,
-                    detail=f"Broker order {number} ({status or 'unknown status'}) has no local record.",
+                    severity=REVIEW if settled else BLOCKING,
+                    detail=(
+                        f"Broker order {number} ({status}) has no local record. It has finished, so any "
+                        "position it left is checked against the broker's position book rather than here."
+                        if settled
+                        else f"Broker order {number} ({status or 'unknown status'}) has no local record "
+                        "and may still fill. Exposure it would create cannot be accounted for."
+                    ),
                     broker_order_number=number,
                 )
             )

@@ -499,3 +499,73 @@ async def test_a_position_book_without_a_token_still_matches_on_symbol() -> None
         adapter_for(positions=[{"tradingSymbol": "RVNL", "netQuantity": -143}]),
     )
     assert "UNEXPLAINED_POSITION" not in kinds(report), report.summary()
+
+
+# --- a manual square-off must not end the trading day -----------------------
+#
+# The operator squared off an unprotected position by hand -- which this
+# system's own alert told them to do -- and the resulting COMPLETE order came
+# back UNTRACKED_BROKER_ORDER and blocked every further order until the next
+# session. There is no acknowledgement path, so the day was simply over.
+#
+# The distinction that fixes it without weakening anything: a working order we
+# cannot account for is exposure about to arrive, and still blocks. A finished
+# one has already landed, and what it left is checked directly against the
+# position book, which blocks on its own and clears when the account is flat.
+
+
+async def test_a_completed_manual_order_does_not_block_trading() -> None:
+    """The regression: one hand-placed square-off ended the session."""
+    report = await reconcile_live_execution(
+        FakeSession(),
+        adapter_for(orders=[{"orderNumber": "260930000121058", "status": "COMPLETE", "tradingSymbol": "BHARTIARTL"}]),
+    )
+    assert "UNTRACKED_BROKER_ORDER" in kinds(report), "the order must still be reported"
+    assert report.safe_to_trade, report.summary()
+
+
+async def test_a_working_order_we_cannot_account_for_still_blocks() -> None:
+    """The safety property. Exposure that has not landed yet is the dangerous case."""
+    report = await reconcile_live_execution(
+        FakeSession(),
+        adapter_for(orders=[{"orderNumber": "260930000121058", "status": "OPEN", "tradingSymbol": "BHARTIARTL"}]),
+    )
+    assert "UNTRACKED_BROKER_ORDER" in kinds(report)
+    assert not report.safe_to_trade
+
+
+@pytest.mark.parametrize("status", ["CANCELLED", "REJECTED"])
+async def test_an_untracked_order_that_never_filled_does_not_block(status: str) -> None:
+    """Cancelled and rejected left no exposure at all."""
+    report = await reconcile_live_execution(
+        FakeSession(),
+        adapter_for(orders=[{"orderNumber": "x1", "status": status, "tradingSymbol": "RVNL"}]),
+    )
+    assert report.safe_to_trade, report.summary()
+
+
+async def test_a_completed_manual_order_that_left_a_position_still_blocks() -> None:
+    """The exposure check is what stops trading, and it must still do so.
+
+    A finished untracked order downgraded to review is only safe because the
+    position it left is read from the broker's own book. If that position is
+    there and we cannot explain it, the day is still over -- which is correct.
+    """
+    report = await reconcile_live_execution(
+        FakeSession(),
+        adapter_for(
+            orders=[{"orderNumber": "260930000121058", "status": "COMPLETE", "tradingSymbol": "BHARTIARTL"}],
+            positions=[{"tradingSymbol": "BHARTIARTL", "netQuantity": -7}],
+        ),
+    )
+    assert "UNEXPLAINED_POSITION" in kinds(report)
+    assert not report.safe_to_trade, report.summary()
+
+
+async def test_an_unrecognised_status_is_not_treated_as_finished() -> None:
+    """Fail closed: not knowing a status is not evidence the order is done."""
+    report = await reconcile_live_execution(
+        FakeSession(),
+        adapter_for(orders=[{"orderNumber": "x1", "status": "WEIRD", "tradingSymbol": "RVNL"}]),
+    )
+    assert not report.safe_to_trade
