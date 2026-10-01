@@ -133,6 +133,31 @@ def read_charges(payload: dict) -> Decimal | None:
     return _number(payload.get("total"))
 
 
+def settled_charges(total: Decimal | None) -> Decimal | None:
+    """A charges total, unless it is exactly zero -- which is not a cost.
+
+    Upstox answers both of these reports before the day is settled, and an
+    unsettled day comes back as an empty P&L report and a charges breakdown
+    that totals zero. Read literally that is the broker saying a session cost
+    nothing, and the History screen said so: "UPSTOX charged ₹0 against our
+    estimate of ₹25.94. The broker's figure is the real cost." It is not. No
+    executed equity trade in India costs nothing -- STT, exchange transaction
+    charges, the SEBI turnover fee, stamp duty and GST are each non-zero and
+    none of them are waivable -- so a zero total is a figure that has not been
+    computed yet.
+
+    The same distinction this module already draws everywhere else: a broker
+    that did not report a figure is not a broker reporting zero. Returning None
+    leaves the day BROKER DATA PENDING, which is true and self-correcting --
+    fetched again after settlement it picks up the real cost.
+
+    A genuine zero would be indistinguishable from this, and that is accepted:
+    a day of trading that truly cost nothing does not exist here, while a day
+    reported as free when it was not is a figure an operator would plan around.
+    """
+    return None if total is not None and total == 0 else total
+
+
 async def fetch_upstox_day(client, session_date: date, *, segment: str = "EQ") -> DayFigures:
     """Ask Upstox what one session was worth.
 
@@ -161,7 +186,7 @@ async def fetch_upstox_day(client, session_date: date, *, segment: str = "EQ") -
     )
     return DayFigures(
         realized_pnl=realised,
-        charges=read_charges(charges_body),
+        charges=settled_charges(read_charges(charges_body)),
         turnover=turnover,
         trade_count=count or None,
         # Kept whole so a disagreement can be investigated against what the

@@ -20,6 +20,7 @@ the first thing somebody wants when they see it happen.
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import delete, select
@@ -136,6 +137,57 @@ async def test_the_fetch_asks_for_one_day_and_the_right_financial_year():
     assert first["financial_year"] == "2627"  # September 2026 is FY 2026-27
     assert result.realized_pnl == Decimal("50")
     assert result.charges == Decimal("9")
+
+
+async def test_a_day_reported_as_costing_nothing_is_a_day_not_yet_settled():
+    """The defect this guards against was on an operator's screen.
+
+    Upstox answers both reports before settlement: an empty P&L report, and a
+    charges breakdown totalling zero. The History screen read that literally and
+    told the operator "UPSTOX charged ₹0 against our estimate of ₹25.94. The
+    broker's figure is the real cost." No executed equity trade in India costs
+    nothing, so a zero there is a figure not yet computed.
+    """
+    client = FakeReportClient([[]], {"charges_breakdown": {"total": "0"}})
+    result = await figures.fetch_upstox_day(client, SESSION_DATE)
+    assert result.charges is None
+    assert result.realized_pnl is None
+
+
+async def test_a_real_charge_is_still_a_real_charge():
+    """The guard must not swallow the figure it exists to wait for."""
+    client = FakeReportClient(
+        [[{"buy_amount": "100", "sell_amount": "150"}]], {"charges_breakdown": {"total": "25.94"}}
+    )
+    assert (await figures.fetch_upstox_day(client, SESSION_DATE)).charges == Decimal("25.94")
+
+
+def test_zero_is_absence_and_a_negative_is_not():
+    # A credit note or a refunded charge is a figure the broker did report.
+    assert figures.settled_charges(Decimal("0")) is None
+    assert figures.settled_charges(Decimal("0.00")) is None
+    assert figures.settled_charges(None) is None
+    assert figures.settled_charges(Decimal("-2.50")) == Decimal("-2.50")
+    assert figures.settled_charges(Decimal("0.01")) == Decimal("0.01")
+
+
+async def test_an_unsettled_day_reads_as_pending_rather_than_free():
+    """End to end: the zero must not reach the operator as a reconciled cost."""
+    from app.services.trade_history import BROKER_DATA_PENDING, reconcile_day
+
+    client = FakeReportClient([[]], {"charges_breakdown": {"total": "0"}})
+    day = await figures.fetch_upstox_day(client, SESSION_DATE)
+    snapshot = SimpleNamespace(
+        broker="UPSTOX",
+        source="upstox:trade/profit-loss",
+        realized_pnl=day.realized_pnl,
+        charges=day.charges,
+    )
+    status, note = reconcile_day(
+        live_trades=2, local_gross=Decimal("172.27"), local_charges=Decimal("25.94"), snapshot=snapshot
+    )
+    assert status == BROKER_DATA_PENDING
+    assert "₹0" not in note
 
 
 async def test_the_fetch_stops_paging_on_a_short_page():
