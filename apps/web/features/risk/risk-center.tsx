@@ -86,14 +86,17 @@ export function RiskCenter({
       */}
       <TradingCard isAdmin={isAdmin} onMessage={onMessage} />
 
-      <details className="mt-6">
-        <summary className="cursor-pointer text-sm text-slate-400 hover:text-slate-200">
-          Arming, reconciliation and the individual gates
-        </summary>
-        <div className="mt-4">
-          <LiveExecutionControls safety={safety} isAdmin={isAdmin} onMessage={onMessage} />
-        </div>
-      </details>
+      {/*
+        Not collapsed. The first version of this put the panel inside a
+        <details>, which hid arming and reconciliation behind a disclosure
+        triangle nobody had been told about -- nine end-to-end tests went red
+        for exactly the reason an operator would have been stuck: the controls
+        were not visible. The goal was to put ONE clear answer above these
+        tools, never to hide them.
+      */}
+      <div className="mt-6">
+        <LiveExecutionControls safety={safety} isAdmin={isAdmin} onMessage={onMessage} />
+      </div>
     </section>
   );
 }

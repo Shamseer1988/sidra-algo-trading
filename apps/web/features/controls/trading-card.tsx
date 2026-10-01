@@ -57,10 +57,14 @@ export function TradingCard({
   const load = useCallback(async () => {
     try {
       setStatus(await api.tradingStatus());
-    } catch (error) {
-      onMessage(error instanceof Error ? error.message : "Could not read trading status");
+    } catch {
+      // Deliberately not surfaced as a message and deliberately not left as
+      // null: this card owns the emergency stop, and a card that renders
+      // nothing when a *reporting* endpoint fails takes the emergency stop off
+      // the screen with it. The status is unknown; the button is not.
+      setStatus(null);
     }
-  }, [onMessage]);
+  }, []);
 
   useEffect(() => {
     void load();
@@ -71,8 +75,9 @@ export function TradingCard({
     return () => clearInterval(timer);
   }, [load, refreshKey]);
 
-  if (!status) return null;
-  const tone = TONE[status.state] ?? TONE.BLOCKED;
+  // Rendered even with no status. An operator who cannot be told what is
+  // happening is exactly the operator most likely to want to stop everything.
+  const tone = status ? (TONE[status.state] ?? TONE.BLOCKED) : TONE.BLOCKED;
 
   async function act(run: () => Promise<unknown>, done: string) {
     setBusy(true);
@@ -91,16 +96,24 @@ export function TradingCard({
     <article className={`panel mt-6 border p-6 sm:p-7 ${tone.ring}`}>
       <div className="flex items-center gap-2">
         <span className={`h-2 w-2 rounded-full ${tone.dot}`} />
-        <p className={`eyebrow ${tone.label}`}>{status.state}</p>
+        <p className={`eyebrow ${tone.label}`}>{status ? status.state : "UNKNOWN"}</p>
       </div>
 
-      <h3 className="mt-2 text-xl font-semibold text-white">{status.headline}</h3>
-      <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">{status.detail}</p>
-      <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">{status.remedy}</p>
+      <h3 className="mt-2 text-xl font-semibold text-white">
+        {status ? status.headline : "Trading status is unavailable"}
+      </h3>
+      <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300">
+        {status
+          ? status.detail
+          : "This screen cannot reach the status endpoint, so it cannot say whether anything is trading. The gates themselves are unaffected and still enforce on every order."}
+      </p>
+      <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
+        {status ? status.remedy : "Emergency stop still works. Check the API container if this persists."}
+      </p>
 
       {isAdmin && (
         <div className="mt-6 flex flex-wrap gap-3">
-          {status.can_pause && (
+          {status?.can_pause && (
             <button
               disabled={busy}
               onClick={() => void act(() => api.disarmLive(), "Paused. Open positions are still managed.")}
@@ -110,7 +123,7 @@ export function TradingCard({
               Pause live orders
             </button>
           )}
-          {status.can_resume && (
+          {status?.can_resume && (
             <button
               disabled={busy}
               onClick={() => void act(() => api.armLive("Resumed from the trading card"), "Resumed.")}
@@ -120,7 +133,7 @@ export function TradingCard({
               Resume live orders
             </button>
           )}
-          {status.emergency_stop_active ? (
+          {status?.emergency_stop_active ? (
             <button disabled={busy} onClick={() => void act(() => api.clearEmergencyStop(), "Emergency stop cleared.")} className="secondary-button">
               Clear emergency stop
             </button>

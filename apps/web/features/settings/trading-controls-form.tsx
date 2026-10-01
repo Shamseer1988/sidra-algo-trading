@@ -111,6 +111,12 @@ export function TradingControlsForm({ isAdmin, onMessage }: { isAdmin: boolean; 
     <section className="mt-6 max-w-5xl space-y-6">
       <EffectiveSummary effective={catalog.effective} />
 
+      <CapitalRescaleNotice
+        settings={catalog.settings}
+        draft={draft}
+        onApply={(values) => setDraft((current) => ({ ...current, ...values }))}
+      />
+
       {presets.length > 0 && (
         <article className="panel p-5 sm:p-7">
           <p className="eyebrow">Risk profiles</p>
@@ -186,6 +192,87 @@ export function TradingControlsForm({ isAdmin, onMessage }: { isAdmin: boolean; 
         </div>
       )}
     </section>
+  );
+}
+
+/** The rupee limits that mean nothing without the capital they are a share of. */
+const CAPITAL_LINKED = ["daily_loss_limit", "daily_profit_target"] as const;
+
+/**
+ * Capital was edited; the rupee limits below did not move.
+ *
+ * These are stored as absolute rupees on purpose: a daily stop is an amount you
+ * are willing to lose today, and one that quietly rescaled when capital was
+ * edited would turn a mistyped 100000 into a ten-times-larger loss limit
+ * nobody chose. That reasoning is sound and this does not change it.
+ *
+ * But leaving them alone is its own silent failure in the other direction —
+ * raise capital tenfold and a ₹100 stop becomes 0.1%, a limit that will never
+ * be reached, which is just as far from what the operator meant. Both
+ * behaviours fail quietly; only one of them is usually noticed.
+ *
+ * So: say what happened, show both percentages, and offer one button. Nothing
+ * rescales without a click, and nothing rescales on save — the values land in
+ * the draft and still have to be reviewed and saved like any other edit.
+ */
+function CapitalRescaleNotice({
+  settings,
+  draft,
+  onApply,
+}: {
+  settings: SettingSpec[];
+  draft: Record<string, unknown>;
+  onApply: (values: Record<string, number>) => void;
+}) {
+  const saved = Number(settings.find((item) => item.key === "account_capital")?.value ?? 0);
+  const next = Number(draft.account_capital ?? 0);
+  if (!(saved > 0) || !(next > 0) || saved === next) return null;
+
+  const rows = CAPITAL_LINKED.map((key) => {
+    const amount = Number(draft[key] ?? 0);
+    const spec = settings.find((item) => item.key === key);
+    const oldPercent = (amount / saved) * 100;
+    // Rounded to whole rupees: these are limits a person states, not a
+    // derived figure, and 1000.0000000001 reads as a bug.
+    const suggested = Math.round((oldPercent / 100) * next);
+    return { key, label: spec?.label ?? key, amount, oldPercent, newPercent: (amount / next) * 100, suggested };
+  }).filter((row) => row.amount > 0 && row.suggested !== row.amount);
+
+  if (!rows.length) return null;
+
+  return (
+    <article className="panel border border-amber-500/30 p-5 sm:p-7">
+      <p className="eyebrow text-amber-300">Capital changed</p>
+      <h3 className="mt-1 text-base font-semibold text-white">
+        The rupee limits below have not moved with it
+      </h3>
+      <p className="mt-3 text-sm leading-6 text-slate-400">
+        Capital is going from ₹{saved.toLocaleString("en-IN")} to ₹{next.toLocaleString("en-IN")}. These limits are
+        stored as amounts, not percentages, so they still say what they said before — which now means something
+        different.
+      </p>
+
+      <div className="mt-4 space-y-2">
+        {rows.map((row) => (
+          <p key={row.key} className="numeric text-xs text-slate-300">
+            <span className="text-slate-400">{row.label}:</span> ₹{row.amount.toLocaleString("en-IN")} was{" "}
+            {row.oldPercent.toFixed(2)}% of capital, now {row.newPercent.toFixed(2)}% — keep{" "}
+            {row.oldPercent.toFixed(2)}% with ₹{row.suggested.toLocaleString("en-IN")}
+          </p>
+        ))}
+      </div>
+
+      <button
+        onClick={() => onApply(Object.fromEntries(rows.map((row) => [row.key, row.suggested])))}
+        className="secondary-button mt-5"
+      >
+        Keep the same percentages
+      </button>
+      <p className="mt-3 text-xs leading-5 text-slate-500">
+        This only fills the boxes below. Nothing is saved until you press Save, and leaving the amounts as they are
+        is a valid choice — a stop in rupees is a real decision, not only a fraction of capital.
+      </p>
+    </article>
   );
 }
 
