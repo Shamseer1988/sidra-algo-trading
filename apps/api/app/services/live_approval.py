@@ -75,17 +75,35 @@ def new_reference_id() -> str:
     return f"la-{uuid.uuid4().hex[:16]}"
 
 
-def approval_message(approval: LiveOrderApproval) -> str:
+def approval_message(approval: LiveOrderApproval, display_symbol: str | None = None) -> str:
     """What the operator reads before deciding.
 
     States the instrument, the side, the size and the money at stake, because an
     approval button with only a symbol on it trains people to tap yes.
+
+    ``display_symbol`` exists because ``trading_symbol`` is not always a name a
+    person can read. It holds what the broker was asked for, and at Upstox that
+    is the instrument token: this message said "SELL 67 × NSE_EQ|INE081A01020"
+    while the paper alert for the very same trade said "TATASTEEL". The message
+    carrying real money was the harder one to read, which is backwards. The
+    token is kept on the line below rather than dropped, so the value that
+    reconciliation and the order record use is still visible here.
+
+    Falls back to ``trading_symbol`` when no name was resolved, because an
+    approval that cannot be asked is worse than one with an ugly label.
     """
     notional = Decimal(approval.quantity) * approval.price
+    name = display_symbol or approval.trading_symbol
+    token_line = (
+        f"<code>{approval.instrument_token}</code>\n"
+        if approval.instrument_token and approval.instrument_token != name
+        else ""
+    )
     return (
         "<b>LIVE ORDER — approval required</b>\n"
         f"{approval.transaction_type} <b>{approval.quantity}</b> × "
-        f"<b>{approval.trading_symbol}</b> ({approval.exchange})\n"
+        f"<b>{name}</b> ({approval.exchange})\n"
+        f"{token_line}"
         f"Broker <b>{approval.broker or 'unset'}</b>\n"
         f"Limit {approval.price} · notional ≈ {notional}\n"
         f"Product {approval.product} · type {approval.price_type}\n"
@@ -147,9 +165,16 @@ async def request_live_approval(
     await session.commit()
     await session.refresh(approval)
 
+    # Resolved after the row is committed, so a lookup for a readable label
+    # cannot sit inside the write-ahead transaction, and never raises: the
+    # helper falls back to the token rather than failing the ask.
+    from app.services.trading_symbols import display_symbol
+
+    name = await display_symbol(session, approval.instrument_token, approval.trading_symbol)
+
     try:
         await TelegramNotificationService(settings).send_message(
-            approval_message(approval), approval_keyboard(approval.reference_id), parse_mode="HTML"
+            approval_message(approval, name), approval_keyboard(approval.reference_id), parse_mode="HTML"
         )
     except TelegramError as exc:
         # An approval nobody was asked for must not sit pending until it expires

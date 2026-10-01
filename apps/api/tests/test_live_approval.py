@@ -367,7 +367,14 @@ def test_the_message_names_the_side_in_words_and_says_where_it_is_going() -> Non
     And it names the broker, because two are now possible: an approval that does
     not say where the money goes is not an informed one.
     """
-    approval = SimpleNamespace(
+    from app.db.models import LiveOrderApproval
+
+    # The real mapped class, not a stand-in. A SimpleNamespace here passed while
+    # approval_message read a field the model did not have, which is how an
+    # AttributeError reached a live order path once already this week.
+    approval = LiveOrderApproval(
+        reference_id="la-test",
+        instrument_token="NSE_EQ|INE669E01016",
         transaction_type="SELL",
         broker="UPSTOX",
         quantity=5,
@@ -376,12 +383,64 @@ def test_the_message_names_the_side_in_words_and_says_where_it_is_going() -> Non
         price=Decimal("400"),
         product="INTRADAY",
         price_type="LIMIT",
+        status=PENDING,
         expires_at=datetime.now(UTC),
     )
     text = approval_message(approval)
     assert "SELL" in text
     assert "UPSTOX" in text
     assert "B</b>" not in text
+    # No resolved name given, so the broker's own symbol is used -- never
+    # replaced by the token, which would be a worse name than the one we have.
+    assert "IDEA-EQ" in text
+    # The token stays visible, because it is what reconciliation matches on.
+    assert "NSE_EQ|INE669E01016" in text
+
+
+async def test_a_resolved_name_is_preferred_and_the_token_is_kept() -> None:
+    """The point of the change: the message a person reads says TATASTEEL."""
+    from app.db.models import LiveOrderApproval
+
+    approval = LiveOrderApproval(
+        reference_id="la-test-2",
+        instrument_token="NSE_EQ|INE081A01020",
+        transaction_type="SELL",
+        broker="UPSTOX",
+        quantity=67,
+        # What Upstox puts here: the token again, which is why the old message
+        # showed one and the paper alert for the same trade showed a name.
+        trading_symbol="NSE_EQ|INE081A01020",
+        exchange="NSE_EQ",
+        price=Decimal("183.88"),
+        product="INTRADAY",
+        price_type="MARKET",
+        status=PENDING,
+        expires_at=datetime.now(UTC),
+    )
+    text = approval_message(approval, "TATASTEEL")
+    assert "<b>TATASTEEL</b>" in text
+    assert "NSE_EQ|INE081A01020" in text, "the token must stay readable somewhere"
+
+
+async def test_the_token_is_not_printed_twice_when_it_is_the_only_name() -> None:
+    """Nothing resolved and nothing better stored: say it once, not twice."""
+    from app.db.models import LiveOrderApproval
+
+    approval = LiveOrderApproval(
+        reference_id="la-test-3",
+        instrument_token="NSE_EQ|INE081A01020",
+        transaction_type="SELL",
+        broker="UPSTOX",
+        quantity=67,
+        trading_symbol="NSE_EQ|INE081A01020",
+        exchange="NSE_EQ",
+        price=Decimal("183.88"),
+        product="INTRADAY",
+        price_type="MARKET",
+        status=PENDING,
+        expires_at=datetime.now(UTC),
+    )
+    assert approval_message(approval).count("NSE_EQ|INE081A01020") == 1
 
 
 async def test_an_approval_for_another_broker_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:

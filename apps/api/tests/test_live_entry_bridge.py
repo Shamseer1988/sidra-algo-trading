@@ -375,7 +375,7 @@ async def test_lowercase_automatic_from_a_hand_edited_row_still_submits(wiring) 
 def announced(monkeypatch: pytest.MonkeyPatch):
     sent: list[str] = []
 
-    async def fake_announce(_settings, _signal, decision, submission, protection=None):
+    async def fake_announce(_settings, _signal, decision, submission, protection=None, _session=None):
         sent.append(await _render(decision, submission))
 
     async def _render(decision, submission):

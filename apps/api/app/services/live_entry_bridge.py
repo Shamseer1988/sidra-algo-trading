@@ -182,7 +182,30 @@ def _order_request(signal: PaperSignal, controls: Any) -> LiveOrderRequest:
     )
 
 
-async def _announce_automatic(settings: Settings, signal: PaperSignal, decision, submission, protection=None) -> None:
+async def _label(session: AsyncSession | None, signal: PaperSignal) -> str:
+    """What to call this instrument in a message a person reads.
+
+    The paper alert for a trade says "TATASTEEL" while these said
+    "NSE_EQ|INE081A01020" for the very same trade, so the messages about real
+    money were the harder ones to read. Resolution is best-effort: a label is
+    never worth losing an alert over, and the token is a worse name, not a
+    worse alert.
+    """
+    token = signal.instrument_token
+    if session is None:
+        return token
+    try:
+        from app.services.trading_symbols import display_symbol
+
+        name = await display_symbol(session, token, token)
+    except Exception:  # noqa: BLE001 - the alert matters, the label does not
+        return token
+    return f"{name} ({token})" if name != token else token
+
+
+async def _announce_automatic(
+    settings: Settings, signal: PaperSignal, decision, submission, protection=None, session: AsyncSession | None = None
+) -> None:
     """Tell the operator what an unattended order did. Never raises.
 
     Under TELEGRAM_APPROVAL the operator is asked, so they know an order exists
@@ -199,19 +222,20 @@ async def _announce_automatic(settings: Settings, signal: PaperSignal, decision,
         if not effective.telegram_is_configured:
             return
 
+        label = await _label(session, signal)
         numbers = ", ".join(getattr(submission, "broker_order_numbers", None) or []) or "none"
         status = getattr(submission, "status", "UNKNOWN")
         if not decision.authorized:
             text = (
                 "\U0001f6ab <b>LIVE ORDER NOT SENT</b>\n\n"
-                f"\U0001f4ca {signal.instrument_token}  {signal.side}  {signal.quantity}\n"
+                f"\U0001f4ca {label}  {signal.side}  {signal.quantity}\n"
                 f"\U0001f4dd {decision.reason}"
             )
         elif status in {"REJECTED", "FAILED", "UNKNOWN"}:
             reason = getattr(submission, "failure_message", None) or status
             text = (
                 "\u26d4 <b>LIVE ORDER REJECTED</b>\n\n"
-                f"\U0001f4ca {signal.instrument_token}  {signal.side}  {signal.quantity}\n"
+                f"\U0001f4ca {label}  {signal.side}  {signal.quantity}\n"
                 f"\U0001f4dd {reason}\n\n"
                 "<i>Placed automatically; the broker refused it. No position was opened.</i>"
             )
@@ -220,7 +244,7 @@ async def _announce_automatic(settings: Settings, signal: PaperSignal, decision,
             # nothing behind it is the state that prompted this whole module.
             text = (
                 "\U0001f6a8 <b>POSITION NOT PROTECTED</b>\n\n"
-                f"\U0001f4ca {signal.instrument_token}  {signal.side}  {protection.quantity or signal.quantity}\n"
+                f"\U0001f4ca {label}  {signal.side}  {protection.quantity or signal.quantity}\n"
                 f"\U0001f9fe Broker order: {numbers}\n"
                 f"\U0001f4dd {protection.detail}\n\n"
                 "<i>Check this position in the broker app now.</i>"
@@ -229,7 +253,7 @@ async def _announce_automatic(settings: Settings, signal: PaperSignal, decision,
             stop_line = f"\U0001f6d1 {protection.detail}\n" if protection is not None else ""
             text = (
                 "\u2705 <b>LIVE ORDER SENT</b>\n\n"
-                f"\U0001f4ca {signal.instrument_token}  {signal.side}  {signal.quantity}\n"
+                f"\U0001f4ca {label}  {signal.side}  {signal.quantity}\n"
                 f"\U0001f9fe Broker order: {numbers}\n"
                 f"\U0001f4dd Status: {status}\n"
                 f"{stop_line}\n"
@@ -290,11 +314,12 @@ async def _announce_refusal(
     decision not to trade has already been made and recorded. A failed alert is
     a reporting problem, exactly as it is on the automatic path.
 
-    The instrument token is printed rather than the broker's symbol, matching
-    what ``_announce_automatic`` already sends. Resolving the symbol needs a
-    database read, and adding one to the path that reports a failure -- possibly
-    a database failure -- would risk losing the message to the very fault it is
-    describing.
+    The instrument token is printed rather than a resolved name, and this is
+    the one message where that is deliberate. ``_announce_automatic`` resolves
+    a readable label, but it already holds a session for an order that reached
+    the broker. Here the thing being reported may *be* a database failure, and
+    a lookup for a nicer label would risk losing the message to the very fault
+    it is describing. The token always reads.
     """
     if outcome.step not in ANNOUNCED_REFUSALS:
         return
@@ -465,7 +490,7 @@ async def _offer(
     # Sent after the order, and never allowed to undo it: the order is already
     # at the broker by this point, so a failed alert is a reporting problem, not
     # a trading one.
-    await _announce_automatic(settings, signal, decision, submission, protection)
+    await _announce_automatic(settings, signal, decision, submission, protection, session)
     if not decision.authorized:
         return BridgeOutcome(False, "refused", decision.reason)
     if protection is not None and not protection.protected:

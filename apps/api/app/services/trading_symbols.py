@@ -6,12 +6,15 @@ and dynamic resolution from persisted InstrumentMasterRefresh records.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import InstrumentMasterRefresh
+
+logger = logging.getLogger(__name__)
 
 # Static mapping of confirmed Nifty 50 / Index ISINs and tokens to popular trading symbols
 KNOWN_SCRIPT_SYMBOLS: dict[str, str] = {
@@ -110,3 +113,28 @@ async def resolve_script_names(session: AsyncSession, tokens: Iterable[str]) -> 
 
 async def resolve_symbol(session: AsyncSession, instrument_token: str) -> str:
     return (await resolve_script_names(session, [instrument_token]))[instrument_token]
+
+
+async def display_symbol(session: AsyncSession, instrument_token: str, fallback: str = "") -> str:
+    """A name for a person to read, which never raises into an order path.
+
+    ``resolve_symbol`` reads the persisted instrument master, so it can fail
+    when the database can. On the path that asks an operator to approve real
+    money, a lookup for a nicer label must never be able to stop the question
+    being asked -- the token is a worse label, not a worse order.
+
+    Three sources, best first: the resolver, then the broker's own symbol, then
+    the token. The middle one matters because ``resolve_symbol`` returns the
+    token unchanged when it cannot do better, and a caller that treated that as
+    an answer would *replace* a real name with a token -- Firstock resolves a
+    tradable symbol into that field and Upstox does not, so the fallback is
+    sometimes the best name available and sometimes the worst.
+    """
+    try:
+        name = await resolve_symbol(session, instrument_token)
+    except Exception:  # noqa: BLE001 - a label is not worth failing an order for
+        logger.warning("trading_symbols.display_lookup_failed token=%s", instrument_token)
+        name = instrument_token
+    if name and name != instrument_token:
+        return name
+    return fallback or instrument_token
