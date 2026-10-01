@@ -424,3 +424,60 @@ def test_two_unidentifiable_rows_do_not_match_each_other() -> None:
     blank = BrokerPositionRecord(symbol="", net_quantity=Decimal("1"), instrument_token=None)
     assert blank.identifies(None, None) is False
     assert blank.identifies("", "") is False
+
+
+# --- the attribute must exist on the real model -----------------------------
+#
+# The 01-Oct failure. protect_after_fill read submission.instrument_token,
+# LiveOrderSubmission had no such attribute, and the AttributeError surfaced as
+# "NOT PROTECTED" on a live short that then had no stop behind it.
+#
+# Every test above uses a stand-in submission, and the stand-in was given the
+# attribute by the same hand that wrote the code depending on it. That is not a
+# test of anything: it asserts that I spelled a name consistently in two files I
+# wrote minutes apart. These use the real mapped class, so the name has to exist
+# where production reads it.
+
+
+def test_the_real_submission_model_exposes_the_instrument_token() -> None:
+    """The guard. A stand-in cannot answer this question."""
+    from app.db.models import LiveOrderSubmission
+
+    record = LiveOrderSubmission(
+        client_order_id="sidra-real-1",
+        broker="UPSTOX",
+        exchange="NSE_EQ",
+        trading_symbol="NSE_EQ|INE081A01020",
+        product="I",
+        price_type="MARKET",
+        transaction_type="SELL",
+        quantity=67,
+        request_snapshot={"canonical": {"instrumentToken": "NSE_EQ|INE081A01020"}},
+    )
+    assert record.instrument_token == "NSE_EQ|INE081A01020"
+
+
+def test_a_submission_with_no_snapshot_reads_none_rather_than_raising() -> None:
+    """Older rows, and rows written before the send, have no canonical block.
+
+    None is the honest answer and lets the symbol fallback decide. Raising here
+    is what left a position unprotected.
+    """
+    from app.db.models import LiveOrderSubmission
+
+    assert LiveOrderSubmission(client_order_id="x", request_snapshot={}).instrument_token is None
+    assert LiveOrderSubmission(client_order_id="y", request_snapshot=None).instrument_token is None
+
+
+def test_prepare_submission_writes_the_token_the_property_reads() -> None:
+    """The two halves must agree on the key, or the property reads nothing.
+
+    Asserted against the writer's source: the snapshot key is a literal in one
+    module and the property reads it in another, and nothing else connects them.
+    """
+    from pathlib import Path
+
+    writer = (Path(__file__).resolve().parents[1] / "app" / "services" / "live_orders.py").read_text()
+    model = (Path(__file__).resolve().parents[1] / "app" / "db" / "models.py").read_text()
+    assert '"instrumentToken": request.instrument_token' in writer
+    assert 'canonical.get("instrumentToken")' in model

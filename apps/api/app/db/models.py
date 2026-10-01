@@ -853,6 +853,32 @@ class LiveOrderSubmission(Base):
     broker_order_numbers: Mapped[list] = mapped_column(JSON, default=list)
     # Never contains jKey. The redaction happens before the snapshot is stored.
     request_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    @property
+    def instrument_token(self) -> str | None:
+        """The canonical instrument this order was placed against.
+
+        Not a column, and read back from the snapshot rather than added as one,
+        because the value is already written there by ``prepare_submission`` for
+        every row that exists -- a column would be correct only for rows written
+        after its migration.
+
+        It exists because ``trading_symbol`` cannot be joined against a position
+        book. That field holds what the broker was asked for, and the brokers
+        disagree about what that is: Upstox's is this very token, Firstock's is
+        a tradable name. Matching an order to the position it opened needs the
+        one identifier both sides agree on, and this is it.
+
+        Three callers reached for ``submission.instrument_token`` before it
+        existed. Their tests passed because each built a stand-in object and
+        gave it the attribute, so the name was real everywhere except on the
+        model. Live, the first fill raised AttributeError inside the protection
+        path and a real short was left with no stop behind it.
+        """
+        canonical = (self.request_snapshot or {}).get("canonical") or {}
+        value = canonical.get("instrumentToken")
+        return str(value) if value else None
+
     response_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     failure_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     failure_name: Mapped[str | None] = mapped_column(String(60), nullable=True)
