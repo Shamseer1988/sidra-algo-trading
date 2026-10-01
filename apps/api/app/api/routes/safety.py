@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -10,6 +10,7 @@ from app.db.session import SessionLocal
 from app.services.live_readiness import inspect_live_readiness
 from app.services.safety import (
     PAPER_TRACKING_KEY,
+    SCANNER_CONTROL_KEY,
     clear_emergency_stop,
     emergency_stop,
     emergency_stop_state,
@@ -73,6 +74,83 @@ async def _audit(user: User, event: str, metadata: dict) -> None:
     async with SessionLocal() as session:
         session.add(AuditLog(user_id=user.id, event_type=event, metadata_json=metadata))
         await session.commit()
+
+
+class TradingStatusResponse(BaseModel):
+    """One card's worth of state, decided on the server.
+
+    Computed here rather than in the browser because the ordering between
+    seven gates is a safety judgement -- which one to name when several are
+    failing -- and a judgement made in a React component is one nobody can
+    test or audit.
+    """
+
+    state: str
+    headline: str
+    detail: str
+    remedy: str
+    blocker: str | None
+    trading: bool
+    # Carried so the card can offer the right action without a second request.
+    can_resume: bool
+    can_pause: bool
+    emergency_stop_active: bool
+
+
+@router.get("/trading-status", response_model=TradingStatusResponse)
+async def trading_status(_: CurrentUser, settings: AppSettings, session: DbSession) -> TradingStatusResponse:
+    """What one card should say, and which button it should offer."""
+    from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
+    from app.db.models import ApplicationSetting
+    from app.services.trade_counter import count_filled_entries
+    from app.services.trading_calendar import MARKET_TIMEZONE
+    from app.services.trading_status import evaluate, summarise
+
+    redis = await _redis(settings)
+    try:
+        stopped = await emergency_stop_state(redis)
+        paper_enabled = await paper_tracking_enabled(redis)
+        control_state = await redis.get(SCANNER_CONTROL_KEY) or "STOPPED"
+        # The worker writes this every 30s with a 90s expiry, so its absence
+        # means the loop is not running -- a different fault from being
+        # switched off, and a different thing to do about it.
+        heartbeat_fresh = await redis.get("scanner:heartbeat") is not None
+    finally:
+        await redis.aclose()
+
+    row = await session.get(ApplicationSetting, TRADING_KEY)
+    controls = TradingControls(**(row.value if row else DEFAULT_TRADING_CONTROLS))
+    report = await inspect_live_readiness(session, settings)
+    gates = {gate.key: gate.passed for gate in report.gates}
+    reconciliation_detail = next(
+        (gate.detail for gate in report.gates if gate.key == "external_reconciliation" and not gate.passed), ""
+    )
+
+    today = datetime.now(UTC).astimezone(MARKET_TIMEZONE).date()
+    taken = await count_filled_entries(session, today)
+
+    result = evaluate(
+        application_mode=settings.application_mode,
+        live_trading_enabled=settings.live_trading_enabled,
+        emergency_stop_active=stopped.get("active") == "true",
+        emergency_stop_reason=stopped.get("reason"),
+        control_state=control_state,
+        paper_tracking=paper_enabled,
+        scanner_heartbeat_fresh=heartbeat_fresh,
+        live_broker=controls.live_broker,
+        approval_mode=controls.execution_approval_mode,
+        armed=gates.get("administrator_activation", False),
+        reconciliation_ok=gates.get("external_reconciliation", False),
+        reconciliation_detail=reconciliation_detail,
+        trades_used=taken.total,
+        trades_ceiling=controls.maximum_daily_trades,
+    )
+    return TradingStatusResponse(
+        **summarise(result),
+        can_resume=result.blocker == "activation",
+        can_pause=result.state == "TRADING",
+        emergency_stop_active=stopped.get("active") == "true",
+    )
 
 
 @router.get("/status", response_model=SafetyStatus)

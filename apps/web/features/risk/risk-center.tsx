@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 
 import { api, type PaperRiskSummary, type SafetyStatus } from "../../components/api";
 import { formatPrice } from "../../lib/formatting";
-import { SafetyControls } from "../controls/control-panel";
+import { TradingCard } from "../controls/trading-card";
 import { LiveExecutionControls } from "../controls/live-controls";
 
 const emptyRisk: PaperRiskSummary = {
@@ -25,19 +25,11 @@ const emptyRisk: PaperRiskSummary = {
 
 export function RiskCenter({
   safety,
-  canOperate,
   isAdmin,
-  onEmergency,
-  onClear,
-  onPaper,
   onMessage,
 }: {
   safety: SafetyStatus;
-  canOperate: boolean;
   isAdmin: boolean;
-  onEmergency: () => void;
-  onClear: () => void;
-  onPaper: () => void;
   onMessage: (message: string) => void;
 }) {
   const [risk, setRisk] = useState<PaperRiskSummary>(emptyRisk);
@@ -80,15 +72,28 @@ export function RiskCenter({
         />
       </div>
 
-      <SafetyControls
-        safety={safety}
-        canOperate={canOperate}
-        isAdmin={isAdmin}
-        onEmergency={onEmergency}
-        onClear={onClear}
-        onPaper={onPaper}
-        liveControls={<LiveExecutionControls safety={safety} isAdmin={isAdmin} onMessage={onMessage} />}
-      />
+      {/*
+        One card, not three. The emergency stop, the paper-tracking switch and
+        the live-execution panel each described themselves correctly and
+        together said nothing an operator could act on: which of the seven
+        gates is actually in the way right now. TradingCard answers that in one
+        sentence, with the decision made on the server where it can be tested.
+
+        The detailed panel stays below it, because "arm with a reason",
+        "reconcile now" and the gate-by-gate readout are still the right tools
+        once you know what you are looking at -- they were only ever wrong as
+        the FIRST thing on the screen.
+      */}
+      <TradingCard isAdmin={isAdmin} onMessage={onMessage} />
+
+      <details className="mt-6">
+        <summary className="cursor-pointer text-sm text-slate-400 hover:text-slate-200">
+          Arming, reconciliation and the individual gates
+        </summary>
+        <div className="mt-4">
+          <LiveExecutionControls safety={safety} isAdmin={isAdmin} onMessage={onMessage} />
+        </div>
+      </details>
     </section>
   );
 }

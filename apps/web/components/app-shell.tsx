@@ -115,8 +115,9 @@ export function AppShell() {
     if (workspace === "scanner") void loadMarketState();
   };
   async function scannerAction(action: "start" | "stop") { try { setScanner(action === "start" ? await api.startScanner() : await api.stopScanner()); setMessage(`Scanner ${action === "start" ? "start requested" : "stopped"}.`); void load(); } catch (error) { setMessage(error instanceof Error ? error.message : "Scanner control failed"); } }
-  async function emergencyAction(clear = false) { try { setSafety(clear ? await api.clearEmergencyStop() : await api.emergencyStop("Emergency stop engaged from trading terminal")); setMessage(clear ? "Emergency stop cleared." : "Emergency stop engaged; scanner stopped.", clear ? "success" : "info"); void load(); } catch (error) { setMessage(error instanceof Error ? error.message : "Safety action failed"); } }
-  async function paperAction() { try { if (safety) setSafety(safety.paper_tracking_enabled ? await api.disablePaper() : await api.enablePaper()); setMessage("Paper-tracking setting updated."); } catch (error) { setMessage(error instanceof Error ? error.message : "Paper setting failed"); } }
+  // The emergency-stop and paper-tracking handlers lived here and were passed
+  // down to three separate cards. TradingCard owns both actions now, next to
+  // the status that says whether either is the thing in the way.
   async function telegramAction() { try { setTelegram(await api.testTelegram()); setMessage("Telegram test alert sent."); } catch (error) { setMessage(error instanceof Error ? error.message : "Telegram test failed"); } }
   // Registering tells Telegram both the URL and the secret it must send back. A
   // secret rotated in .env without re-registering leaves every inbound update
@@ -153,7 +154,7 @@ export function AppShell() {
       content = showing === "journal" ? <JournalPanel signals={signals} /> : <HistoryWorkspace canOperate={Boolean(canOperate)} onMessage={setMessage} />;
       break;
     case "risk":
-      content = <RiskCenter safety={safety} canOperate={Boolean(canOperate)} isAdmin={Boolean(isAdmin)} onEmergency={() => void emergencyAction()} onClear={() => void emergencyAction(true)} onPaper={() => void paperAction()} onMessage={setMessage} />;
+      content = <RiskCenter safety={safety} isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
       break;
     case "settings":
       content = <SettingsPanel tab={showing ?? "trading"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} onNavigate={selectWorkspace} telegram={telegram} onTelegram={() => void telegramAction()} onRegisterWebhook={() => void registerTelegramWebhook()} />;

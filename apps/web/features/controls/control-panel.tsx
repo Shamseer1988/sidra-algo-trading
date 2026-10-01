@@ -1,101 +1,23 @@
 "use client";
 
-import { BellRing, RotateCcw, Save, ShieldAlert, Webhook } from "lucide-react";
+import { BellRing, RotateCcw, Save, Webhook } from "lucide-react";
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import { api, type NotificationCatalog, type SafetyStatus, type TelegramStatus } from "../../components/api";
+import { api, type NotificationCatalog, type TelegramStatus } from "../../components/api";
 
 /**
- * The control plane, split into the two places it belongs.
+ * Alerts: the Telegram bot, and which messages it sends.
  *
- * This file used to export one `ControlPanel` holding four cards — paper
- * tracking, the live lock, emergency stop, and the Telegram bot — and it was
- * rendered twice: once as its own "Telegram" menu entry and once embedded
- * inside Risk. Two menu entries, the same four cards, and no way to tell which
- * one you were looking at.
+ * This file once held the whole control plane — paper tracking, the live lock,
+ * emergency stop and the bot — as four cards rendered on two different menu
+ * entries. The safety cards have since moved to Risk and then collapsed into a
+ * single status card there, because three cards each describing one gate
+ * correctly still left an operator unable to tell which of seven gates was
+ * actually in the way.
  *
- * Safety belongs with Risk, where an operator is already looking when something
- * is wrong. Alerts belong in Settings, with the rest of the configuration.
+ * What remains here is configuration: where messages go, and which ones.
  */
-
-export function SafetyControls({
-  safety,
-  canOperate,
-  isAdmin,
-  onEmergency,
-  onClear,
-  onPaper,
-  liveControls,
-}: {
-  safety: SafetyStatus;
-  canOperate: boolean;
-  isAdmin: boolean;
-  onEmergency: () => void;
-  onClear: () => void;
-  onPaper: () => void;
-  liveControls: ReactNode;
-}) {
-  return (
-    <div className="mt-6 grid gap-4 xl:grid-cols-3">
-      <article className={`panel p-6 ${safety.emergency_stop_active ? "glass-danger" : ""}`}>
-        <p className="eyebrow text-rose-400">Emergency stop</p>
-        <h3 className="mt-1 text-lg font-semibold text-white">{safety.emergency_stop_active ? "Engaged" : "Ready"}</h3>
-        <p className="mt-3 text-sm leading-6 text-slate-400">
-          Stops the scanner and market-data activity. It does not reach outside this application, and it does not
-          close anything already open at a broker.
-        </p>
-        {canOperate && (
-          <div className="mt-6 flex gap-3">
-            {safety.emergency_stop_active ? (
-              <button onClick={onClear} disabled={!isAdmin} className="secondary-button">
-                Clear stop
-              </button>
-            ) : (
-              <button onClick={onEmergency} className="danger-button">
-                <ShieldAlert className="h-4 w-4" />
-                Emergency stop
-              </button>
-            )}
-          </div>
-        )}
-        {safety.emergency_stop_active && safety.emergency_stop_reason && (
-          <p className="mt-4 text-xs text-rose-300">{safety.emergency_stop_reason}</p>
-        )}
-      </article>
-
-      {/*
-        The description used to read "Controls paper-signal journaling and
-        notifications", which sounds like a logging switch. It is not: the
-        scanner checks this flag before evaluating anything, so turning it off
-        stops candle evaluation, signals, alerts AND live orders. An operator
-        who wanted fewer Telegram messages came within one click of halting all
-        trading, which is a labelling fault, not a user error.
-      */}
-      <article className="panel p-6">
-        <p className="eyebrow">Scanner</p>
-        <h3 className="mt-1 text-lg font-semibold text-white">
-          {safety.paper_tracking_enabled ? "Running" : "Stopped"}
-        </h3>
-        <p className="mt-3 text-sm leading-6 text-slate-400">
-          The master switch for signal generation. Turning this off stops the scanner evaluating candles, so{" "}
-          <strong className="text-slate-200">no signals, no alerts and no live orders</strong> are produced.
-        </p>
-        <p className="mt-2 text-xs leading-5 text-slate-500">
-          To stop live orders only, use Disarm. To reduce Telegram messages, use Settings → Alerts. Neither this nor
-          anything else on this screen closes a position already open at the broker.
-        </p>
-        {isAdmin && (
-          <button onClick={onPaper} className="secondary-button mt-6">
-            {safety.paper_tracking_enabled ? "Stop the scanner" : "Start the scanner"}
-          </button>
-        )}
-      </article>
-
-      {liveControls}
-    </div>
-  );
-}
 
 export function AlertsPanel({
   telegram,

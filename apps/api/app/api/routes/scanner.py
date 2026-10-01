@@ -255,6 +255,20 @@ async def _set_state(state: str, user: User, settings: AppSettings) -> ScannerSt
     redis = await _redis(settings)
     try:
         await redis.set(SCANNER_CONTROL_KEY, state)
+        if state == "RUNNING":
+            # Two switches reached the same outcome by different routes: this
+            # one stops the worker's data loop, the paper-tracking flag stops
+            # signal evaluation. Nobody needs both, and leaving the second
+            # behind meant Start could appear to do nothing -- the worker runs,
+            # no signals appear, and the reason is on another screen.
+            #
+            # Clearing it on start, and not touching it on stop, keeps Start
+            # honest without inventing a third state. The flag still exists for
+            # the scanner to read; it is simply no longer a separate button an
+            # operator has to know about.
+            from app.services.safety import PAPER_TRACKING_KEY
+
+            await redis.set(PAPER_TRACKING_KEY, "true")
         result = await get_scanner_status(redis)
     finally:
         await redis.aclose()
