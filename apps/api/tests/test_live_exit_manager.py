@@ -80,7 +80,28 @@ def signal(*, target: str = "2850.00", square_off: str | None = None, minutes_ag
 
 
 def stop_row(product: str = "INTRADAY", numbers=("stop-1",)):
-    return SimpleNamespace(product=product, broker_order_numbers=list(numbers))
+    """The real mapped class, for the reason the live failure gives.
+
+    The exit builds its market order from this row's product. A stand-in with a
+    plain ``product`` attribute cannot tell the broker's word from ours, which
+    is the distinction that refused a live stop and the close behind it. The
+    column holds "I"; the canonical value lives in the snapshot, as
+    prepare_submission writes it.
+    """
+    from app.db.models import LiveOrderSubmission
+
+    return LiveOrderSubmission(
+        client_order_id=f"sidra-stop-{numbers[0] if numbers else 'x'}",
+        broker="UPSTOX",
+        exchange="NSE_EQ",
+        trading_symbol="RVNL",
+        product="I",
+        price_type="SL-M",
+        transaction_type="BUY",
+        quantity=143,
+        broker_order_numbers=list(numbers),
+        request_snapshot={"canonical": {"product": product, "instrumentToken": "NSE_EQ|INE415G01027"}},
+    )
 
 
 class FakeSession:

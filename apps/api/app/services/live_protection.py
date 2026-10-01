@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import LiveOrderSubmission, PaperSignal
-from app.services.broker_adapter import BUY, SELL, BrokerAdapter
+from app.services.broker_adapter import BUY, INTRADAY, SELL, BrokerAdapter
 from app.services.live_orders import (
     ACCEPTED,
     UNKNOWN,
@@ -227,6 +227,13 @@ async def _protect(
     quantity = int(abs(net))
     exit_side = _exit_side(net > 0)
     stop_price = Decimal(str(signal.stop_price))
+    # The canonical product, never submission.product. That field holds what
+    # the broker was asked for -- "I" at Upstox -- and describe() translates
+    # again on the way out, so passing it back raised "Unsupported order field:
+    # 'I'" and refused both the stop AND the close that would have covered for
+    # it. INTRADAY is the fallback only for rows written before the snapshot
+    # carried this, and it is what every order this system places uses.
+    product = submission.canonical_product or INTRADAY
 
     for attempt in range(STOP_PLACE_ATTEMPTS):
         status, ids, detail = await _place_exit(
@@ -235,7 +242,7 @@ async def _protect(
             instrument_token=signal.instrument_token,
             side=exit_side,
             quantity=quantity,
-            product=submission.product,
+            product=product,
             order_type=STOP_MARKET,
             trigger_price=stop_price,
             paper_signal_id=signal.id,
@@ -272,7 +279,7 @@ async def _protect(
         instrument_token=signal.instrument_token,
         side=exit_side,
         quantity=quantity,
-        product=submission.product,
+        product=product,
         order_type=MARKET,
         trigger_price=Decimal("0"),
         paper_signal_id=signal.id,

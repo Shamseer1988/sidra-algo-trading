@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.db.models import LiveOrderSubmission, MarketCandle, PaperSignal
 from app.db.session import SessionLocal
-from app.services.broker_adapter import BUY, SELL, BrokerAdapter
+from app.services.broker_adapter import BUY, INTRADAY, SELL, BrokerAdapter
 from app.services.exit_rules import from_controls as exit_rules_from
 from app.services.exit_rules import time_exit_due
 from app.services.live_execution_gateway import BrokerNotSelectedError, live_order_adapter
@@ -325,7 +325,9 @@ async def _consider(
         instrument_token=signal.instrument_token,
         side=SELL if long else BUY,
         quantity=quantity,
-        product=stops[0].product if stops else "INTRADAY",
+        # Canonical, for the same reason the stop is: stops[0].product is
+        # the broker's word and describe() would translate it twice.
+        product=(stops[0].canonical_product if stops else None) or INTRADAY,
         paper_signal_id=signal.id,
     )
     if status == ACCEPTED:

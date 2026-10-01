@@ -111,13 +111,31 @@ def signal(stop: str = "2850.00", token: str = "NSE_EQ|INE415G01027"):
     return SimpleNamespace(id=uuid4(), instrument_token=token, stop_price=Decimal(stop), side="SHORT")
 
 
-def submission(product: str = "I", symbol: str = "RVNL", token: str = "NSE_EQ|INE415G01027"):
-    return SimpleNamespace(
+def submission(product: str = "INTRADAY", symbol: str = "RVNL", token: str = "NSE_EQ|INE415G01027"):
+    """The real mapped class, not a stand-in.
+
+    A SimpleNamespace here is precisely what let two live bugs through: it
+    answers for ``instrument_token`` and ``canonical_product`` whatever the code
+    asks, so neither "that column does not exist" nor "that value is the
+    broker's word, not ours" could ever surface. The real row derives both from
+    request_snapshot, exactly as prepare_submission writes it.
+
+    ``product`` is deliberately the broker's "I" on the column and the canonical
+    value in the snapshot, because that difference is the whole defect.
+    """
+    from app.db.models import LiveOrderSubmission
+
+    return LiveOrderSubmission(
         client_order_id="sidra-1",
         paper_signal_id=uuid4(),
+        broker="UPSTOX",
+        exchange="NSE_EQ",
         trading_symbol=symbol,
-        instrument_token=token,
-        product=product,
+        product="I",
+        price_type="MARKET",
+        transaction_type="SELL",
+        quantity=10,
+        request_snapshot={"canonical": {"instrumentToken": token, "product": product}},
     )
 
 
@@ -469,15 +487,31 @@ def test_a_submission_with_no_snapshot_reads_none_rather_than_raising() -> None:
     assert LiveOrderSubmission(client_order_id="y", request_snapshot=None).instrument_token is None
 
 
-def test_prepare_submission_writes_the_token_the_property_reads() -> None:
-    """The two halves must agree on the key, or the property reads nothing.
+def test_prepare_submission_writes_the_keys_the_properties_read() -> None:
+    """The two halves must agree, or the properties read nothing.
 
-    Asserted against the writer's source: the snapshot key is a literal in one
-    module and the property reads it in another, and nothing else connects them.
+    Behavioural rather than textual. The first version of this asserted that a
+    particular string appeared in models.py, and broke the moment the two
+    canonical readers were refactored to share a helper -- a test that fails on
+    a rename it should not care about, while saying nothing about whether the
+    keys still match. This builds a row the way the writer writes one and reads
+    it back the way production reads it.
     """
+    import re
     from pathlib import Path
 
+    from app.db.models import LiveOrderSubmission
+
     writer = (Path(__file__).resolve().parents[1] / "app" / "services" / "live_orders.py").read_text()
-    model = (Path(__file__).resolve().parents[1] / "app" / "db" / "models.py").read_text()
-    assert '"instrumentToken": request.instrument_token' in writer
-    assert 'canonical.get("instrumentToken")' in model
+    canonical = writer[writer.index('"canonical": {') :]
+    canonical = canonical[: canonical.index("}")]
+    # The keys prepare_submission actually writes, taken from its source.
+    keys = dict(re.findall(r'"(\w+)":\s*request\.(\w+)', canonical))
+    assert "instrumentToken" in keys and "product" in keys, keys
+
+    record = LiveOrderSubmission(
+        client_order_id="sidra-keys",
+        request_snapshot={"canonical": {key: f"value-of-{key}" for key in keys}},
+    )
+    assert record.instrument_token == "value-of-instrumentToken"
+    assert record.canonical_product == "value-of-product"

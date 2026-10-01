@@ -875,8 +875,25 @@ class LiveOrderSubmission(Base):
         model. Live, the first fill raised AttributeError inside the protection
         path and a real short was left with no stop behind it.
         """
-        canonical = (self.request_snapshot or {}).get("canonical") or {}
-        value = canonical.get("instrumentToken")
+        return self._canonical("instrumentToken")
+
+    @property
+    def canonical_product(self) -> str | None:
+        """The product in this system's words, not the broker's.
+
+        ``product`` holds what the broker was asked for -- "I" at Upstox, from
+        ``_PRODUCT[INTRADAY]``. Feeding that back into a new order translates it
+        a second time, and ``_PRODUCT["I"]`` does not exist: a live entry filled
+        and the protective stop was refused with "Unsupported order field: 'I'",
+        so was the fallback that would have closed the position, and 10 shares
+        were left open with nothing behind them.
+
+        Two vocabularies, and the one that round-trips is this one.
+        """
+        return self._canonical("product")
+
+    def _canonical(self, field: str) -> str | None:
+        value = ((self.request_snapshot or {}).get("canonical") or {}).get(field)
         return str(value) if value else None
 
     response_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
