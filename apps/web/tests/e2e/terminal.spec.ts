@@ -662,6 +662,12 @@ export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" =
       },
     });
   });
+  await page.route("**/api/v1/broker-books/brokers", async (route: Route) => {
+    await route.fulfill({ json: MOCK_BROKER_CHOICES });
+  });
+  await page.route("**/api/v1/broker-books/snapshot*", async (route: Route) => {
+    await route.fulfill({ json: MOCK_BROKER_SNAPSHOT });
+  });
   await page.route("**/api/v1/history/overview*", async (route: Route) => {
     await route.fulfill({ json: MOCK_HISTORY_OVERVIEW });
   });
@@ -717,6 +723,73 @@ const MOCK_HISTORY_OVERVIEW = {
     BROKER_DATA_PENDING: "Broker data pending",
     MISMATCH: "Mismatch",
   },
+};
+
+/**
+ * The broker's own books. Two rows that matter: one order carrying our client
+ * order id, and one working order without it -- the untracked order that blocks
+ * reconciliation, which is the single thing an operator most needs this screen
+ * to answer.
+ */
+const MOCK_BROKER_SNAPSHOT = {
+  broker: "UPSTOX",
+  fetched_at: new Date().toISOString(),
+  stale: false,
+  readable: true,
+  detail: "2 order(s), 1 position row(s) at UPSTOX.",
+  orders: [
+    {
+      broker_order_id: "2610010001",
+      client_order_id: "sidra-7f2c",
+      status: "COMPLETE",
+      symbol: "BHARTIARTL",
+      side: "SELL",
+      order_type: "MARKET",
+      quantity: 67,
+      filled_quantity: 67,
+      average_price: 183.56,
+      placed_at: "2026-10-01T04:07:01Z",
+      ours: true,
+    },
+    {
+      broker_order_id: "2610010002",
+      client_order_id: null,
+      status: "OPEN",
+      symbol: "TATASTEEL",
+      side: "BUY",
+      order_type: "LIMIT",
+      quantity: 40,
+      filled_quantity: 0,
+      average_price: null,
+      placed_at: "2026-10-01T04:31:00Z",
+      ours: false,
+    },
+  ],
+  positions: [
+    {
+      symbol: "BHARTIARTL",
+      instrument_token: "NSE_EQ|INE397D01024",
+      net_quantity: -67,
+      average_price: 183.56,
+      last_price: 181.02,
+      realised: 0,
+      unrealised: 170.18,
+      day_pnl: 170.18,
+    },
+  ],
+  realised: 0,
+  unrealised: 170.18,
+  open_positions: 1,
+  working_orders: 1,
+  untracked_working: 1,
+};
+
+const MOCK_BROKER_CHOICES = {
+  selected: "UPSTOX",
+  brokers: [
+    { key: "UPSTOX", label: "Upstox", connected: true, detail: "Authorised." },
+    { key: "FIRSTOCK", label: "Firstock", connected: false, detail: "Firstock credentials are not configured." },
+  ],
 };
 
 const MOCK_HISTORY_DAYS = [
@@ -1107,6 +1180,100 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText("32/32")).toBeVisible();
   });
 
+  test("5c-1. Orders: the source toggle says whose records are on the screen", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    // Paper is the default, because reaching the broker costs part of the
+    // rate-limit budget that placing an order draws on.
+    await go(page, "Orders & Positions", "Orders");
+    await expect(page.getByRole("heading", { name: "Paper orderbook" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Broker", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Upstox orderbook" })).toBeVisible();
+    await expect(page.getByText("BHARTIARTL", { exact: true })).toBeVisible();
+    // The paper book is gone, not merged into it. Two different claims about
+    // the same day must never be added together on one screen.
+    await expect(page.getByText("Simulated orderbook")).toHaveCount(0);
+  });
+
+  test("5c-2. Orders: an order we did not place is marked, and the block explained", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await go(page, "Orders & Positions", "Orders");
+    await page.getByRole("button", { name: "Broker", exact: true }).click();
+
+    // The question asked about every untracked order that stopped trading,
+    // answered in the row rather than by comparing two screens.
+    const book = page.getByRole("table");
+    await expect(book.getByText("Manual", { exact: true })).toBeVisible();
+    await expect(book.getByText("Sidra", { exact: true })).toBeVisible();
+    await expect(page.getByText(/1 working order is not ours/)).toBeVisible();
+    await expect(page.getByText(/Reconciliation refuses new live orders/)).toBeVisible();
+  });
+
+  test("5c-3. Orders: the broker view can look, and cannot touch", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await go(page, "Orders & Positions", "Orders");
+    await page.getByRole("button", { name: "Broker", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Upstox orderbook" })).toBeVisible();
+
+    // A screen one misplaced tap can empty an account with is not what was
+    // asked for. Flattening is done from Risk, deliberately.
+    for (const forbidden of [/cancel/i, /square off/i, /exit position/i, /modify/i]) {
+      await expect(page.getByRole("button", { name: forbidden })).toHaveCount(0);
+    }
+  });
+
+  test("5c-4. Orders: a broker that cannot be read says so, and claims nothing else", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/broker-books/snapshot*", async (route: Route) => {
+      await route.fulfill({
+        json: {
+          ...MOCK_BROKER_SNAPSHOT,
+          readable: false,
+          detail: "UPSTOX could not be read: connection reset",
+          orders: [],
+          positions: [],
+          realised: null,
+          unrealised: null,
+          open_positions: 0,
+          working_orders: 0,
+          untracked_working: 0,
+        },
+      });
+    });
+    await page.goto("/");
+
+    await go(page, "Orders & Positions", "Orders");
+    await page.getByRole("button", { name: "Broker", exact: true }).click();
+
+    await expect(page.getByText("connection reset")).toBeVisible();
+    // The distinction that matters: this screen could not ask, which is not
+    // the same as there being no position.
+    await expect(page.getByText(/This says nothing about whether a position is open/)).toBeVisible();
+    await expect(page.getByText("₹0.00")).toHaveCount(0);
+  });
+
+  test("5c-5. Orders: a broker with no credentials cannot be chosen", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await go(page, "Orders & Positions", "Orders");
+    await page.getByRole("button", { name: "Broker", exact: true }).click();
+
+    const selector = page.getByLabel("Broker to view");
+    await expect(selector).toBeVisible();
+    // toBeDisabled does not apply to <option>; the property is what the browser
+    // actually enforces.
+    await expect(selector.getByRole("option", { name: /Firstock — not connected/ })).toHaveJSProperty("disabled", true);
+    // Looking at a broker is not pointing orders at one, and the screen says so.
+    await expect(page.getByText(/changing the selection here does not change it/)).toBeVisible();
+  });
+
   test("5d. Risk center: reservation capacity and exposure are visible", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
@@ -1268,12 +1435,115 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(csv).toHaveAttribute("href", /\/api\/v1\/history\/export\.csv\?from_date=\d{4}-\d{2}-\d{2}&to_date=\d{4}-\d{2}-\d{2}/);
     await expect(excel).toHaveAttribute("href", /\/api\/v1\/history\/export\.xlsx\?from_date=/);
   });
-  test("9. Navigation: seven places to work, and nothing that renders \"unavailable\"", async ({ page }) => {
+
+  /**
+   * The calendar reads the month currently on screen, so a fixture with fixed
+   * dates would land in a month the test never looks at. These build the dates
+   * from the same local date parts the component uses -- parsing "2026-10-01"
+   * with the Date constructor gives UTC midnight, which is the previous day
+   * west of Greenwich, and that is exactly the drift being guarded against.
+   */
+  function dayInThisMonth(day: number): string {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+
+  function calendarDay(day: number, net: string, overrides: Record<string, unknown> = {}) {
+    return {
+      ...MOCK_HISTORY_DAYS[0],
+      session_date: dayInThisMonth(day),
+      net_pnl: net,
+      gross_pnl: net,
+      charges: "40.00",
+      trades: 2,
+      ...overrides,
+    };
+  }
+
+  test("8f. Reports: the calendar colours a month by net, not by gross", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/history/daily*", async (route: Route) => {
+      await route.fulfill({ json: [calendarDay(2, "460.00"), calendarDay(3, "-300.00")] });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports");
+    await expect(page.getByRole("heading", { name: "P&L calendar" })).toBeVisible();
+
+    const profit = page.getByRole("button", { name: new RegExp(`${dayInThisMonth(2)}: \\+₹460`) });
+    const loss = page.getByRole("button", { name: new RegExp(`${dayInThisMonth(3)}: −₹300`) });
+    await expect(profit).toHaveClass(/bg-emerald-500/);
+    await expect(loss).toHaveClass(/bg-rose-500/);
+  });
+
+  test("8g. Reports: a day with no record is not drawn as a flat day", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/history/daily*", async (route: Route) => {
+      await route.fulfill({ json: [calendarDay(2, "460.00")] });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports");
+    // A day this system has nothing to say about must not read as a ₹0 result,
+    // and must not be clickable into an empty detail panel.
+    const quiet = page.getByRole("button", { name: new RegExp(`${dayInThisMonth(4)}: no trades`) });
+    await expect(quiet).toBeDisabled();
+    await expect(quiet).not.toHaveClass(/bg-emerald-500|bg-rose-500/);
+  });
+
+  test("8h. Reports: opening a day keeps gross, charges and net apart", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/history/daily*", async (route: Route) => {
+      await route.fulfill({
+        json: [calendarDay(2, "460.00", { gross_pnl: "500.00", broker: "UPSTOX", broker_realized_pnl: "455.00", broker_charges: "45.00" })],
+      });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports");
+    await page.getByRole("button", { name: new RegExp(`${dayInThisMonth(2)}:`) }).click();
+
+    const figures = page.locator("dl");
+    await expect(figures.getByText("+₹500.00")).toBeVisible();
+    await expect(figures.getByText("₹40.00")).toBeVisible();
+    await expect(figures.getByText("+₹460.00")).toBeVisible();
+    // The broker's figure sits beside ours and is allowed to disagree. Nothing
+    // on this screen replaces a local record with one.
+    await expect(page.getByText(/UPSTOX reported \+₹455.00 realised/)).toBeVisible();
+    await expect(page.getByText(/rather than replacing them/)).toBeVisible();
+  });
+
+  test("8i. Reports: realised and unrealised are two figures, never one", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
-    // Seven, exactly. The count is asserted rather than just the labels,
-    // because the failure this guards against is an eighth entry creeping back.
+    await go(page, "Reports", "P&L summary");
+    await expect(page.getByRole("heading", { name: "P&L", exact: true })).toBeVisible();
+    await expect(page.getByText("Realised today")).toBeVisible();
+    await expect(page.getByText("Unrealised", { exact: true })).toBeVisible();
+    await expect(page.getByText("₹170.18")).toBeVisible();
+  });
+
+  test("8j. Reports: a figure the broker did not report is not shown as zero", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/broker-books/snapshot*", async (route: Route) => {
+      await route.fulfill({ json: { ...MOCK_BROKER_SNAPSHOT, realised: null, unrealised: null } });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports", "P&L summary");
+    // A zero nobody claimed is worse than a blank: it reads as a settled fact.
+    await expect(page.getByText("not reported").first()).toBeVisible();
+  });
+
+  test("9. Navigation: eight places to work, and nothing that renders \"unavailable\"", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    // The exact list, not just a count, because the failure this guards
+    // against is a placeholder or a duplicate screen creeping back in. Reports
+    // joined History rather than being folded into it: the record of what
+    // happened and the summary of what it adds up to are different questions.
     const primary = page.locator("aside .space-y-1").first().getByRole("button");
     await expect(primary).toHaveText([
       "Dashboard",
@@ -1281,6 +1551,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
       "Scanner & Universe",
       "Orders & Positions",
       "History",
+      "Reports",
       "Risk",
       "Settings",
     ]);

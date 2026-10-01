@@ -152,7 +152,7 @@ function Orderbook({ rows, loading }: { rows: PaperOrder[]; loading: boolean }) 
                             ? "status-good"
                             : row.status === "CANCELLED" || row.status === "REJECTED"
                             ? "status-bad"
-                            : "status-warn"
+                            : "status-watch"
                         }`}
                       >
                         {titleCase(row.status)}
@@ -256,7 +256,7 @@ function Positions({ rows, loading }: { rows: PaperPosition[]; loading: boolean 
                       ₹{formatPrice(row.total_pnl)}
                     </td>
                     <td>
-                      <span className="status-pill status-warn">{titleCase(row.status)}</span>
+                      <span className="status-pill status-watch">{titleCase(row.status)}</span>
                     </td>
                   </tr>
                 );

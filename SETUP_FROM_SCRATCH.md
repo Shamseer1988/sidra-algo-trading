@@ -314,9 +314,19 @@ During the session:
 |---|---|
 | **Dashboard** | Is everything up, is the scanner running, is the perimeter intact |
 | **Scanner & Universe** | What is being watched, and what was rejected and why |
-| **Orders & Positions** | What is open right now |
+| **Orders & Positions** | What is open right now — toggle between **Paper** (our simulated book) and **Broker** (the broker's own book, including anything placed by hand) |
 | **Risk** | How much of today's budget is left |
-| **History** | What actually happened |
+| **History** | What actually happened, trade by trade |
+| **Reports** | What it adds up to — a red/green P&L calendar, and realised against unrealised |
+
+The **Broker** source on Orders & Positions is read-only on purpose: it will show
+you an order placed by hand on the broker's app, and mark it **Manual**, but it
+cannot withdraw it. That is the order that blocks reconciliation, and withdrawing
+it is done at the broker; flattening a position is done from **Risk**, where it
+is a deliberate act rather than a tap on a table row. Those reads also share the
+broker's rate limit with order placement, so the screen polls slowly, pauses in a
+background tab, and shares one six-second cached read between every viewer —
+**Refresh** is the only way past it.
 
 The **Scanner** tab shows rejected evaluations with their reason, which is the
 most useful screen on a quiet day. "Required market data unavailable: rvol" is a

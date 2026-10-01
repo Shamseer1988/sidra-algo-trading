@@ -43,9 +43,8 @@ class FakeRedis:
 
 
 class FakeAdapter:
-    name = "UPSTOX"
-
-    def __init__(self, orders=None, positions=None, raises=None) -> None:
+    def __init__(self, orders=None, positions=None, raises=None, name="UPSTOX") -> None:
+        self.name = name
         self._orders = orders or []
         self._positions = positions or []
         self._raises = raises
@@ -95,17 +94,20 @@ def position(realised="170.61", unrealised="0", net="0"):
 def wiring(monkeypatch: pytest.MonkeyPatch):
     state = SimpleNamespace(adapter=FakeAdapter(), redis=FakeRedis())
 
-    async def adapter_for(_settings, _session):
+    state.asked_for = []
+
+    async def adapter_for(_settings, _session, broker=None):
+        state.asked_for.append(broker)
         if isinstance(state.adapter, Exception):
             raise state.adapter
         return state.adapter
 
-    monkeypatch.setattr(module, "live_order_adapter", adapter_for)
+    monkeypatch.setattr(module, "live_report_adapter", adapter_for)
     return state
 
 
-async def snapshot(state, *, force=False):
-    return await module.read(object(), object(), state.redis, force=force)
+async def snapshot(state, *, force=False, broker=None):
+    return await module.read(object(), object(), state.redis, broker=broker, force=force)
 
 
 # --- the cache is a safety property ---------------------------------------
@@ -139,7 +141,7 @@ async def test_an_unreadable_result_is_never_cached(wiring) -> None:
     """Caching a failure would keep saying the broker is down after it is back."""
     wiring.adapter = FakeAdapter(raises=RuntimeError("timeout"))
     await snapshot(wiring)
-    assert module.CACHE_KEY not in wiring.redis.store
+    assert wiring.redis.store == {}
 
 
 async def test_a_broken_cache_still_serves_the_screen(wiring) -> None:
@@ -148,6 +150,36 @@ async def test_a_broken_cache_still_serves_the_screen(wiring) -> None:
     wiring.adapter = FakeAdapter(orders=[order()], positions=[position()])
     result = await snapshot(wiring)
     assert result["readable"] is True
+
+
+async def test_two_brokers_do_not_share_one_cache_entry(wiring) -> None:
+    """A shared key would show one account's positions against the other.
+
+    Six seconds is long enough for an operator to read a position that is not
+    there and act on it.
+    """
+    wiring.adapter = FakeAdapter(positions=[position(realised="170.61")], name="UPSTOX")
+    await snapshot(wiring, broker="UPSTOX")
+    wiring.adapter = FakeAdapter(positions=[position(realised="-40.00")], name="FIRSTOCK")
+    second = await snapshot(wiring, broker="FIRSTOCK")
+    assert second["broker"] == "FIRSTOCK"
+    assert second["realised"] == -40.0
+    assert second["stale"] is False
+
+
+async def test_a_named_broker_reaches_the_gateway(wiring) -> None:
+    """Naming one is the whole point of the selector; dropping it would show
+    the selected broker's books under another broker's label."""
+    wiring.adapter = FakeAdapter(name="FIRSTOCK")
+    await snapshot(wiring, broker="FIRSTOCK")
+    assert wiring.asked_for == ["FIRSTOCK"]
+
+
+async def test_no_broker_named_leaves_the_choice_to_the_gateway(wiring) -> None:
+    """None means "the broker selected for trading", resolved in one place."""
+    wiring.adapter = FakeAdapter()
+    await snapshot(wiring)
+    assert wiring.asked_for == [None]
 
 
 # --- an unreachable broker is a state -------------------------------------
@@ -220,6 +252,52 @@ async def test_the_payload_is_json_serialisable(wiring) -> None:
     """It is cached as JSON; a Decimal left in would fail only at runtime."""
     wiring.adapter = FakeAdapter(orders=[order()], positions=[position()])
     json.dumps(await snapshot(wiring))
+
+
+# --- the selector ---------------------------------------------------------
+
+
+async def test_the_selector_separates_connected_from_selected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two different facts. Which broker trades is not which broker has a token.
+
+    Merging them would let a screen imply that looking at Firstock's books had
+    pointed live orders at Firstock.
+    """
+    monkeypatch.setattr(module, "selected_live_broker", _returns("UPSTOX"))
+    monkeypatch.setattr("app.services.upstox_oauth.load_access_token", _returns("token"))
+    result = await module.choices(object(), SimpleNamespace(firstock_is_configured=False))
+    assert result["selected"] == "UPSTOX"
+    assert [(item["key"], item["connected"]) for item in result["brokers"]] == [
+        ("UPSTOX", True),
+        ("FIRSTOCK", False),
+    ]
+
+
+async def test_an_unconnected_broker_is_listed_with_its_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Left out, an operator expecting two brokers cannot tell why there is one."""
+    monkeypatch.setattr(module, "selected_live_broker", _returns("NONE"))
+    monkeypatch.setattr("app.services.upstox_oauth.load_access_token", _returns(None))
+    result = await module.choices(object(), SimpleNamespace(firstock_is_configured=False))
+    assert len(result["brokers"]) == 2
+    assert all(item["detail"] for item in result["brokers"])
+
+
+async def test_the_selector_renders_even_with_no_trading_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A screen that throws here tells the operator less than one that says NONE."""
+
+    async def explode(_session):
+        raise RuntimeError("no settings row")
+
+    monkeypatch.setattr(module, "selected_live_broker", explode)
+    monkeypatch.setattr("app.services.upstox_oauth.load_access_token", _returns(None))
+    assert (await module.choices(object(), SimpleNamespace(firstock_is_configured=True)))["selected"] == "NONE"
+
+
+def _returns(value):
+    async def inner(*_args, **_kwargs):
+        return value
+
+    return inner
 
 
 def test_this_router_cannot_place_or_cancel_anything() -> None:

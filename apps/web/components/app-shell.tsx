@@ -11,7 +11,8 @@ import { Dashboard } from "../features/dashboard/dashboard";
 import { HistoryWorkspace } from "../features/history/history-workspace";
 import { JournalPanel } from "../features/journal/journal-panel";
 import { MarketPanel } from "../features/market/market-panel";
-import { PaperExecutionPanel } from "../features/paper/paper-execution-panel";
+import { OrdersWorkspace } from "../features/orders/orders-workspace";
+import { ReportsWorkspace } from "../features/reports/reports-workspace";
 import { OmsWorkspace } from "../features/oms/oms-workspace";
 import { ShadowWorkspace } from "../features/shadow/shadow-workspace";
 import { LiveReadinessWorkspace } from "../features/live/live-readiness-workspace";
@@ -148,10 +149,13 @@ export function AppShell() {
         : <ScannerPanel scanner={scanner} safety={safety} dataQuality={dataQuality} refreshKey={scannerRevision} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />;
       break;
     case "orders":
-      content = <PaperExecutionPanel view={showing === "positions" ? "positions" : "orders"} />;
+      content = <OrdersWorkspace view={showing === "positions" ? "positions" : "orders"} />;
       break;
     case "history":
       content = showing === "journal" ? <JournalPanel signals={signals} /> : <HistoryWorkspace canOperate={Boolean(canOperate)} onMessage={setMessage} />;
+      break;
+    case "reports":
+      content = <ReportsWorkspace tab={showing ?? "calendar"} onMessage={setMessage} />;
       break;
     case "risk":
       content = <RiskCenter safety={safety} isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;

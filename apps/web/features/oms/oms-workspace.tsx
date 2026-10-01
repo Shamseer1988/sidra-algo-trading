@@ -131,7 +131,7 @@ export function OmsWorkspace({
                             item.status === "FILLED"
                               ? "status-good"
                               : item.status === "UNKNOWN"
-                              ? "status-warn"
+                              ? "status-watch"
                               : "status-watch"
                           }`}
                         >

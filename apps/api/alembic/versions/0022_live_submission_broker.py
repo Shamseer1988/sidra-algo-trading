@@ -15,6 +15,7 @@ Revises: 0021_live_submission
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0022_live_submission_broker"

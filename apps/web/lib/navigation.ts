@@ -4,6 +4,7 @@ import {
   CalendarRange,
   ClipboardList,
   DatabaseZap,
+  FileBarChart,
   Ghost,
   Landmark,
   LineChart,
@@ -45,6 +46,7 @@ export type WorkspaceId =
   | "scanner"
   | "orders"
   | "history"
+  | "reports"
   | "risk"
   | "settings"
   // Admin & diagnostics
@@ -70,6 +72,7 @@ export const navigationSections: NavigationSection[] = [
       { id: "scanner", label: "Scanner & Universe", icon: RadioTower },
       { id: "orders", label: "Orders & Positions", icon: BriefcaseBusiness },
       { id: "history", label: "History", icon: CalendarRange },
+      { id: "reports", label: "Reports", icon: FileBarChart },
       { id: "risk", label: "Risk", icon: ShieldAlert },
       { id: "settings", label: "Settings", icon: Settings2 },
     ],
@@ -97,6 +100,7 @@ export const workspaceMeta: Record<WorkspaceId, { eyebrow: string; title: string
   scanner: { eyebrow: "What we are watching today", title: "Scanner & Universe" },
   orders: { eyebrow: "Execution workspace", title: "Orders & Positions" },
   history: { eyebrow: "Trading record", title: "History" },
+  reports: { eyebrow: "What the record adds up to", title: "Reports" },
   risk: { eyebrow: "Safety controls", title: "Risk" },
   settings: { eyebrow: "Configuration", title: "Settings" },
   backtesting: { eyebrow: "Research", title: "Backtesting" },
@@ -138,6 +142,10 @@ export const workspaceTabs: Partial<Record<WorkspaceId, WorkspaceTab[]>> = {
   history: [
     { id: "trades", label: "Trades" },
     { id: "journal", label: "Signal journal" },
+  ],
+  reports: [
+    { id: "calendar", label: "P&L calendar" },
+    { id: "pnl", label: "P&L summary" },
   ],
   settings: [
     { id: "trading", label: "Trading controls" },

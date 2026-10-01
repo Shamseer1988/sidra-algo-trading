@@ -17,8 +17,17 @@ the broker is read a few times a minute however many people are looking.
 Freshness is reported rather than implied, so a stale read is visible as a
 stale read instead of being taken for the current state.
 
-**It never writes.** No order is placed, modified or cancelled from here, and
-the adapter methods used are the read-only pair reconciliation already uses.
+**It never writes.** The adapter it holds is the read-only one --
+``live_report_adapter`` returns a client with no placement method on it at all,
+so nothing here could place, change or withdraw an order however this file is
+later edited. That is a stronger guarantee than the previous version of this
+module had, which held a submission-capable adapter and was merely trusted not
+to use it.
+
+**A broker can be named.** An operator with two brokers connected wants to look
+at either, not only at whichever one is currently selected for trading. Naming
+one is a read: it changes nothing about where an order would go, and the
+selected broker remains the only broker an order can reach.
 """
 
 import json
@@ -32,7 +41,12 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.services.live_execution_gateway import BrokerNotSelectedError, live_order_adapter
+from app.services.broker_adapter import BROKER_FIRSTOCK, BROKER_UPSTOX
+from app.services.live_execution_gateway import (
+    BrokerNotSelectedError,
+    live_report_adapter,
+    selected_live_broker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +54,15 @@ logger = logging.getLogger(__name__)
 # seconds, long enough that ten renders cost one broker read.
 CACHE_TTL_SECONDS = 6
 CACHE_KEY = "broker:snapshot"
+
+
+def _cache_key(broker: str | None) -> str:
+    """One cache entry per broker looked at.
+
+    Without the suffix, looking at Firstock would serve Upstox's books to the
+    next viewer for six seconds -- a position shown against the wrong account.
+    """
+    return f"{CACHE_KEY}:{(broker or 'SELECTED').upper()}"
 
 
 def _money(value: Decimal | None) -> float | None:
@@ -149,6 +172,7 @@ async def read(
     settings: Settings,
     redis: Redis,
     *,
+    broker: str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     """The broker's books, from cache unless asked for a fresh read.
@@ -157,9 +181,10 @@ async def read(
     snapshot with the reason in words, because a screen that throws tells an
     operator less than one that says the broker is unreachable.
     """
+    key = _cache_key(broker)
     if not force:
         try:
-            cached = await redis.get(CACHE_KEY)
+            cached = await redis.get(key)
         except Exception:  # noqa: BLE001 - a cache miss must not fail the screen
             cached = None
         if cached:
@@ -170,20 +195,20 @@ async def read(
             except (TypeError, ValueError):
                 pass
 
-    snapshot = await _fetch(session, settings)
+    snapshot = await _fetch(session, settings, broker)
     payload = _as_dict(snapshot)
     if snapshot.readable:
         try:
-            await redis.set(CACHE_KEY, json.dumps(payload), ex=CACHE_TTL_SECONDS)
+            await redis.set(key, json.dumps(payload), ex=CACHE_TTL_SECONDS)
         except Exception:  # noqa: BLE001 - caching is an optimisation, not the job
             logger.warning("broker_snapshot.cache_write_failed")
     return payload
 
 
-async def _fetch(session: AsyncSession, settings: Settings) -> BrokerSnapshot:
+async def _fetch(session: AsyncSession, settings: Settings, broker: str | None = None) -> BrokerSnapshot:
     now = datetime.now(UTC).isoformat()
     try:
-        adapter = await live_order_adapter(settings, session)
+        adapter = await live_report_adapter(settings, session, broker)
     except BrokerNotSelectedError as exc:
         return BrokerSnapshot("NONE", now, False, False, f"No live broker is selected: {exc}")
     except Exception as exc:  # noqa: BLE001
@@ -235,3 +260,56 @@ async def _fetch(session: AsyncSession, settings: Settings) -> BrokerSnapshot:
             for item in positions
         ],
     )
+
+
+async def choices(session: AsyncSession, settings: Settings) -> dict[str, Any]:
+    """Which brokers can be looked at, and which one trades.
+
+    Two separate facts, deliberately not merged. ``selected`` is the broker an
+    order would go to -- the operator's choice in trading controls, and the only
+    thing that decides where a live order lands. ``connected`` is merely whether
+    this system holds credentials for a broker, which is what decides whether
+    its books can be shown.
+
+    Offering a broker nobody has connected would be a selector whose every
+    choice ends in the same error message, so an unconnected broker is listed
+    with the reason it cannot be read rather than left out: an operator who
+    expected two brokers and sees one needs to know why.
+
+    Nothing here contacts a broker. Credentials are checked locally, so opening
+    the selector costs no part of the rate-limit budget that trading draws on.
+    """
+    try:
+        selected = await selected_live_broker(session)
+    except Exception:  # noqa: BLE001 - a screen must still render
+        selected = "NONE"
+
+    upstox_token = False
+    upstox_detail = "No stored access token. Authorise Upstox in the Upstox console."
+    try:
+        from app.services.upstox_oauth import load_access_token
+
+        upstox_token = bool(await load_access_token(settings))
+    except Exception as exc:  # noqa: BLE001
+        upstox_detail = f"Upstox credentials unavailable: {exc}"
+    if upstox_token:
+        upstox_detail = "Authorised."
+
+    firstock_ready = bool(settings.firstock_is_configured)
+    return {
+        "selected": selected,
+        "brokers": [
+            {
+                "key": BROKER_UPSTOX,
+                "label": "Upstox",
+                "connected": upstox_token,
+                "detail": upstox_detail,
+            },
+            {
+                "key": BROKER_FIRSTOCK,
+                "label": "Firstock",
+                "connected": firstock_ready,
+                "detail": "Credentials configured." if firstock_ready else "Firstock credentials are not configured.",
+            },
+        ],
+    }
