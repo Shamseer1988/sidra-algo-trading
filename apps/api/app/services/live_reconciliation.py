@@ -61,7 +61,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ExecutionReconciliation, LiveOrderSubmission, OmsOrder
 from app.services.broker_adapter import (
+    BUY,
     OPEN_STATUSES,
+    SELL,
     STATUS_UNREADABLE,
     TERMINAL_STATUSES,
     BrokerAdapter,
@@ -168,9 +170,16 @@ def _plausible_range(submissions: list[LiveOrderSubmission], position: BrokerPos
         if not position.identifies(submission.instrument_token, submission.trading_symbol):
             continue
         quantity = Decimal(str(submission.quantity or 0))
-        if submission.transaction_type == "BUY":
+        # Canonical, because transaction_type holds what the broker was asked
+        # for: "BUY" at Upstox, "B" at Firstock. Comparing it against BUY
+        # matched on one broker and nothing on the other -- and matching
+        # nothing here is not a near miss, it returns (0, 0) and reports every
+        # position this system opened itself as exposure nobody can explain,
+        # which blocks trading for the rest of the session.
+        side = submission.canonical_side
+        if side == BUY:
             gross_long += quantity
-        elif submission.transaction_type == "SELL":
+        elif side == SELL:
             gross_short += quantity
     return gross_long, gross_short
 

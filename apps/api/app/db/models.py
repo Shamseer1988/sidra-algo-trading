@@ -892,6 +892,29 @@ class LiveOrderSubmission(Base):
         """
         return self._canonical("product")
 
+    @property
+    def canonical_side(self) -> str | None:
+        """BUY or SELL, never the broker's abbreviation.
+
+        ``transaction_type`` holds what the broker was asked for: "BUY" at
+        Upstox, "B" at Firstock. Code comparing it against BUY works on one
+        broker and silently matches nothing on the other -- and a comparison
+        that matches nothing here makes every position look unexplained.
+        """
+        return self._canonical("side")
+
+    @property
+    def canonical_order_type(self) -> str | None:
+        """MARKET, LIMIT, SL or SL-M, never the broker's spelling.
+
+        ``price_type`` holds "SL-M" at Upstox and "SL-MKT" at Firstock for the
+        same order. Selecting resting stops by comparing it against SL-M finds
+        them on one broker and none on the other, and finding none means an
+        exit is sent while a stop is still live -- both can fill, and the
+        position ends up reversed instead of flat.
+        """
+        return self._canonical("orderType")
+
     def _canonical(self, field: str) -> str | None:
         value = ((self.request_snapshot or {}).get("canonical") or {}).get(field)
         return str(value) if value else None

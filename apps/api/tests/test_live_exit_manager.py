@@ -396,8 +396,27 @@ class MatchSession:
         return self._signal
 
 
-def entry(symbol: str, token: str | None, signal_id: str = "sig-1"):
-    return SimpleNamespace(trading_symbol=symbol, instrument_token=token, paper_signal_id=signal_id)
+def entry(symbol: str, token: str | None, signal_id: str = "sig-1", order_type: str = "MARKET"):
+    """A real row. The third helper in this suite to need converting.
+
+    Each stand-in answered for whatever the code reached for, so none of them
+    could show that `instrument_token`, `canonical_product` or
+    `canonical_order_type` read from a snapshot rather than a column.
+    """
+    from app.db.models import LiveOrderSubmission
+
+    return LiveOrderSubmission(
+        client_order_id=f"sidra-{signal_id}",
+        paper_signal_id=signal_id,
+        broker="UPSTOX",
+        exchange="NSE_EQ",
+        trading_symbol=symbol,
+        product="I",
+        price_type=order_type,
+        transaction_type="SELL",
+        quantity=7,
+        request_snapshot={"canonical": {"instrumentToken": token, "product": "INTRADAY", "orderType": order_type}},
+    )
 
 
 def held(symbol: str, token: str | None):

@@ -313,19 +313,34 @@ def submission(
     token: str = "NSE_EQ|INE415G01027",
     side: str = "SELL",
     quantity: int = 143,
-) -> SimpleNamespace:
-    return SimpleNamespace(
+    broker: str = "UPSTOX",
+):
+    """A real LiveOrderSubmission, written the way prepare_submission writes one.
+
+    The columns hold the BROKER's words and the snapshot holds ours. That
+    difference is not incidental here: _plausible_range once compared
+    transaction_type against BUY, which matched at Upstox and matched nothing
+    at Firstock, where the same order is recorded as "B". A stand-in with one
+    `transaction_type` attribute cannot express that, which is why it hid.
+    """
+    from app.db.models import LiveOrderSubmission
+
+    broker_side = {"UPSTOX": {"BUY": "BUY", "SELL": "SELL"}, "FIRSTOCK": {"BUY": "B", "SELL": "S"}}[broker][side]
+    return LiveOrderSubmission(
         id=uuid4(),
-        client_order_id="sidra-abc",
+        client_order_id=f"sidra-{uuid4().hex[:8]}",
         broker_order_numbers=broker_order_numbers or [],
         status=status,
+        broker=broker,
+        exchange="NSE_EQ",
         trading_symbol=symbol,
-        # Carried separately from the symbol because the two are not
-        # interchangeable: on Upstox the submission's symbol IS the token, and
-        # the position book's is not.
-        instrument_token=token,
-        transaction_type=side,
+        product="I",
+        price_type="MARKET",
+        transaction_type=broker_side,
         quantity=quantity,
+        request_snapshot={
+            "canonical": {"instrumentToken": token, "side": side, "product": "INTRADAY", "orderType": "MARKET"}
+        },
         created_at=datetime.now(UTC),
     )
 

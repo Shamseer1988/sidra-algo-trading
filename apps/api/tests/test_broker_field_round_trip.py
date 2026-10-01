@@ -139,3 +139,118 @@ def test_no_exit_path_reads_a_stored_broker_product_at_all() -> None:
             "describe(); translating it again is what refused a live stop and the close behind it. "
             "Use canonical_product."
         )
+
+
+# --- the same class, found by review rather than by losing money -----------
+#
+# Upstox's words for an order type and a side happen to be identical to ours:
+# "SL-M" is "SL-M" and "BUY" is "BUY". Only the product differs, which is why
+# only the product broke in production. That coincidence was load-bearing in
+# two more places, and on Firstock both were already wrong.
+
+
+def firstock_submission(side: str = "SELL", order_type: str = "SL-M"):
+    """A row as Firstock's adapter would have it written: columns in its words."""
+    from app.db.models import LiveOrderSubmission
+
+    return LiveOrderSubmission(
+        client_order_id="sidra-fs",
+        broker="FIRSTOCK",
+        exchange="NSE",
+        trading_symbol="RVNL-EQ",
+        product="I",
+        price_type="SL-MKT" if order_type == "SL-M" else "MKT",
+        transaction_type="S" if side == "SELL" else "B",
+        quantity=143,
+        request_snapshot={
+            "canonical": {"instrumentToken": "NSE_EQ|INE415G01027", "side": side, "orderType": order_type}
+        },
+    )
+
+
+def test_a_firstock_stop_is_recognisable_as_a_stop() -> None:
+    """_resting_stops selects on this.
+
+    Matching nothing is not a near miss there: an empty list reads as "no stop
+    to cancel", the exit goes out anyway, the stop is still live beside it, and
+    a position that should be flat ends up reversed.
+    """
+    from app.services.broker_adapter import STOP_MARKET
+
+    record = firstock_submission(order_type="SL-M")
+    assert record.price_type == "SL-MKT"
+    assert record.price_type != STOP_MARKET, "the stored column is the broker's word; that is the point"
+    assert record.canonical_order_type == STOP_MARKET
+
+
+def test_a_firstock_side_is_readable_as_buy_or_sell() -> None:
+    """_plausible_range sums on this.
+
+    Matching neither branch leaves the range at (0, 0), which reports every
+    position this system opened itself as exposure nobody can explain and stops
+    trading for the session.
+    """
+    from app.services.broker_adapter import BUY, SELL
+
+    assert firstock_submission(side="SELL").transaction_type == "S"
+    assert firstock_submission(side="SELL").canonical_side == SELL
+    assert firstock_submission(side="BUY").canonical_side == BUY
+
+
+def test_no_live_module_compares_a_stored_broker_field_to_a_canonical_constant() -> None:
+    """The guard for the class, not for the three instances of it.
+
+    Three stored columns hold the broker's vocabulary -- product, price_type
+    and transaction_type -- and each has now been compared somewhere against
+    this system's own constants. Two of those comparisons were correct on
+    Upstox by coincidence and wrong on Firstock, which is the worst kind: they
+    work until the day the broker changes.
+    """
+    import io as _io
+    import re
+    import tokenize
+    from pathlib import Path
+
+    def code_only(text: str) -> str:
+        return " ".join(
+            token.string
+            for token in tokenize.generate_tokens(_io.StringIO(text).readline)
+            if token.type not in (tokenize.COMMENT, tokenize.STRING)
+        )
+
+    # A stored broker-facing column read off anything, other than through a
+    # canonical_* property. `.canonical_product` cannot match: the character
+    # before `product` there is an underscore, not a dot.
+    #
+    # `description.product` is excluded because a BrokerOrderDescription is
+    # where the broker's words legitimately come from -- recording them is the
+    # correct use, and the bug was always feeding a recorded one back in.
+    # The receiver is captured rather than excluded by lookbehind, because
+    # code_only() joins tokens with spaces and "description . product" defeats
+    # a fixed-width lookbehind.
+    stored = re.compile(r"\b(\w+)\s*\.\s*(product|price_type|transaction_type)\b")
+    # A BrokerOrderDescription is where the broker's words legitimately come
+    # from; recording them is correct, and the bug was always feeding a
+    # recorded one back into a new order.
+    allowed_receivers = {"description", "self"}
+    root = Path(__file__).resolve().parents[1] / "app" / "services"
+    offenders: list[str] = []
+    for path in sorted(root.glob("live_*.py")):
+        source = code_only(path.read_text())
+        # live_orders writes these columns; writing them is the correct use.
+        if path.name == "live_orders.py":
+            continue
+        for match in stored.finditer(source):
+            receiver, field = match.group(1), match.group(2)
+            if receiver in allowed_receivers:
+                continue
+            offenders.append(f"{path.name}: {receiver}.{field}")
+
+    # live_approval stores the CANONICAL values in its own row, so reading them
+    # back is correct there and the round trip is tested above.
+    offenders = [item for item in offenders if not item.startswith("live_approval.py")]
+    assert not offenders, (
+        f"These read a stored broker-facing field: {sorted(set(offenders))}. "
+        "Compare canonical_product / canonical_order_type / canonical_side instead, or the comparison is "
+        "correct only for brokers whose vocabulary happens to match ours."
+    )

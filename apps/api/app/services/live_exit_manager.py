@@ -137,28 +137,42 @@ async def _signal_for(session: AsyncSession, position, start, end) -> PaperSigna
             LiveOrderSubmission.created_at >= start,
             LiveOrderSubmission.created_at < end,
             LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
-            LiveOrderSubmission.price_type != STOP_MARKET,
             LiveOrderSubmission.paper_signal_id.isnot(None),
         )
         .order_by(LiveOrderSubmission.created_at.desc())
     )
     for submission in rows:
+        # Entries only, and the stop is excluded by its CANONICAL type. The
+        # column holds the broker's spelling -- "SL-M" at Upstox, "SL-MKT" at
+        # Firstock -- so the SQL comparison this replaces worked on one broker
+        # and matched nothing on the other.
+        if submission.canonical_order_type == STOP_MARKET:
+            continue
         if position.identifies(submission.instrument_token, submission.trading_symbol):
             return await session.get(PaperSignal, submission.paper_signal_id)
     return None
 
 
 async def _resting_stops(session: AsyncSession, signal_id, start, end) -> list[LiveOrderSubmission]:  # noqa: ANN001
+    """Every stop still resting for this trade.
+
+    Selected on the canonical order type rather than the stored one. The column
+    holds the broker's spelling, and comparing it against SL-M found the stops
+    at Upstox and none at Firstock -- and finding none is not a quiet failure
+    here: ``_consider`` reads an empty list as "no stop to cancel" and sends the
+    exit anyway. The stop is then still live beside it, both can fill, and the
+    position ends up reversed rather than flat. That is the one outcome this
+    module exists to prevent.
+    """
     rows = await session.scalars(
         select(LiveOrderSubmission).where(
             LiveOrderSubmission.paper_signal_id == signal_id,
-            LiveOrderSubmission.price_type == STOP_MARKET,
             LiveOrderSubmission.status == ACCEPTED,
             LiveOrderSubmission.created_at >= start,
             LiveOrderSubmission.created_at < end,
         )
     )
-    return list(rows.all())
+    return [row for row in rows.all() if row.canonical_order_type == STOP_MARKET]
 
 
 async def _cancel_stops(adapter: BrokerAdapter, stops: list[LiveOrderSubmission]) -> tuple[bool, str]:
