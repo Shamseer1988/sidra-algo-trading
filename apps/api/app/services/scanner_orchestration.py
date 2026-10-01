@@ -347,6 +347,18 @@ class PaperScannerOrchestrator:
         telegram_settings = await configured_settings(self._settings)
         if not telegram_settings.telegram_is_configured:
             return
+        # Optional, because under TELEGRAM_APPROVAL this and the approval
+        # request describe the same trade and arrive together. Two messages for
+        # one decision teaches skimming, and the one with the buttons is the one
+        # that must be read. Checked here rather than at the call site so the
+        # paper journal itself is untouched: the signal is still recorded, still
+        # counted and still available on the screens -- only the message stops.
+        from app.services.notification_settings import wants
+
+        async with SessionLocal() as session:
+            if not await wants(session, "paper_signal_alerts"):
+                self._logger.info("scanner.paper_alert_muted", signal_id=str(signal.id))
+                return
         cooldown_key = f"telegram:paper_alert:{signal.signal_key}"
         if not await self._redis.set(cooldown_key, "1", ex=telegram_settings.telegram_alert_cooldown_seconds, nx=True):
             self._logger.info("scanner.telegram_alert_suppressed", signal_id=str(signal.id))

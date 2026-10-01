@@ -1,10 +1,10 @@
 "use client";
 
-import { BellRing, ShieldAlert, Webhook } from "lucide-react";
+import { BellRing, RotateCcw, Save, ShieldAlert, Webhook } from "lucide-react";
 
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 
-import type { SafetyStatus, TelegramStatus } from "../../components/api";
+import { api, type NotificationCatalog, type SafetyStatus, type TelegramStatus } from "../../components/api";
 
 /**
  * The control plane, split into the two places it belongs.
@@ -64,15 +64,30 @@ export function SafetyControls({
         )}
       </article>
 
+      {/*
+        The description used to read "Controls paper-signal journaling and
+        notifications", which sounds like a logging switch. It is not: the
+        scanner checks this flag before evaluating anything, so turning it off
+        stops candle evaluation, signals, alerts AND live orders. An operator
+        who wanted fewer Telegram messages came within one click of halting all
+        trading, which is a labelling fault, not a user error.
+      */}
       <article className="panel p-6">
-        <p className="eyebrow">Paper trade tracking</p>
+        <p className="eyebrow">Scanner</p>
         <h3 className="mt-1 text-lg font-semibold text-white">
-          {safety.paper_tracking_enabled ? "Enabled" : "Disabled"}
+          {safety.paper_tracking_enabled ? "Running" : "Stopped"}
         </h3>
-        <p className="mt-3 text-sm leading-6 text-slate-400">Controls paper-signal journaling and notifications.</p>
+        <p className="mt-3 text-sm leading-6 text-slate-400">
+          The master switch for signal generation. Turning this off stops the scanner evaluating candles, so{" "}
+          <strong className="text-slate-200">no signals, no alerts and no live orders</strong> are produced.
+        </p>
+        <p className="mt-2 text-xs leading-5 text-slate-500">
+          To stop live orders only, use Disarm. To reduce Telegram messages, use Settings → Alerts. Neither this nor
+          anything else on this screen closes a position already open at the broker.
+        </p>
         {isAdmin && (
           <button onClick={onPaper} className="secondary-button mt-6">
-            {safety.paper_tracking_enabled ? "Disable paper tracking" : "Enable paper tracking"}
+            {safety.paper_tracking_enabled ? "Stop the scanner" : "Start the scanner"}
           </button>
         )}
       </article>
@@ -125,6 +140,123 @@ export function AlertsPanel({
           </p>
         )}
       </article>
+
+      <NotificationPreferences isAdmin={isAdmin} />
     </section>
+  );
+}
+
+/**
+ * Which messages Telegram sends.
+ *
+ * Under TELEGRAM_APPROVAL one signal produced two notifications — the paper
+ * journal's "TRADING SIGNAL MATCHED" and the live path's approval request —
+ * describing the same trade. Two messages for one decision is not twice the
+ * information; it teaches skimming, and the one with the buttons on it is the
+ * one that has to be read.
+ *
+ * Only messages that report something going *right* are offered. A failure
+ * notice is not noise to be managed: muting it would not reduce the number of
+ * things that go wrong, only the number you hear about. The server enforces
+ * this too — these are the only fields it accepts — and the always-sent list
+ * below comes from the server so the screen cannot promise a different set
+ * from the one the senders actually honour.
+ */
+function NotificationPreferences({ isAdmin }: { isAdmin: boolean }) {
+  const [catalog, setCatalog] = useState<NotificationCatalog | null>(null);
+  const [draft, setDraft] = useState<Record<string, boolean>>({});
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const next = await api.notificationCatalog();
+      setCatalog(next);
+      setDraft(Object.fromEntries(next.toggles.map((item) => [item.key, item.value])));
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Could not load notification preferences");
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!catalog) return null;
+
+  const dirty = catalog.toggles.filter((item) => draft[item.key] !== item.value).length;
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.updateNotifications(draft);
+      setNote("Saved. New messages follow these settings immediately.");
+      await load();
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Could not save notification preferences");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <article className="panel mt-6 p-5 sm:p-7">
+      <p className="eyebrow">Notifications</p>
+      <h3 className="mt-1 text-base font-semibold text-white">Which messages to send</h3>
+      <p className="mt-3 text-sm leading-6 text-slate-400">
+        Switch off the messages you do not need. Anything that reports a failure is not listed, because it always
+        sends.
+      </p>
+
+      <div className="mt-5 space-y-4">
+        {catalog.toggles.map((item) => (
+          <div key={item.key} className="rounded-md border border-slate-800 p-4">
+            <label className="flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                className="mt-1"
+                disabled={!isAdmin}
+                checked={Boolean(draft[item.key])}
+                onChange={(event) => setDraft((current) => ({ ...current, [item.key]: event.target.checked }))}
+              />
+              <span>
+                <span className="text-sm font-semibold text-white">{item.label}</span>
+                <span className="mt-1 block text-xs leading-5 text-slate-400">{item.help}</span>
+                <span className="mt-2 block font-mono text-[11px] text-slate-600">{item.key}</span>
+              </span>
+            </label>
+          </div>
+        ))}
+      </div>
+
+      <div className="glass-inset mt-5 rounded-md p-4">
+        <p className="text-xs font-semibold text-slate-300">Always sent, and not switchable</p>
+        <ul className="mt-2 space-y-1 text-xs leading-5 text-slate-400">
+          {catalog.always_sent.map((item) => (
+            <li key={item}>• {item}</li>
+          ))}
+        </ul>
+      </div>
+
+      {isAdmin && (
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          {dirty > 0 ? (
+            <>
+              <button onClick={() => void save()} disabled={saving} className="primary-button">
+                <Save className="h-4 w-4" />
+                Save {dirty} change{dirty === 1 ? "" : "s"}
+              </button>
+              <button onClick={() => void load()} className="secondary-button">
+                <RotateCcw className="h-4 w-4" />
+                Discard
+              </button>
+            </>
+          ) : (
+            <p className="text-sm text-slate-500">No changes to save.</p>
+          )}
+        </div>
+      )}
+      {note && <p className="mt-3 text-xs text-slate-400">{note}</p>}
+    </article>
   );
 }

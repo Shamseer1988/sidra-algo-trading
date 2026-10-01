@@ -250,6 +250,16 @@ async def _announce_automatic(
                 "<i>Check this position in the broker app now.</i>"
             )
         else:
+            # The only branch here an operator may switch off. Everything above
+            # reports something going wrong -- refused, rejected, unprotected --
+            # and muting a failure does not reduce noise, it removes the way the
+            # operator finds out. Checked inside this branch rather than at the
+            # top so that cannot be changed by accident later.
+            from app.services.notification_settings import wants
+
+            if session is not None and not await wants(session, "order_sent_confirmations"):
+                logger.info("live_entry_bridge.sent_confirmation_muted signal_id=%s", signal.id)
+                return
             stop_line = f"\U0001f6d1 {protection.detail}\n" if protection is not None else ""
             text = (
                 "\u2705 <b>LIVE ORDER SENT</b>\n\n"

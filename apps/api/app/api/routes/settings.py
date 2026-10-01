@@ -15,6 +15,14 @@ from app.services.indicator_settings import (
     from_environment,
 )
 from app.services.indicator_settings import load as load_indicators
+from app.services.notification_settings import (
+    ALWAYS_SENT,
+    DEFAULTS,
+    NOTIFICATION_KEY,
+    NotificationSettings,
+)
+from app.services.notification_settings import DESCRIPTIONS as NOTIFICATION_DESCRIPTIONS
+from app.services.notification_settings import load as load_notifications
 from app.services.risk_profile import RISK_PRESETS, effective_limits
 from app.services.settings_catalog import (
     GROUP_LABELS,
@@ -502,6 +510,75 @@ async def update_indicator_settings(
     )
     await session.commit()
     return indicators
+
+
+# --- telegram notifications -----------------------------------------------
+
+
+class NotificationToggle(BaseModel):
+    key: str
+    label: str
+    help: str
+    value: bool
+
+
+class NotificationCatalogResponse(BaseModel):
+    """The switches, plus what cannot be switched.
+
+    The always-sent list travels with the catalogue so the screen states it
+    rather than leaving an operator to discover by muting something and waiting
+    for a failure notice that was never optional.
+    """
+
+    toggles: list[NotificationToggle]
+    always_sent: list[str]
+
+
+@router.get("/notifications", response_model=NotificationCatalogResponse)
+async def notification_catalog(_: CurrentUser, session: DbSession) -> NotificationCatalogResponse:
+    current = (await load_notifications(session)).model_dump()
+    return NotificationCatalogResponse(
+        toggles=[
+            NotificationToggle(key=key, label=label, help=help_text, value=bool(current.get(key, True)))
+            for key, (label, help_text) in NOTIFICATION_DESCRIPTIONS.items()
+        ],
+        always_sent=list(ALWAYS_SENT),
+    )
+
+
+@router.put("/notifications", response_model=NotificationSettings)
+async def update_notifications(
+    preferences: NotificationSettings,
+    session: DbSession,
+    user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> NotificationSettings:
+    """Save which optional messages to send, versioned and audited.
+
+    Audited like any other setting because "why did I stop being told about
+    that" is a question worth being able to answer from the record.
+    """
+    stored = await session.get(ApplicationSetting, NOTIFICATION_KEY)
+    previous = dict(stored.value) if stored is not None and isinstance(stored.value, dict) else DEFAULTS.model_dump()
+    payload = preferences.model_dump()
+    summary = summarise(previous, payload)
+
+    if stored is None:
+        stored = ApplicationSetting(key=NOTIFICATION_KEY, value=payload, updated_by_user_id=user.id)
+        session.add(stored)
+    else:
+        stored.value = payload
+        stored.updated_by_user_id = user.id
+
+    await record_revision(session, NOTIFICATION_KEY, payload, summary, changed_by_user_id=user.id)
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            event_type="settings.notifications_updated",
+            metadata_json={"changed_keys": summary.changed_keys},
+        )
+    )
+    await session.commit()
+    return preferences
 
 
 class StrategyDefinitionResponse(BaseModel):

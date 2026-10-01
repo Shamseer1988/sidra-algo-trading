@@ -284,6 +284,15 @@ async def send_session_open_alert(settings: Settings, result) -> None:
 
         ist = datetime.now(UTC).astimezone(MARKET_TIMEZONE).strftime("%d-%b-%Y %I:%M %p")
         if result.opened:
+            # Optional only when the session actually opened. A session that did
+            # NOT open is the morning's most important message -- it means
+            # nothing will trade today -- and the branch below is never muted.
+            from app.db.session import SessionLocal
+            from app.services.notification_settings import wants
+
+            async with SessionLocal() as session:
+                if not await wants(session, "session_open_alerts"):
+                    return
             expiry = (
                 result.expires_at.astimezone(MARKET_TIMEZONE).strftime("%I:%M %p") if result.expires_at else "unknown"
             )
