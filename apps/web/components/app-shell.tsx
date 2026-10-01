@@ -12,6 +12,8 @@ import { HistoryWorkspace } from "../features/history/history-workspace";
 import { JournalPanel } from "../features/journal/journal-panel";
 import { MarketPanel } from "../features/market/market-panel";
 import { OrdersWorkspace } from "../features/orders/orders-workspace";
+import { SourceToggle } from "../features/orders/source-controls";
+import { useOrderSource } from "../features/orders/use-order-source";
 import { ReportsWorkspace } from "../features/reports/reports-workspace";
 import { OmsWorkspace } from "../features/oms/oms-workspace";
 import { ShadowWorkspace } from "../features/shadow/shadow-workspace";
@@ -49,6 +51,11 @@ export function AppShell() {
   // a cross-link — lands on its first tab rather than on whatever was last
   // open in a screen the operator has since left.
   const [tab, setTab] = useState<string | null>(defaultTab("dashboard"));
+  // Which records Orders & Positions is showing. Held here because the control
+  // that sets it renders on the tab row, which this shell owns, while the panel
+  // it controls renders below — one source of truth rather than two that can
+  // disagree about whose book is on screen.
+  const orderSource = useOrderSource(active === "orders");
   const [menuOpen, setMenuOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -149,7 +156,7 @@ export function AppShell() {
         : <ScannerPanel scanner={scanner} safety={safety} dataQuality={dataQuality} refreshKey={scannerRevision} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />;
       break;
     case "orders":
-      content = <OrdersWorkspace view={showing === "positions" ? "positions" : "orders"} />;
+      content = <OrdersWorkspace view={showing === "positions" ? "positions" : "orders"} source={orderSource} />;
       break;
     case "history":
       content = showing === "journal" ? <JournalPanel signals={signals} /> : <HistoryWorkspace canOperate={Boolean(canOperate)} onMessage={setMessage} />;
@@ -192,7 +199,7 @@ export function AppShell() {
       break;
   }
 
-  return <main className="min-h-screen bg-terminal-950 text-slate-200"><TerminalSidebar active={active} collapsed={collapsed} menuOpen={menuOpen} user={user} onSelect={selectWorkspace} onToggle={() => setCollapsed((value) => !value)} onSignOut={() => void signOut()} /><div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}><TerminalHeader active={active} overview={overview} scanner={scanner} safety={safety} user={user} onOpenNavigation={() => setMenuOpen((value) => !value)} onOpenControls={() => selectWorkspace("risk")} /><div className="mx-auto max-w-[1600px] p-4 sm:p-6">{tabs && showing && <WorkspaceTabs tabs={tabs} active={showing} onSelect={setTab} />}{content}</div></div><Toaster toasts={toasts} onDismiss={dismissToast} /></main>;
+  return <main className="min-h-screen bg-terminal-950 text-slate-200"><TerminalSidebar active={active} collapsed={collapsed} menuOpen={menuOpen} user={user} onSelect={selectWorkspace} onToggle={() => setCollapsed((value) => !value)} onSignOut={() => void signOut()} /><div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}><TerminalHeader active={active} overview={overview} scanner={scanner} safety={safety} user={user} onOpenNavigation={() => setMenuOpen((value) => !value)} onOpenControls={() => selectWorkspace("risk")} /><div className="mx-auto max-w-[1600px] p-4 sm:p-6">{tabs && showing && <WorkspaceTabs tabs={tabs} active={showing} onSelect={setTab} actions={active === "orders" ? <SourceToggle source={orderSource.source} setSource={orderSource.setSource} /> : null} />}{content}</div></div><Toaster toasts={toasts} onDismiss={dismissToast} /></main>;
 }
 
 function Toaster({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {

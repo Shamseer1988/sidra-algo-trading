@@ -1180,6 +1180,22 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText("32/32")).toBeVisible();
   });
 
+  test("5c-0. Orders: the source toggle rides the tab row, and is not a tab", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await go(page, "Orders & Positions", "Orders");
+    // It chooses what the tabs are showing, so it belongs on their line -- but
+    // a button inside the tablist element would be announced as "tab 3 of 3"
+    // to a screen reader, which is a lie told only to people who cannot see it.
+    await expect(page.locator(".workspace-tabs").getByRole("button", { name: "Broker", exact: true })).toBeVisible();
+    await expect(page.getByRole("tab")).toHaveCount(2);
+
+    // And nowhere else: it is a control for this screen, not for the shell.
+    await go(page, "History");
+    await expect(page.getByRole("button", { name: "Broker", exact: true })).toHaveCount(0);
+  });
+
   test("5c-1. Orders: the source toggle says whose records are on the screen", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
@@ -1474,6 +1490,20 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     const loss = page.getByRole("button", { name: new RegExp(`${dayInThisMonth(3)}: −₹300`) });
     await expect(profit).toHaveClass(/bg-emerald-500/);
     await expect(loss).toHaveClass(/bg-rose-500/);
+  });
+
+  test("8f-1. Reports: the month total counts only the month on screen", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    // A row from outside the range -- a widened window, a stale response -- must
+    // not land in a total printed above a grid that cannot show it.
+    await page.route("**/api/v1/history/daily*", async (route: Route) => {
+      await route.fulfill({ json: [calendarDay(2, "460.00"), { ...MOCK_HISTORY_DAYS[0], session_date: "2020-01-15", net_pnl: "9999.00" }] });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports");
+    await expect(page.getByText("+₹460.00").first()).toBeVisible();
+    await expect(page.getByText("₹9,999.00")).toHaveCount(0);
   });
 
   test("8g. Reports: a day with no record is not drawn as a flat day", async ({ page }) => {

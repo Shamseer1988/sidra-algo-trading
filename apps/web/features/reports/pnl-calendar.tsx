@@ -71,6 +71,7 @@ export function PnlCalendar({ onMessage }: { onMessage: (message: string) => voi
 
   const byDate = useMemo(() => new Map(days.map((day) => [day.session_date, day])), [days]);
 
+
   function step(delta: number) {
     const next = new Date(year, month + delta, 1);
     setYear(next.getFullYear());
@@ -78,10 +79,15 @@ export function PnlCalendar({ onMessage }: { onMessage: (message: string) => voi
     setOpen(null);
   }
 
-  const total = days.reduce((sum, day) => sum + (toNumber(day.net_pnl) ?? 0), 0);
-  const charges = days.reduce((sum, day) => sum + (toNumber(day.charges) ?? 0), 0);
-  const green = days.filter((day) => (toNumber(day.net_pnl) ?? 0) > 0).length;
-  const red = days.filter((day) => (toNumber(day.net_pnl) ?? 0) < 0).length;
+  // Only the month on screen. The totals are read as a caption to the grid
+  // below them, so a row from outside the range -- a server that widened the
+  // window, a cached response from the previous month -- would put a figure
+  // above a calendar that cannot account for it.
+  const shown = days.filter((day) => day.session_date.startsWith(`${year}-${pad(month + 1)}-`));
+  const total = shown.reduce((sum, day) => sum + (toNumber(day.net_pnl) ?? 0), 0);
+  const charges = shown.reduce((sum, day) => sum + (toNumber(day.charges) ?? 0), 0);
+  const green = shown.filter((day) => (toNumber(day.net_pnl) ?? 0) > 0).length;
+  const red = shown.filter((day) => (toNumber(day.net_pnl) ?? 0) < 0).length;
   const cells = new Date(year, month + 1, 0).getDate();
   const blanks = leadingBlanks(year, month);
   const detail = open ? byDate.get(open) : undefined;
