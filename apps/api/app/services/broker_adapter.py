@@ -158,6 +158,19 @@ class BrokerOrderRecord:
     client_order_id: str | None
     status: str
     symbol: str
+    # The fields a person reads on an order book. Parsed here, in the adapter,
+    # because the brokers name them differently and a route that reached into
+    # ``raw`` to display them would put broker vocabulary back on the far side
+    # of the seam this class exists to hold.
+    #
+    # Every one is optional and None means "the broker did not say" -- never
+    # zero, which would read as a quantity or a price the broker reported.
+    side: str | None = None
+    order_type: str | None = None
+    quantity: int | None = None
+    filled_quantity: int | None = None
+    average_price: Decimal | None = None
+    placed_at: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -191,6 +204,14 @@ class BrokerPositionRecord:
     symbol: str
     net_quantity: Decimal | None
     day_pnl: Decimal | None = None
+    # Split as well as combined, because an operator reading a position asks
+    # two different questions of it: what has this already cost or made
+    # (realised), and what is still moving (unrealised). ``day_pnl`` stays the
+    # sum because the daily stop is measured on it and must not change meaning.
+    realised: Decimal | None = None
+    unrealised: Decimal | None = None
+    average_price: Decimal | None = None
+    last_price: Decimal | None = None
     instrument_token: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -243,6 +264,12 @@ def _text_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _int_or_none(value: Any) -> int | None:
+    """A broker count. Unreadable is None, never zero -- zero is a real answer."""
+    parsed = _decimal_or_none(value)
+    return int(parsed) if parsed is not None else None
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
@@ -476,6 +503,12 @@ class UpstoxAdapter:
                     client_order_id=self.find_client_order_id(raw),
                     status=self._STATUS.get(str(raw.get("status") or "").strip().lower(), STATUS_UNREADABLE),
                     symbol=str(raw.get("trading_symbol") or raw.get("instrument_token") or "unknown"),
+                    side=_text_or_none(raw.get("transaction_type")),
+                    order_type=_text_or_none(raw.get("order_type")),
+                    quantity=_int_or_none(raw.get("quantity")),
+                    filled_quantity=_int_or_none(raw.get("filled_quantity")),
+                    average_price=_decimal_or_none(raw.get("average_price")),
+                    placed_at=_text_or_none(raw.get("order_timestamp")),
                     raw=raw,
                 )
             )
@@ -491,6 +524,10 @@ class UpstoxAdapter:
                     symbol=str(raw.get("trading_symbol") or raw.get("instrument_token") or "unknown"),
                     net_quantity=_decimal_or_none(raw.get("quantity")),
                     day_pnl=_combined_pnl(raw, total_keys=("pnl",), parts=("realised", "unrealised")),
+                    realised=_decimal_or_none(raw.get("realised")),
+                    unrealised=_decimal_or_none(raw.get("unrealised")),
+                    average_price=_decimal_or_none(raw.get("average_price") or raw.get("buy_price")),
+                    last_price=_decimal_or_none(raw.get("last_price")),
                     # The field orders are actually placed against, and so the
                     # only one an order can be matched back to.
                     instrument_token=_text_or_none(raw.get("instrument_token")),
@@ -661,6 +698,12 @@ class FirstockAdapter:
             records.append(
                 BrokerOrderRecord(
                     broker_order_id=str(raw.get("orderNumber") or "").strip(),
+                    side=_text_or_none(raw.get("transactionType")),
+                    order_type=_text_or_none(raw.get("priceType")),
+                    quantity=_int_or_none(raw.get("quantity")),
+                    filled_quantity=_int_or_none(raw.get("filledShares")),
+                    average_price=_decimal_or_none(raw.get("averagePrice")),
+                    placed_at=_text_or_none(raw.get("orderTime")),
                     client_order_id=self.find_client_order_id(raw),
                     status=self._STATUS.get(str(raw.get("status") or "").strip().upper(), STATUS_UNREADABLE),
                     symbol=str(raw.get("tradingSymbol") or "unknown"),
@@ -678,6 +721,10 @@ class FirstockAdapter:
                 BrokerPositionRecord(
                     symbol=str(raw.get("tradingSymbol") or "unknown"),
                     net_quantity=_decimal_or_none(raw.get("netQuantity")),
+                    realised=_decimal_or_none(raw.get("RealizedPNL")),
+                    unrealised=_decimal_or_none(raw.get("unrealizedMTOM") or raw.get("totalMTM")),
+                    average_price=_decimal_or_none(raw.get("netAveragePrice")),
+                    last_price=_decimal_or_none(raw.get("lastTradedPrice")),
                     instrument_token=_text_or_none(raw.get("token") or raw.get("instrumentToken")),
                     # Firstock's own reference contradicts itself here: the prose
                     # names unrealizedMTOM and the sample response shows totalMTM.
