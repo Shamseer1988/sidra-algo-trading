@@ -3,8 +3,8 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { api, type HistoryDay } from "../../components/api";
-import { Money, rupees, toNumber } from "../history/money";
+import { api, type HistoryDay, type HistoryTrade } from "../../components/api";
+import { pnlTone, rupees, toNumber } from "../history/money";
 
 /**
  * A month of trading days, red for a loss and green for a profit.
@@ -52,6 +52,8 @@ export function PnlCalendar({ onMessage }: { onMessage: (message: string) => voi
   const [days, setDays] = useState<HistoryDay[]>([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState<string | null>(null);
+  const [trades, setTrades] = useState<HistoryTrade[]>([]);
+  const [tradesLoading, setTradesLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -68,6 +70,31 @@ export function PnlCalendar({ onMessage }: { onMessage: (message: string) => voi
   useEffect(() => {
     void load();
   }, [load]);
+
+  // The day's own trades, fetched only when a day is opened. A month of trades
+  // up front would be a far larger request for a panel that is usually closed.
+  useEffect(() => {
+    if (!open) {
+      setTrades([]);
+      return;
+    }
+    let current = true;
+    setTradesLoading(true);
+    void api
+      .historyTrades({ from_date: open, to_date: open })
+      .then((rows) => {
+        if (current) setTrades(rows);
+      })
+      .catch(() => {
+        if (current) setTrades([]);
+      })
+      .finally(() => {
+        if (current) setTradesLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [open]);
 
   const byDate = useMemo(() => new Map(days.map((day) => [day.session_date, day])), [days]);
 
@@ -150,7 +177,7 @@ export function PnlCalendar({ onMessage }: { onMessage: (message: string) => voi
         </div>
       </article>
 
-      {detail && <DayDetail day={detail} />}
+      {detail && <DayDetail day={detail} trades={trades} loading={tradesLoading} />}
       {open && !detail && (
         <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">Nothing was traded on {open}.</p>
       )}
@@ -222,40 +249,100 @@ function DayCell({
   );
 }
 
-function DayDetail({ day }: { day: HistoryDay }) {
+function DayDetail({ day, trades, loading }: { day: HistoryDay; trades: HistoryTrade[]; loading: boolean }) {
   return (
-    <article className="panel mt-4 p-5">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="font-semibold text-slate-900 dark:text-white">{day.session_date}</h3>
+    <article className="panel mt-4 overflow-hidden">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-200 dark:border-slate-800 px-5 py-4">
+        <div>
+          <p className="eyebrow">Every trade on this day</p>
+          <h3 className="font-semibold text-slate-900 dark:text-white">{day.session_date}</h3>
+        </div>
         <span className="text-xs text-slate-500 dark:text-slate-400">
           {day.wins}W / {day.losses}L / {day.scratches} scratch · {day.live_trades} live
         </span>
       </div>
-      <dl className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Figure label="Gross" value={<Money value={day.gross_pnl} signed />} />
-        <Figure label="Charges" value={<Money value={day.charges} />} />
-        <Figure label="Net" value={<Money value={day.net_pnl} signed />} />
-        <Figure label="Unrealised at close" value={<Money value={day.unrealized_pnl} signed />} />
-      </dl>
-      {day.broker_realized_pnl !== null && (
-        <p className="mt-4 text-xs text-slate-500 dark:text-slate-400">
-          {day.broker ?? "The broker"} reported {rupees(day.broker_realized_pnl, { signed: true })} realised and{" "}
-          {rupees(day.broker_charges)} in charges for this day, recorded beside our figures rather than replacing them.
+
+      {loading ? (
+        <div className="space-y-2 p-5">
+          {Array.from({ length: 3 }, (_, index) => (
+            <div key={index} className="skeleton h-10" />
+          ))}
+        </div>
+      ) : trades.length ? (
+        <div className="table-scroll">
+          <table className="terminal-table">
+            <thead>
+              <tr>
+                <th>Stock</th>
+                <th>Qty</th>
+                <th>Entry</th>
+                <th>Exit</th>
+                <th>Target</th>
+                <th>Gross</th>
+                <th>Charges</th>
+                <th>Net</th>
+              </tr>
+            </thead>
+            <tbody>
+              {trades.map((trade) => (
+                <tr key={trade.position_id}>
+                  <td>
+                    <strong className="block text-slate-900 dark:text-slate-100">{trade.script_name}</strong>
+                    <span className="text-[11px] opacity-75">
+                      {trade.side} · {trade.execution_mode === "LIVE" ? "Live" : "Paper"}
+                      {trade.is_open ? " · still open" : ""}
+                    </span>
+                  </td>
+                  <td className="numeric">{trade.quantity}</td>
+                  <td className="numeric">{rupees(trade.entry_price)}</td>
+                  <td className="numeric">{rupees(trade.exit_price)}</td>
+                  <td className="numeric">{rupees(trade.target_price)}</td>
+                  <td className={`numeric ${pnlTone(trade.gross_pnl)}`}>
+                    {rupees(trade.gross_pnl, { signed: true })}
+                  </td>
+                  <td className="numeric">{rupees(trade.charges)}</td>
+                  <td className={`numeric ${pnlTone(trade.net_pnl)}`}>{rupees(trade.net_pnl, { signed: true })}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              {/* The day's totals as the server computed them, not a sum of the
+                  rows above. Adding eight Decimals in a browser is how a total
+                  comes to disagree with the figure the same day shows on the
+                  History screen, and the one that disagrees is always this one. */}
+              <tr className="border-t border-slate-300 dark:border-slate-700 font-semibold">
+                <td colSpan={5}>Day total</td>
+                <td className={`numeric ${pnlTone(day.gross_pnl)}`}>{rupees(day.gross_pnl, { signed: true })}</td>
+                <td className="numeric">{rupees(day.charges)}</td>
+                <td className={`numeric ${pnlTone(day.net_pnl)}`}>{rupees(day.net_pnl, { signed: true })}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      ) : (
+        <p className="p-5 text-sm text-slate-500 dark:text-slate-400">
+          The day has a record but no individual trades to list. A day whose only entry is still open, or one recorded
+          before per-trade history was kept, reads like this.
         </p>
       )}
-      {day.halt_reason && (
-        <p className="mt-2 text-xs text-amber-600 dark:text-amber-300">Trading halted: {day.halt_reason}</p>
-      )}
-      <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">{day.reconciliation_note}</p>
-    </article>
-  );
-}
 
-function Figure({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="glass-inset rounded-md p-3">
-      <dt className="eyebrow">{label}</dt>
-      <dd className="mt-1 text-lg font-semibold">{value}</dd>
-    </div>
+      <div className="space-y-2 px-5 py-4 text-xs text-slate-500 dark:text-slate-400">
+        {trades.some((trade) => trade.is_open) && (
+          <p>
+            A trade still open carries no exit and no realised figure. Its unrealised movement is in the day&apos;s
+            {" "}
+            {rupees(day.unrealized_pnl, { signed: true })}, and it is not part of the net above.
+          </p>
+        )}
+        {day.broker_realized_pnl !== null && (
+          <p>
+            {day.broker ?? "The broker"} reported {rupees(day.broker_realized_pnl, { signed: true })} realised and{" "}
+            {rupees(day.broker_charges)} in charges for this day, recorded beside our figures rather than replacing them.
+          </p>
+        )}
+        {day.halt_reason && <p className="text-amber-600 dark:text-amber-300">Trading halted: {day.halt_reason}</p>}
+        <p>{day.reconciliation_note}</p>
+      </div>
+    </article>
   );
 }

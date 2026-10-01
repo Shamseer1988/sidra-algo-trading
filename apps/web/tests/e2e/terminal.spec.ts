@@ -1521,11 +1521,11 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(quiet).not.toHaveClass(/bg-emerald-500|bg-rose-500/);
   });
 
-  test("8h. Reports: opening a day keeps gross, charges and net apart", async ({ page }) => {
+  test("8h. Reports: opening a day lists the trades behind the figure", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.route("**/api/v1/history/daily*", async (route: Route) => {
       await route.fulfill({
-        json: [calendarDay(2, "460.00", { gross_pnl: "500.00", broker: "UPSTOX", broker_realized_pnl: "455.00", broker_charges: "45.00" })],
+        json: [calendarDay(2, "146.34", { gross_pnl: "172.27", charges: "25.93", broker: "UPSTOX", broker_realized_pnl: "146.34", broker_charges: "0.00" })],
       });
     });
     await page.goto("/");
@@ -1533,14 +1533,39 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await go(page, "Reports");
     await page.getByRole("button", { name: new RegExp(`${dayInThisMonth(2)}:`) }).click();
 
-    const figures = page.locator("dl");
-    await expect(figures.getByText("+₹500.00")).toBeVisible();
-    await expect(figures.getByText("₹40.00")).toBeVisible();
-    await expect(figures.getByText("+₹460.00")).toBeVisible();
+    // The trade, not a summary of it: what was bought, how much of it, and
+    // where it was meant to go.
+    const row = page.getByRole("row").filter({ hasText: "RELIANCE" });
+    await expect(row).toContainText("10");
+    await expect(row).toContainText("₹100.00");
+    await expect(row).toContainText("₹150.00");
+    await expect(row).toContainText("₹106.00");
+    await expect(row).toContainText("+₹460.00");
+
     // The broker's figure sits beside ours and is allowed to disagree. Nothing
     // on this screen replaces a local record with one.
-    await expect(page.getByText(/UPSTOX reported \+₹455.00 realised/)).toBeVisible();
+    await expect(page.getByText(/UPSTOX reported \+₹146.34 realised/)).toBeVisible();
     await expect(page.getByText(/rather than replacing them/)).toBeVisible();
+  });
+
+  test("8h-1. Reports: the day total is the server's, not a sum of the rows", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    // The fixture's one trade nets ₹460 while the day nets ₹146.34. They differ
+    // on purpose: adding Decimals in a browser is how a total comes to disagree
+    // with the same day on the History screen, and the one that disagrees would
+    // always be this one.
+    await page.route("**/api/v1/history/daily*", async (route: Route) => {
+      await route.fulfill({ json: [calendarDay(2, "146.34", { gross_pnl: "172.27", charges: "25.93" })] });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports");
+    await page.getByRole("button", { name: new RegExp(`${dayInThisMonth(2)}:`) }).click();
+
+    const total = page.getByRole("row").filter({ hasText: "Day total" });
+    await expect(total).toContainText("+₹172.27");
+    await expect(total).toContainText("₹25.93");
+    await expect(total).toContainText("+₹146.34");
   });
 
   test("8i. Reports: realised and unrealised are two figures, never one", async ({ page }) => {
