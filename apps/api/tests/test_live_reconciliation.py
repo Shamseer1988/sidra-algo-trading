@@ -569,3 +569,44 @@ async def test_an_unrecognised_status_is_not_treated_as_finished() -> None:
         adapter_for(orders=[{"orderNumber": "x1", "status": "WEIRD", "tradingSymbol": "RVNL"}]),
     )
     assert not report.safe_to_trade
+
+
+# --- the summary must not contradict the status ---------------------------
+#
+# Live, on real data, a record read:
+#
+#     status REQUIRES_REVIEW | safe_to_trade t | "Broker and local state agree"
+#
+# All three cannot be right. It appeared the moment a finished untracked order
+# became review rather than blocking: until then safe_to_trade and "no
+# findings" meant the same thing, and this line was written assuming they
+# always would.
+
+
+async def test_a_safe_report_with_findings_still_mentions_them() -> None:
+    """The regression: "everything agrees" beside a status of REQUIRES_REVIEW."""
+    report = await reconcile_live_execution(
+        FakeSession(),
+        adapter_for(orders=[{"orderNumber": "x1", "status": "COMPLETE", "tradingSymbol": "RVNL"}]),
+    )
+    assert report.safe_to_trade
+    assert report.status == "REQUIRES_REVIEW"
+    detail = report.summary()
+    assert "review" in detail.lower(), detail
+    assert "none blocking" in detail.lower(), detail
+
+
+async def test_a_genuinely_clean_report_says_only_that() -> None:
+    """Adding the review count must not add noise when there is nothing to note."""
+    report = await reconcile_live_execution(FakeSession(), adapter_for())
+    assert report.status == "CLEAN"
+    detail = report.summary()
+    assert "agree" in detail
+    assert "review" not in detail.lower()
+
+
+async def test_the_summary_still_fits_the_column_with_findings() -> None:
+    """detail is String(255); a truncated sentence is how a record becomes a riddle."""
+    orders = [{"orderNumber": f"order-{index}", "status": "COMPLETE", "tradingSymbol": "RVNL"} for index in range(40)]
+    report = await reconcile_live_execution(FakeSession(), adapter_for(orders=orders))
+    assert len(report.summary()) <= 255

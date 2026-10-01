@@ -123,9 +123,22 @@ class LiveReconciliationReport:
         return [item for item in self.findings if item.severity == BLOCKING]
 
     def summary(self) -> str:
-        """One line for the 255-character detail column."""
+        """One line for the 255-character detail column.
+
+        The review count is stated even when trading is safe. It did not need to
+        be while every untracked order blocked -- safe_to_trade and "no findings"
+        meant the same thing. Once a *finished* untracked order became review
+        rather than blocking, they stopped meaning the same thing, and this line
+        went on saying "broker and local state agree" beside a status of
+        REQUIRES_REVIEW. A record that contradicts itself is worse than one that
+        says nothing: the operator has to decide which half to believe.
+        """
+        review = len(self.findings) - len(self.blocking)
         if self.safe_to_trade:
-            return f"Broker and local state agree: {self.internal_orders} local, {self.external_orders} broker orders."
+            agree = f"Broker and local state agree: {self.internal_orders} local, {self.external_orders} broker orders."
+            if review:
+                return f"{agree} {review} noted for review, none blocking."[:255]
+            return agree
         blocking = len(self.blocking)
         review = len(self.findings) - blocking
         kinds = ", ".join(sorted({item.kind for item in self.blocking})) or "none"
