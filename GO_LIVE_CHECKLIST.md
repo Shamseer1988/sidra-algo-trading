@@ -102,7 +102,7 @@ docker compose exec api alembic upgrade head
 docker compose exec api alembic current
 ```
 
-- [ ] It reports **`0026_broker_day_snapshots`**
+- [ ] It reports **`0027_live_submission_fills`**
 
 > 🛑 **STOP** if it reports anything else. Send me the output.
 

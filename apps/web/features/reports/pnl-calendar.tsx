@@ -290,6 +290,7 @@ function DayDetail({ day, trades, loading }: { day: HistoryDay; trades: HistoryT
                     <strong className="block text-slate-900 dark:text-slate-100">{trade.script_name}</strong>
                     <span className="text-[11px] opacity-75">
                       {trade.side} · {trade.execution_mode === "LIVE" ? "Live" : "Paper"}
+                      {trade.execution_mode === "LIVE" && trade.price_source === "MODEL" ? " · modelled fills" : ""}
                       {trade.is_open ? " · still open" : ""}
                     </span>
                   </td>
@@ -299,6 +300,11 @@ function DayDetail({ day, trades, loading }: { day: HistoryDay; trades: HistoryT
                   <td className="numeric">{rupees(trade.target_price)}</td>
                   <td className={`numeric ${pnlTone(trade.gross_pnl)}`}>
                     {rupees(trade.gross_pnl, { signed: true })}
+                    {trade.slippage !== null && toNumber(trade.slippage) !== 0 && (
+                      <span className="text-[11px] opacity-75">
+                        {rupees(trade.slippage, { signed: true })} vs model
+                      </span>
+                    )}
                   </td>
                   <td className="numeric">{rupees(trade.charges)}</td>
                   <td className={`numeric ${pnlTone(trade.net_pnl)}`}>{rupees(trade.net_pnl, { signed: true })}</td>
@@ -327,6 +333,13 @@ function DayDetail({ day, trades, loading }: { day: HistoryDay; trades: HistoryT
       )}
 
       <div className="space-y-2 px-5 py-4 text-xs text-slate-500 dark:text-slate-400">
+        {trades.some((trade) => trade.execution_mode === "LIVE" && trade.price_source === "MODEL") && (
+          <p>
+            A live row marked <strong>modelled fills</strong> is priced from completed candles, not from what the
+            broker filled, because no fill has been recorded against it yet. Those prices will not match the
+            broker&apos;s app. Reconciliation records the real fills on its next pass.
+          </p>
+        )}
         {trades.some((trade) => trade.is_open) && (
           <p>
             A trade still open carries no exit and no realised figure. Its unrealised movement is in the day&apos;s

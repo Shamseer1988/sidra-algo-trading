@@ -225,7 +225,7 @@ docker compose exec api alembic upgrade head
 docker compose exec api alembic current
 ```
 
-`alembic current` must report **`0026_broker_day_snapshots`**. Anything else,
+`alembic current` must report **`0027_live_submission_fills`**. Anything else,
 stop and send me the output.
 
 **What the migrations do**, so you know what changed under your data:
@@ -625,7 +625,7 @@ docker compose exec api python -c "import httpx; print(httpx.get('https://api.ip
 git fetch origin main && git checkout main && git pull origin main
 docker compose build api scanner-worker web && docker compose up -d
 docker compose exec api alembic upgrade head
-docker compose exec api alembic current          # expect 0026_broker_day_snapshots
+docker compose exec api alembic current          # expect 0027_live_submission_fills
 
 # Step 8
 grep UPSTOX_SUBSCRIPTIONS .env                   # pick a cheap NSE_EQ key

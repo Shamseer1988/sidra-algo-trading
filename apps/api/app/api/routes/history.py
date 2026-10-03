@@ -77,6 +77,11 @@ class TradeResponse(BaseModel):
     reconciliation: str
     reconciliation_label: str
     reconciliation_note: str
+    # Whose fills the prices above are. A LIVE row showing the simulator's
+    # prices invites a comparison against the broker's own app that it is
+    # guaranteed to lose, so the screen is told which it is holding.
+    price_source: str
+    slippage: Decimal | None
 
 
 class DayResponse(BaseModel):
@@ -206,6 +211,8 @@ def _trade(record: trade_history.TradeRecord) -> TradeResponse:
         reconciliation=record.reconciliation,
         reconciliation_label=trade_history.STATUS_LABELS[record.reconciliation],
         reconciliation_note=record.reconciliation_note,
+        price_source=record.price_source,
+        slippage=record.slippage,
     )
 
 
@@ -374,6 +381,10 @@ TRADE_COLUMNS = (
     ("gross_pnl", "Gross P&L"),
     ("charges", "Charges"),
     ("net_pnl", "Net P&L"),
+    # An export read against a broker contract note needs to say which prices
+    # it is carrying, for the same reason the screen does.
+    ("price_source", "Prices from"),
+    ("slippage", "Slippage vs model"),
     ("r_multiple", "R multiple"),
     ("risk_amount", "Risk planned"),
     ("status", "Position status"),

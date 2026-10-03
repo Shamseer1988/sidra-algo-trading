@@ -122,6 +122,8 @@ export type HistoryTrade = {
   reconciliation: ReconciliationStatus;
   reconciliation_label: string;
   reconciliation_note: string;
+  price_source: "BROKER" | "MODEL";
+  slippage: string | null;
 };
 export type HistoryDay = {
   session_date: string;

@@ -872,6 +872,8 @@ const MOCK_HISTORY_TRADES = [
     reconciliation: "MISMATCH",
     reconciliation_label: "Mismatch",
     reconciliation_note: "UPSTOX reports ₹380 realised against our ₹500.",
+    price_source: "BROKER",
+    slippage: "-18.40",
   },
   {
     position_id: "pos-002",
@@ -901,6 +903,8 @@ const MOCK_HISTORY_TRADES = [
     reconciliation: "ESTIMATED_CHARGES",
     reconciliation_label: "Estimated charges",
     reconciliation_note: "Simulated. Charges are this system's estimate from the published rate card.",
+    price_source: "MODEL",
+    slippage: null,
   },
 ];
 
@@ -1566,6 +1570,49 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(total).toContainText("+₹172.27");
     await expect(total).toContainText("₹25.93");
     await expect(total).toContainText("+₹146.34");
+  });
+
+  test("8h-2. Reports: a live row says whose fills priced it", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/history/daily*", async (route: Route) => {
+      await route.fulfill({ json: [calendarDay(2, "146.34")] });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports");
+    await page.getByRole("button", { name: new RegExp(`${dayInThisMonth(2)}:`) }).click();
+
+    // The broker-priced row carries its difference from the model. That gap is
+    // slippage, and it was invisible for as long as only one of the two numbers
+    // reached a screen.
+    const broker = page.getByRole("row").filter({ hasText: "RELIANCE" });
+    await expect(broker).toContainText("−₹18.40 vs model");
+    await expect(broker).not.toContainText("modelled fills");
+
+    // The paper row is not claiming to be anything else.
+    const paper = page.getByRole("row").filter({ hasText: "TCS" });
+    await expect(paper).not.toContainText("vs model");
+  });
+
+  test("8h-3. Reports: a live row with no recorded fill admits it", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/history/daily*", async (route: Route) => {
+      await route.fulfill({ json: [calendarDay(2, "146.34")] });
+    });
+    await page.route("**/api/v1/history/trades*", async (route: Route) => {
+      await route.fulfill({
+        json: [{ ...MOCK_HISTORY_TRADES[0], price_source: "MODEL", slippage: null }],
+      });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports");
+    await page.getByRole("button", { name: new RegExp(`${dayInThisMonth(2)}:`) }).click();
+
+    // Saying so is the whole fix: a live row quietly showing the simulator's
+    // prices is what sent an operator to compare two screens that disagreed.
+    await expect(page.getByRole("row").filter({ hasText: "RELIANCE" })).toContainText("modelled fills");
+    await expect(page.getByText(/priced from completed candles, not from what the broker filled/)).toBeVisible();
   });
 
   test("8i. Reports: realised and unrealised are two figures, never one", async ({ page }) => {

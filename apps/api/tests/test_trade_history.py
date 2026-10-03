@@ -277,6 +277,38 @@ async def a_trade(
         return signal.id, position.id
 
 
+async def record_fills(signal_id, *, side="LONG", entry=None, exit=None, quantity=10):
+    """The broker's own fills for a signal, as ``live_fills`` would have written them.
+
+    A long enters by buying and exits by selling; a short the other way round.
+    ``None`` for a price leaves that leg unpriced, which is how a half-known
+    round trip is set up.
+    """
+    entry_side = "SELL" if side == "SHORT" else "BUY"
+    exit_side = "BUY" if side == "SHORT" else "SELL"
+    async with SessionLocal() as session:
+        for leg, price in ((entry_side, entry), (exit_side, exit)):
+            session.add(
+                LiveOrderSubmission(
+                    client_order_id=uuid4().hex[:20],
+                    paper_signal_id=signal_id,
+                    broker="UPSTOX",
+                    exchange="NSE",
+                    trading_symbol="RELIANCE",
+                    product="I",
+                    price_type="MARKET",
+                    transaction_type=leg,
+                    quantity=quantity,
+                    status="ACCEPTED",
+                    request_snapshot={"canonical": {"side": leg}},
+                    filled_quantity=quantity,
+                    average_fill_price=None if price is None else Decimal(str(price)),
+                    broker_status="COMPLETE",
+                )
+            )
+        await session.commit()
+
+
 async def record_broker(realized=None, charges=None, broker="UPSTOX", fetched_at=None):
     async with SessionLocal() as session:
         session.add(
@@ -512,3 +544,115 @@ async def test_a_day_outside_the_range_is_not_loaded():
     await a_trade()
     records, _, _ = await load(from_date=SESSION_DATE + timedelta(days=1), to_date=SESSION_DATE + timedelta(days=2))
     assert records == []
+
+
+# --- whose fills a row is carrying ----------------------------------------
+#
+# The defect that produced this section was on an operator's screen: the P&L
+# calendar said a day made ₹146.34 and the Upstox app said ₹166.93. Rows
+# labelled LIVE were carrying the simulator's fill prices, because nothing had
+# ever written a broker fill back. The gap between the two is slippage, and it
+# was invisible for exactly as long as only one of the numbers reached a screen.
+
+
+async def test_a_live_trade_reports_the_brokers_fills_not_the_models():
+    signal_id, _ = await a_trade(gross="500", charges="40", live=True)
+    # The model filled at 100 and 105; the broker actually got 100.40 and 104.20.
+    await record_fills(signal_id, entry="100.40", exit="104.20")
+
+    trade = (await load())[0][0]
+    assert trade.price_source == history.BROKER
+    assert trade.entry_price == Decimal("100.40")
+    assert trade.exit_price == Decimal("104.20")
+    assert trade.gross_pnl == Decimal("38.0000")
+
+
+async def test_the_modelled_figure_survives_and_the_difference_is_slippage():
+    """The paper record is what this system believed at the time. Overwriting it
+    would leave nothing to audit, and would hide the number worth seeing."""
+    signal_id, position_id = await a_trade(gross="500", charges="40", live=True)
+    await record_fills(signal_id, entry="100.40", exit="104.20")
+
+    trade = (await load())[0][0]
+    assert trade.modelled_gross_pnl == Decimal("500")
+    assert trade.slippage == Decimal("-462.00")
+
+    async with SessionLocal() as session:
+        position = await session.get(PaperPosition, position_id)
+        assert position.realized_pnl == Decimal("500.0000")
+        assert position.average_entry_price == Decimal("100.0000")
+
+
+async def test_net_keeps_the_estimated_charge_against_the_brokers_gross():
+    """Charges stay local permanently -- no broker reports them per trade."""
+    signal_id, _ = await a_trade(gross="500", charges="40", live=True)
+    await record_fills(signal_id, entry="100.40", exit="104.20")
+
+    trade = (await load())[0][0]
+    assert trade.charges == Decimal("40")
+    assert trade.net_pnl == Decimal("-2.0000")
+
+
+async def test_a_short_is_priced_the_right_way_round():
+    signal_id, _ = await a_trade(gross="500", charges="40", live=True, side="SHORT")
+    await record_fills(signal_id, side="SHORT", entry="183.63", exit="180.84")
+
+    trade = (await load())[0][0]
+    assert trade.entry_price == Decimal("183.63")
+    assert trade.exit_price == Decimal("180.84")
+    assert trade.gross_pnl == Decimal("27.9000")  # (183.63 - 180.84) × 10
+
+
+async def test_a_live_trade_with_no_recorded_fill_keeps_the_model():
+    """Absence is the normal state between the fill and the next reconciliation."""
+    await a_trade(gross="500", charges="40", live=True)
+    trade = (await load())[0][0]
+    assert trade.price_source == history.MODEL
+    assert trade.gross_pnl == Decimal("500.0000")
+    assert trade.slippage is None
+
+
+async def test_a_paper_trade_is_never_repriced():
+    await a_trade(gross="500", charges="40", live=False)
+    trade = (await load())[0][0]
+    assert trade.price_source == history.MODEL
+    assert trade.entry_price == Decimal("100.0000")
+
+
+async def test_half_a_round_trip_falls_back_whole():
+    """One leg priced by the broker and one by the model would be a third
+    number, true of nothing."""
+    signal_id, _ = await a_trade(gross="500", charges="40", live=True)
+    await record_fills(signal_id, entry="100.40", exit=None)
+
+    trade = (await load())[0][0]
+    assert trade.price_source == history.MODEL
+    assert trade.gross_pnl == Decimal("500.0000")
+    assert trade.entry_price == Decimal("100.0000")
+
+
+async def test_the_day_total_is_the_sum_of_the_rows_the_operator_can_see():
+    """The complaint that started this: a day figure that no row explained."""
+    first, _ = await a_trade(gross="500", charges="40", live=True)
+    second, _ = await a_trade(gross="-200", charges="35", live=True)
+    await record_fills(first, entry="100.40", exit="104.20")
+    await record_fills(second, entry="100.00", exit="99.00")
+
+    trades, days, _ = await load()
+    assert days[0].gross_pnl == sum(trade.gross_pnl for trade in trades)
+    assert days[0].net_pnl == sum(trade.net_pnl for trade in trades)
+
+
+async def test_the_day_is_reconciled_against_the_figures_on_the_screen():
+    """The verdict has to compare the broker against what the rows now show.
+
+    Computed from the modelled gross while the rows showed the broker's, a day
+    in perfect agreement would have been reported as a MISMATCH -- a stop-and-
+    investigate instruction raised by the reconciliation's own blind spot.
+    """
+    signal_id, _ = await a_trade(gross="500", charges="40", live=True)
+    await record_fills(signal_id, entry="100.40", exit="104.20")
+    await record_broker(realized="38.00", charges="40")
+
+    trade = (await load())[0][0]
+    assert trade.reconciliation != history.MISMATCH

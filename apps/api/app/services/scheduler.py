@@ -219,7 +219,7 @@ def _make_broker_figures_job(settings: Settings):
 
         from app.db.models import LiveOrderSubmission
         from app.db.session import SessionLocal
-        from app.services import broker_day_figures
+        from app.services import broker_day_figures, live_fills
         from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
         from app.services.upstox_oauth import load_access_token
         from app.services.upstox_orders import UpstoxError, UpstoxReportClient, UpstoxSession
@@ -245,6 +245,19 @@ def _make_broker_figures_job(settings: Settings):
             logger.warning("scheduler.broker_figures_skipped", reason="no upstox access token")
             await _persist_audit("scheduler.broker_figures_skipped", {"reason": "no_access_token"})
             return
+
+        # Before the figures, the fills. The recorder inside reconciliation only
+        # runs while the deployment is armed and the exchange is open, so an
+        # activation that lapsed in the afternoon would leave that afternoon's
+        # trades priced by the simulator for good. This catches them once, after
+        # the close, while the order book still holds the day.
+        try:
+            async with SessionLocal() as db:
+                recorded = await live_fills.sweep_session_fills(settings, db, session_date)
+            if recorded:
+                logger.info("scheduler.fills_swept", date=str(session_date), submissions=recorded)
+        except Exception as error:  # noqa: BLE001 - the figures fetch is the job; this is a bonus
+            logger.warning("scheduler.fills_sweep_failed", error=str(error))
 
         client = UpstoxReportClient(settings, UpstoxSession(access_token=token))
         try:

@@ -52,6 +52,7 @@ created but have not submitted looks exactly like this, and that is a normal
 state between intent and submission.
 """
 
+import logging
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -69,8 +70,11 @@ from app.services.broker_adapter import (
     BrokerAdapter,
     BrokerPositionRecord,
 )
+from app.services.live_fills import record_fills
 from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
 from app.services.trading_calendar import MARKET_TIMEZONE
+
+logger = logging.getLogger(__name__)
 
 # Our own terminal states, from services/oms.py.
 OMS_TERMINAL_STATUSES = frozenset({"FILLED", "CANCELLED", "REJECTED"})
@@ -240,6 +244,18 @@ async def reconcile_live_execution(
             )
         ).all()
     )
+    # The order book is already in hand and already names every order of ours,
+    # so this is where the broker's fills get recorded -- no second call, and
+    # nothing extra spent from the rate-limit budget that order placement draws
+    # on. Not committed here: a fill recorded against a reconciliation that then
+    # failed should roll back with it.
+    try:
+        recorded = record_fills(submissions, broker_orders, now=checked_at)
+        if recorded:
+            logger.info("live_fills.recorded submissions=%d", recorded)
+    except Exception:  # noqa: BLE001 - recording a fill must never block the safety check
+        logger.exception("live_fills.record_failed")
+
     for submission in submissions:
         for number in submission.broker_order_numbers or []:
             # An OmsOrder wins: it is the richer record, and only one of the two

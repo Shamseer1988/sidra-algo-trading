@@ -854,6 +854,24 @@ class LiveOrderSubmission(Base):
     # Never contains jKey. The redaction happens before the snapshot is stored.
     request_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
 
+    # What the broker says actually happened, recorded by ``live_fills`` from
+    # the order book. Kept apart from the five request fields above, which say
+    # what was asked for -- and apart from ``status``, deliberately.
+    #
+    # ``status`` is this system's own lifecycle word, and the exit manager finds
+    # a resting stop by ``status == ACCEPTED``. A stop advanced to the broker's
+    # word would not be found, would not be cancelled, and the exit sent past it
+    # would reverse the position instead of closing it. So the broker's word
+    # lives in ``broker_status`` and nothing reads it to make a decision.
+    #
+    # Nullable, not zero. A broker that has not reported a fill is not a broker
+    # reporting a fill of nothing, and every row written before these columns
+    # existed would read as the latter.
+    filled_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    average_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    broker_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    fill_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     @property
     def instrument_token(self) -> str | None:
         """The canonical instrument this order was placed against.

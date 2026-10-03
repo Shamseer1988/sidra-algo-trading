@@ -139,7 +139,7 @@ The image does **not** run migrations on start. Run them yourself, once:
 
 ```sh
 docker compose exec api alembic upgrade head
-docker compose exec api alembic current   # should end at 0026_broker_day_snapshots
+docker compose exec api alembic current   # should end at 0027_live_submission_fills
 ```
 
 If `alembic current` prints nothing, the API cannot reach the database — check
@@ -318,6 +318,18 @@ During the session:
 | **Risk** | How much of today's budget is left |
 | **History** | What actually happened, trade by trade |
 | **Reports** | What it adds up to — a red/green P&L calendar, and realised against unrealised |
+
+A live trade's entry and exit prices on History and Reports are the broker's own
+fills, recorded from the order book by reconciliation as the day runs and swept
+once more after the close. Until a fill has been recorded the row is priced from
+completed candles and says **modelled fills** — those prices will not match the
+broker's app, and the row says so rather than letting you find out by comparing
+two screens. Where both are known, the difference between them is shown beside
+the gross: that is slippage, and it is the number a backtest cannot tell you.
+
+Charges remain an estimate per trade, permanently. No broker reports them per
+trade — Upstox aggregates them over a date range — so a day's charges become
+real only when the broker's own figure is fetched after settlement.
 
 The **Broker** source on Orders & Positions is read-only on purpose: it will show
 you an order placed by hand on the broker's app, and mark it **Manual**, but it

@@ -45,6 +45,7 @@ from app.db.models import (
     PaperSignal,
     SessionHalt,
 )
+from app.services.live_fills import SignalFills, fills_by_signal
 from app.services.trade_counter import LIVE_PLACED_STATUSES
 
 # Reconciliation vocabulary. Four states, and the distinction between the middle
@@ -69,6 +70,12 @@ TOLERANCE = Decimal("1.00")
 
 PAPER = "PAPER"
 LIVE = "LIVE"
+
+# Whose prices a row is carrying. The distinction is not cosmetic: a LIVE row
+# showing the simulator's fills invites exactly the comparison against the
+# broker's app that it is guaranteed to lose.
+MODEL = "MODEL"
+BROKER = "BROKER"
 
 CLOSED_STATUSES = frozenset({"CLOSED", "FLATTENED", "EXITED"})
 
@@ -105,6 +112,25 @@ class TradeRecord:
     risk_amount: Decimal
     reconciliation: str
     reconciliation_note: str
+    # Where the prices above came from. BROKER means the fills were read back
+    # from the order book; MODEL means they are the simulator's, either because
+    # the trade was paper or because no fill has been recorded for it yet.
+    price_source: str = MODEL
+    # The simulator's gross, kept alongside even when the broker's is shown.
+    # Their difference is slippage, and it is the number that was invisible for
+    # as long as only one of them reached the screen.
+    modelled_gross_pnl: Decimal = Decimal("0")
+
+    @property
+    def slippage(self) -> Decimal | None:
+        """Broker gross minus modelled gross, where both are known.
+
+        Negative means the fills were worse than the model assumed, which is
+        the usual direction and the honest one to show.
+        """
+        if self.price_source != BROKER:
+            return None
+        return (self.gross_pnl - self.modelled_gross_pnl).quantize(Decimal("0.01"))
 
     @property
     def is_open(self) -> bool:
@@ -331,6 +357,59 @@ async def latest_broker_snapshots(
     return {row.session_date: row for row in rows}
 
 
+@dataclass(frozen=True)
+class _PricedTrade:
+    """One position's money, after deciding whose fills to believe."""
+
+    entry_price: Decimal | None
+    exit_price: Decimal | None
+    gross: Decimal
+    net: Decimal
+    source: str
+
+
+def _price_trade(position: PaperPosition, fills: SignalFills | None) -> _PricedTrade:
+    """The broker's fills where they exist, the simulator's where they do not.
+
+    The broker is preferred for one reason: it is what happened. The simulator
+    fills at a completed candle's price, which is a model of a fill and differs
+    from a real one by the spread, the slice and the queue -- on a live day that
+    difference was ₹1.42 a share on one trade, and reading it as the result was
+    what sent an operator to compare two screens that could not agree.
+
+    Preferred, never merged. Both sides of the round trip have to be filled and
+    priced before the broker's figure is used at all: half a trade priced by the
+    broker and half by the model would be a third number, true of nothing. And
+    the modelled figures are not edited -- they stay on the position row, and
+    the record carries both so the difference can be read as the slippage it is.
+    """
+    modelled_gross = _money(position.realized_pnl)
+    unrealized = _money(position.unrealized_pnl)
+    charges = _money(position.fees_total)
+
+    broker_gross = fills.gross if fills else None
+    if broker_gross is None:
+        return _PricedTrade(
+            entry_price=None if position.average_entry_price is None else _money(position.average_entry_price),
+            exit_price=None if position.average_exit_price is None else _money(position.average_exit_price),
+            gross=modelled_gross,
+            net=_money(position.total_pnl),
+            source=MODEL,
+        )
+
+    assert fills is not None
+    return _PricedTrade(
+        entry_price=fills.entry(position.side).price,
+        exit_price=fills.exit(position.side).price,
+        gross=broker_gross,
+        # The same composition the simulator uses for total_pnl, with the
+        # broker's gross in place of its own: realised, plus whatever is still
+        # moving, less what it cost.
+        net=broker_gross + unrealized - charges,
+        source=BROKER,
+    )
+
+
 async def load_trades(
     session: AsyncSession,
     from_date: date,
@@ -359,6 +438,18 @@ async def load_trades(
     live_ids = await live_signal_ids(session, from_date, to_date)
     snapshots = await latest_broker_snapshots(session, from_date, to_date)
 
+    # What the broker actually filled, for the live signals in range. Recorded
+    # by ``live_fills`` from the order book reconciliation already reads; absent
+    # for a trade whose fills were never seen, which is why every use below
+    # falls back rather than assuming.
+    fills = await fills_by_signal(session, {signal.id for _, signal in rows if signal.id in live_ids})
+
+    # Resolved before the day verdicts, not after. The day's gross has to be the
+    # sum of the rows the operator can see, and a verdict computed from the
+    # modelled figures while the rows showed the broker's would be a
+    # reconciliation of one number against a different one.
+    priced = {position.id: _price_trade(position, fills.get(signal.id)) for position, signal in rows}
+
     # The day's verdict is computed once per date from the whole day, then each
     # trade reads it. Computing it per trade would ask the same question of the
     # same broker snapshot once per row and could answer differently for two
@@ -369,7 +460,7 @@ async def load_trades(
 
     day_verdicts: dict[date, tuple[str, str]] = {}
     for session_date, entries in per_day.items():
-        gross = sum((_money(item.realized_pnl) for item, _ in entries), start=Decimal("0"))
+        gross = sum((priced[item.id].gross for item, _ in entries), start=Decimal("0"))
         charges = sum((_money(item.fees_total) for item, _ in entries), start=Decimal("0"))
         live_count = sum(1 for _, sig in entries if sig.id in live_ids)
         day_verdicts[session_date] = reconcile_day(
@@ -388,6 +479,7 @@ async def load_trades(
         mode = LIVE if signal.id in live_ids else PAPER
         day_status, day_note = day_verdicts[position.session_date]
         status, note = trade_reconciliation(mode, day_status, day_note)
+        money = priced[position.id]
         records.append(
             TradeRecord(
                 position_id=position.id,
@@ -401,19 +493,21 @@ async def load_trades(
                 execution_mode=mode,
                 quantity=position.initial_quantity,
                 open_quantity=position.open_quantity,
-                entry_price=None if position.average_entry_price is None else _money(position.average_entry_price),
-                exit_price=None if position.average_exit_price is None else _money(position.average_exit_price),
+                entry_price=money.entry_price,
+                exit_price=money.exit_price,
                 stop_price=_money(position.stop_price),
                 target_price=_money(position.target_price),
                 opened_at=position.opened_at,
                 closed_at=position.closed_at,
-                gross_pnl=_money(position.realized_pnl),
+                gross_pnl=money.gross,
                 charges=_money(position.fees_total),
-                net_pnl=_money(position.total_pnl),
+                net_pnl=money.net,
                 unrealized_pnl=_money(position.unrealized_pnl),
                 risk_amount=_money(signal.risk_amount),
                 reconciliation=status,
                 reconciliation_note=note,
+                price_source=money.source,
+                modelled_gross_pnl=_money(position.realized_pnl),
             )
         )
     return records
