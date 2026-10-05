@@ -130,11 +130,31 @@ async def main() -> int:
         print(f"  live_broker                : {controls.live_broker}")
         print(f"  execution_approval_mode    : {controls.execution_approval_mode}")
         print(f"  live_entry_order_type      : {controls.live_entry_order_type}")
+        print(f"  entry_slippage_cap_percent : {controls.entry_slippage_cap_percent}")
         if controls.live_broker == "NONE":
             problems += 1
             line(BAD, "No broker selected; live orders have nowhere to go.")
         if controls.execution_approval_mode == "AUTOMATIC":
             line(WARN, "AUTOMATIC: orders are placed without being shown to you first.")
+        if controls.live_entry_order_type == "MARKET":
+            problems += 1
+            line(
+                BAD,
+                "MARKET entries have no price cap, so the risk on a trade is decided by whatever "
+                "the market does between the signal and the fill. On 5 October that put 209 behind "
+                "a 100 budget. Set LIMIT to make the planned risk a ceiling.",
+            )
+        else:
+            cap = Decimal(str(controls.entry_slippage_cap_percent))
+            line(
+                OK,
+                f"LIMIT entries fill at most {cap}% past the signal and are sized from that price, "
+                f"so a filled trade risks no more than {per_trade:,.2f}.",
+            )
+            if cap == 0:
+                line(WARN, "A 0% cap only fills at the signal's exact price; expect very few fills.")
+            elif cap >= 1:
+                line(WARN, f"A {cap}% cap is wide; positions will shrink a lot to stay inside the budget.")
 
         heading("5. What each strategy will actually use")
         row = await session.get(ApplicationSetting, STRATEGIES_KEY)

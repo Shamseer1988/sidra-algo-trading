@@ -10,12 +10,14 @@ that never fires, because the second failure is at least obvious.
 """
 
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
+from app.db.models import PaperSignal
 from app.services import live_entry_bridge as module
 
 
@@ -73,23 +75,42 @@ def controls(
     broker: str = "UPSTOX",
     order_type: str = "MARKET",
     leverage: bool = True,
+    cap_percent: float = 0.25,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         execution_approval_mode=approval,
         live_broker=broker,
         live_entry_order_type=order_type,
         intraday_leverage_enabled=leverage,
+        entry_slippage_cap_percent=cap_percent,
     )
 
 
-def signal(side: str = "SHORT") -> SimpleNamespace:
-    return SimpleNamespace(
-        id=uuid4(),
+def signal(side: str = "SHORT", *, entry="449.85", stop=None, quantity=63, risk="100") -> PaperSignal:
+    """The real mapped class, not a stand-in.
+
+    A SimpleNamespace here answers for whatever the code asks, so a field the
+    module began reading -- ``stop_price``, when entries learned to cap their
+    slippage -- goes missing in production and nowhere else. It is the same
+    shape of fake that let two live bugs through this path already.
+    """
+    structural = stop if stop is not None else ("455.00" if side == "SHORT" else "444.00")
+    row = PaperSignal(
+        signal_key=uuid4().hex,
         instrument_token="NSE_EQ|INE335Y01020",
+        session_date=date(2026, 10, 5),
+        candle_opened_at=datetime(2026, 10, 5, 4, 0, tzinfo=UTC),
+        strategy_version="orb-retest-v1@3",
         side=side,
-        quantity=63,
-        entry_price=Decimal("449.85"),
+        entry_price=Decimal(entry),
+        stop_price=Decimal(structural),
+        target_price=Decimal("430.00") if side == "SHORT" else Decimal("470.00"),
+        quantity=quantity,
+        risk_amount=Decimal(risk),
+        score=80,
     )
+    row.id = uuid4()
+    return row
 
 
 def readiness(ready: bool = True, failing: tuple[str, ...] = ()) -> SimpleNamespace:
@@ -259,6 +280,55 @@ async def test_the_entry_order_type_comes_from_settings(wiring, configured: str,
     wiring.controls = controls(order_type=configured)
     await run(wiring)
     assert wiring.requested.request.order_type == expected
+
+
+@pytest.mark.asyncio
+async def test_a_limit_entry_is_priced_at_the_cap_and_sized_from_it(wiring) -> None:
+    """The 5 October trade, replayed through the bridge.
+
+    ₹985.85 planned behind a ₹977.96 stop, twelve shares, ₹100 budget. It went
+    as a MARKET order, filled at ₹995.40, and put ₹209 behind that budget. A
+    capped limit prices the order at ₹988.30 and buys nine shares there, so a
+    fill anywhere it can happen risks no more than the trade was given -- and
+    ₹995.40 is outside it, so that morning no trade would have been taken.
+    """
+    wiring.controls = controls(order_type="LIMIT", cap_percent=0.25)
+    _sig = signal(side="LONG", entry="985.85", stop="977.9632", quantity=12, risk="100")
+
+    await run(wiring, sig=_sig)
+
+    request = wiring.requested.request
+    assert request.order_type == "LIMIT"
+    assert request.price == Decimal("988.30")
+    assert request.quantity == 9
+    assert (request.price - Decimal("977.9632")) * request.quantity <= Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_a_market_entry_is_left_uncapped(wiring) -> None:
+    """MARKET has no price to cap, and the catalogue entry says so rather than
+    this module pretending otherwise."""
+    wiring.controls = controls(order_type="MARKET")
+    _sig = signal(side="LONG", entry="985.85", stop="977.9632", quantity=12, risk="100")
+
+    await run(wiring, sig=_sig)
+
+    assert wiring.requested.request.order_type == "MARKET"
+    assert wiring.requested.request.quantity == 12
+
+
+@pytest.mark.asyncio
+async def test_an_entry_the_budget_cannot_afford_is_refused_and_announced(wiring) -> None:
+    """The operator saw a signal. If no order follows, they have to be told why."""
+    wiring.controls = controls(order_type="LIMIT")
+    _sig = signal(side="LONG", entry="5000", stop="4000", quantity=10, risk="50")
+
+    outcome = await run(wiring, sig=_sig)
+
+    assert outcome.acted is False
+    assert outcome.step == "signal"
+    assert "does not cover one share" in outcome.detail
+    assert outcome.step in module.ANNOUNCED_REFUSALS
 
 
 @pytest.mark.asyncio

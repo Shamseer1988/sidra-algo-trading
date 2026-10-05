@@ -54,6 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import ApplicationSetting, LiveOrderApproval, LiveOrderSubmission, PaperSignal
+from app.services.entry_pricing import DEFAULT_CAP_PERCENT, plan_entry
 from app.services.live_approval import BLOCKED, request_live_approval
 from app.services.live_execution import submit_live_order
 from app.services.live_execution_gateway import BrokerNotSelectedError, live_order_adapter
@@ -166,19 +167,54 @@ async def _already_handled(session: AsyncSession, signal_id: Any) -> bool:
 
 
 def _order_request(signal: PaperSignal, controls: Any) -> LiveOrderRequest:
-    """The signal, in the canonical order vocabulary.
+    """The signal, in the canonical order vocabulary, priced and sized to the cap.
 
     The entry price is carried even for a MARKET order. The broker ignores it,
     but the margin check inside the risk engine asks about a priced order, and a
     margin question carrying zero returns a number that means nothing.
+
+    Under LIMIT the price is not the signal's entry but the worst price the
+    trade is still worth taking at, and the quantity is sized from *that* price.
+    Both halves are needed: a limit alone bounds the price and not the loss,
+    because the loss is price times quantity. Together the budget becomes a
+    ceiling rather than an intention.
+
+    Under MARKET nothing is capped, because there is no price on a market order
+    to cap. That is the setting that put ₹209 behind a ₹100 budget on 5 October,
+    and the catalogue entry says so.
     """
+    side = transaction_type_for(signal.side)
+    if str(getattr(controls, "live_entry_order_type", "")).upper() != "LIMIT":
+        return LiveOrderRequest(
+            instrument_token=signal.instrument_token,
+            side=side,
+            quantity=int(signal.quantity),
+            order_type=controls.live_entry_order_type,
+            product=product_for(bool(controls.intraday_leverage_enabled)),
+            price=Decimal(str(signal.entry_price)),
+        )
+
+    plan = plan_entry(
+        side=side,
+        entry_price=Decimal(str(signal.entry_price)),
+        stop_price=Decimal(str(signal.stop_price)),
+        quantity=int(signal.quantity),
+        risk_budget=Decimal(str(signal.risk_amount)),
+        cap_percent=Decimal(str(getattr(controls, "entry_slippage_cap_percent", DEFAULT_CAP_PERCENT))),
+    )
+    if plan.refusal:
+        # Raised rather than returned: the caller already turns a ValueError here
+        # into a refusal the operator reads, and a plan nobody can act on must
+        # not become an order for the quantity the signal happened to carry.
+        raise ValueError(plan.refusal)
+
     return LiveOrderRequest(
         instrument_token=signal.instrument_token,
-        side=transaction_type_for(signal.side),
-        quantity=int(signal.quantity),
-        order_type=controls.live_entry_order_type,
+        side=side,
+        quantity=plan.quantity,
+        order_type="LIMIT",
         product=product_for(bool(controls.intraday_leverage_enabled)),
-        price=Decimal(str(signal.entry_price)),
+        price=plan.limit_price,
     )
 
 

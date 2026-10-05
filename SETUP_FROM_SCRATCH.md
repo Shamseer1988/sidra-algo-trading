@@ -331,6 +331,30 @@ Charges remain an estimate per trade, permanently. No broker reports them per
 trade — Upstox aggregates them over a date range — so a day's charges become
 real only when the broker's own figure is fetched after settlement.
 
+### The entry slippage cap
+
+A live entry is a **LIMIT** order by default, priced at the worst fill the trade
+is still worth taking — the signal's entry plus **Entry slippage cap** percent,
+in Settings → Trading controls — and the quantity is sized from *that* price
+rather than from the hoped-for one. Both halves matter: a limit alone bounds the
+price and not the loss, because the loss is price times quantity. Together, a
+trade that fills at all risks no more than it was budgeted.
+
+The cost is orders that do not fill, and smaller positions when they do. A
+breakout that runs the moment it triggers leaves the limit behind and the trade
+is skipped — which is the intent, since the same stop and target from a worse
+entry is a materially different trade from the one that was tested.
+
+Setting the entry order type back to **MARKET** removes the cap entirely: a
+market order has no price to cap, and the risk on the trade becomes whatever the
+market does between the signal and the fill. On 5 October that was ₹209 against a
+₹100 budget. `scripts/check_settings.py` reports MARKET as a problem for exactly
+that reason.
+
+This bounds the entry price. It is not a guarantee about the loss: a gap through
+the stop, a stop that cannot be placed, or a rejected exit each still exceed the
+budget, and no order type prevents them.
+
 The **Broker** source on Orders & Positions is read-only on purpose: it will show
 you an order placed by hand on the broker's app, and mark it **Manual**, but it
 cannot withdraw it. That is the order that blocks reconciliation, and withdrawing

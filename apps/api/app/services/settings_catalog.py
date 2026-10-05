@@ -206,15 +206,31 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
         group=ACCOUNT,
         label="Live entry order type",
         help=(
-            "How a live entry is priced once it is authorised. MARKET fills, and pays the spread plus "
-            "whatever the price moved while the approval was pending. LIMIT caps the price at the signal's "
-            "entry and may never fill after an approval delay, so an order you approved can produce no "
-            "position. Neither is safer in general. This does not decide whether live trading happens — "
-            "the approval mode and the readiness gates do."
+            "How a live entry is priced once it is authorised. LIMIT caps what the entry may pay, at the "
+            "slippage cap below, and sizes the order from that price so the planned risk is a real "
+            "ceiling — at the cost of orders that never fill when the price runs away. MARKET always "
+            "fills and has no cap: it pays the spread plus whatever moved while the approval was "
+            "pending, and a worse fill raises the risk on the trade by exactly that much. A live entry "
+            "on 5 October filled ₹9.55 above its signal and put ₹209 behind a ₹100 budget. This does "
+            "not decide whether live trading happens — the approval mode and the readiness gates do."
         ),
         unit=CHOICE,
         choices=("MARKET", "LIMIT"),
         effect=IMMEDIATE,
+    ),
+    SettingSpec(
+        key="entry_slippage_cap_percent",
+        group=ACCOUNT,
+        label="Entry slippage cap",
+        help=(
+            "How far past the signal's entry price a LIMIT entry may fill, as a percent. The order is "
+            "priced at that worst price and sized from it, so a fill anywhere inside the cap risks no "
+            "more than the trade was budgeted. A smaller cap means fewer fills and a smaller position "
+            "when it does fill; zero puts the limit exactly at the signal's entry. Ignored entirely "
+            "when the entry order type is MARKET, which has no cap at all."
+        ),
+        unit=PERCENT,
+        effect=NEXT_SIGNAL,
     ),
     SettingSpec(
         key="execution_approval_mode",

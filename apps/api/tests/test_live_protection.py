@@ -38,11 +38,19 @@ class FakeAdapter:
         self._description = description or FakeDescription()
         self.submitted: list = []
         self.position_reads = 0
+        self.cancelled: list = []
+        self.cancel_result: tuple = (True, "")
 
     async def normalised_positions(self):
         self.position_reads += 1
         step = self._positions[min(self.position_reads - 1, len(self._positions) - 1)]
         return step
+
+    async def cancel(self, broker_order_id: str):
+        self.cancelled.append(broker_order_id)
+        if isinstance(self.cancel_result, Exception):
+            raise self.cancel_result
+        return self.cancel_result
 
     async def describe(self, order):  # noqa: ANN001
         return self._description
@@ -111,7 +119,12 @@ def signal(stop: str = "2850.00", token: str = "NSE_EQ|INE415G01027"):
     return SimpleNamespace(id=uuid4(), instrument_token=token, stop_price=Decimal(stop), side="SHORT")
 
 
-def submission(product: str = "INTRADAY", symbol: str = "RVNL", token: str = "NSE_EQ|INE415G01027"):
+def submission(
+    product: str = "INTRADAY",
+    symbol: str = "RVNL",
+    token: str = "NSE_EQ|INE415G01027",
+    numbers: list | None = None,
+):
     """The real mapped class, not a stand-in.
 
     A SimpleNamespace here is precisely what let two live bugs through: it
@@ -135,6 +148,7 @@ def submission(product: str = "INTRADAY", symbol: str = "RVNL", token: str = "NS
         price_type="MARKET",
         transaction_type="SELL",
         quantity=10,
+        broker_order_numbers=numbers if numbers is not None else [],
         request_snapshot={"canonical": {"instrumentToken": token, "product": product}},
     )
 
@@ -267,6 +281,53 @@ async def test_nothing_filled_places_no_stop() -> None:
 
 
 # --- the dangerous cases -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_entry_that_did_not_fill_is_withdrawn() -> None:
+    """A limit entry that produced no position is still a live order.
+
+    Left resting it can fill an hour later, at a price nobody re-checked, with
+    no stop behind it and no risk budget consulted. Once entries are priced,
+    "nothing filled" stops being a non-event.
+    """
+    adapter = FakeAdapter([[]])
+    outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
+
+    assert outcome.protected is True
+    assert outcome.step == "flat"
+    assert adapter.cancelled == ["2610050001"]
+    assert "withdrawn" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_an_entry_that_cannot_be_withdrawn_is_escalated() -> None:
+    """Worse than an unfilled order is an unfilled order nobody knows is live."""
+    adapter = FakeAdapter([[]])
+    adapter.cancel_result = (False, "order already in progress")
+    outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
+
+    assert "could not be withdrawn" in outcome.detail
+    assert "by hand" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_a_broker_that_raises_on_cancel_does_not_crash_the_safety_path() -> None:
+    adapter = FakeAdapter([[]])
+    adapter.cancel_result = RuntimeError("connection reset")
+    outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
+
+    assert outcome.step == "flat"
+    assert "connection reset" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_a_submission_with_no_broker_order_has_nothing_to_withdraw() -> None:
+    adapter = FakeAdapter([[]])
+    outcome = await protect(adapter, sub=submission())
+
+    assert adapter.cancelled == []
+    assert outcome.detail == "Nothing filled; there is no position to protect."
 
 
 @pytest.mark.asyncio

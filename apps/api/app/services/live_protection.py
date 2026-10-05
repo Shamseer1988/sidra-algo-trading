@@ -188,6 +188,41 @@ async def protect_after_fill(
         return ProtectionOutcome(False, "error", f"{type(exc).__name__}: {exc}")
 
 
+async def _withdraw_unfilled(adapter: BrokerAdapter, submission: LiveOrderSubmission) -> str:
+    """Cancel an entry that produced no position, and say what happened.
+
+    Never raises: this runs on the path whose whole job is to leave an account
+    safe, and a cancellation that fails is something to report rather than
+    something to crash on.
+
+    Cancelling an order that has in fact completed is harmless -- the broker
+    refuses it -- and is the right way round. The alternative, leaving a live
+    order resting because it *might* have filled, is how an account acquires a
+    position nobody is watching.
+    """
+    numbers = [str(number) for number in (submission.broker_order_numbers or []) if number]
+    if not numbers:
+        return "Nothing filled; there is no position to protect."
+
+    withdrawn: list[str] = []
+    stuck: list[str] = []
+    for number in numbers:
+        try:
+            ok, detail = await adapter.cancel(number)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("live_protection.cancel_raised order=%s error=%s", number, exc)
+            ok, detail = False, f"{type(exc).__name__}: {exc}"
+        (withdrawn if ok else stuck).append(number if ok else f"{number} ({detail})")
+
+    if not stuck:
+        return f"Nothing filled. The resting entry was withdrawn ({', '.join(withdrawn)})."
+    return (
+        "Nothing filled, and the entry could not be withdrawn: "
+        f"{'; '.join(stuck)}. It may still be live at the broker -- cancel it by hand before "
+        "it fills with no stop behind it."
+    )
+
+
 async def _protect(
     session: AsyncSession,
     settings: Settings,
@@ -223,7 +258,12 @@ async def _protect(
             "check the position by hand immediately.",
         )
     if net == 0:
-        return ProtectionOutcome(True, "flat", "Nothing filled; there is no position to protect.")
+        # An entry that did not fill is not simply a non-event once entries are
+        # priced. A MARKET order that filled nothing is finished, but a LIMIT
+        # rests: left alone it can fill an hour later, at a price nobody
+        # re-checked, with no stop behind it and no risk budget consulted. The
+        # order book is the only thing holding it, so it is withdrawn here.
+        return ProtectionOutcome(True, "flat", await _withdraw_unfilled(adapter, submission))
 
     quantity = int(abs(net))
     exit_side = _exit_side(net > 0)

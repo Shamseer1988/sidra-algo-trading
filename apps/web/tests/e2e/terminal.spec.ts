@@ -191,6 +191,25 @@ const MOCK_CATALOG = {
       last_changed_at: null,
     },
     {
+      key: "entry_slippage_cap_percent",
+      group: "ACCOUNT_AND_BROKER",
+      group_label: "Account and broker",
+      label: "Entry slippage cap",
+      help: "How far past the signal's entry price a LIMIT entry may fill, as a percent. The order is priced at that worst price and sized from it, so a fill anywhere inside the cap risks no more than the trade was budgeted.",
+      unit: "PERCENT",
+      kind: "decimal",
+      choices: [],
+      is_ceiling: true,
+      effect: "NEXT_SIGNAL",
+      effect_label: "Applies to the next signal evaluated; signals already taken keep the old value.",
+      value: 0.25,
+      minimum: 0,
+      maximum: 5,
+      exclusive_minimum: null,
+      exclusive_maximum: null,
+      last_changed_at: null,
+    },
+    {
       key: "maximum_daily_trades",
       group: "DAILY_RISK",
       group_label: "Daily risk",
@@ -1695,6 +1714,20 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await go(page, "Risk");
     await go(page, "Orders & Positions");
     await expect(page.getByRole("tab", { name: "Orders" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("9d-1. Settings: the entry slippage cap is adjustable without touching a file", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+
+    await go(page, "Settings", "Trading controls");
+
+    // The control that decides how far past its signal a live entry may fill,
+    // and therefore whether the planned risk is a ceiling or an intention. It
+    // has to be reachable here: a number that can only be changed by editing a
+    // Python file is one nobody adjusts.
+    await expect(page.getByText("Entry slippage cap")).toBeVisible();
+    await expect(page.getByText(/sized from it, so a fill anywhere inside the cap/)).toBeVisible();
   });
 
   test("9e. Settings: alerts moved in from their own menu entry", async ({ page }) => {

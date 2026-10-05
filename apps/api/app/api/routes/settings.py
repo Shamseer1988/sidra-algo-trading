@@ -93,7 +93,8 @@ DEFAULT_TRADING_CONTROLS = {
     "intraday_leverage_multiplier": 5.0,
     "execution_approval_mode": "DISABLED",
     "live_broker": "NONE",
-    "live_entry_order_type": "MARKET",
+    "live_entry_order_type": "LIMIT",
+    "entry_slippage_cap_percent": 0.25,
     "daily_profit_target": 2000.0,
     "daily_loss_limit": 400.0,
 }
@@ -135,7 +136,8 @@ class TradingControls(BaseModel):
     live_broker: str = Field(default="NONE")
     # Read only when a live entry is actually built. Changing it never turns
     # live submission on or off; that is the approval mode and the gates.
-    live_entry_order_type: str = Field(default="MARKET")
+    live_entry_order_type: str = Field(default="LIMIT")
+    entry_slippage_cap_percent: float = Field(default=0.25, ge=0, le=5)
 
     # Realised-plus-open session P&L at which the day stops, in rupees. Zero
     # disables the limit. Deliberately rupees rather than a percentage: a daily
