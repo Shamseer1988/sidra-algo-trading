@@ -187,6 +187,55 @@ async def test_a_long_is_protected_by_a_sell_stop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_structural_stop_reaches_the_broker_on_the_tick_grid() -> None:
+    """The fifth live failure of this path, and the first with no vocabulary in it.
+
+    A long in BAJFINANCE filled at ₹995.40 and the stop behind it was rejected:
+    "You've entered an invalid trigger price ... in multiples of the tick size
+    as mentioned by the Exchange." The trigger was ``977.9632`` -- a structural
+    level stored to four decimal places that nothing had ever asked to be a
+    tradable price. The position was left open with nothing behind it.
+    """
+    adapter = FakeAdapter([position(Decimal("12"))], [accepted()])
+    outcome = await protect(adapter, sig=signal(stop="977.9632"))
+
+    assert outcome.protected is True
+    sent = adapter.submitted[0]
+    assert sent.trigger_price == Decimal("978.00")
+    assert sent.trigger_price % Decimal("0.05") == 0
+
+
+@pytest.mark.asyncio
+async def test_the_operator_is_told_the_price_the_broker_was_given() -> None:
+    """The alert said "Stop at 977.9632" on a day the broker rejected exactly
+    that. A number announced that the broker never saw is its own small lie,
+    and it is the one an operator would check the order book against."""
+    adapter = FakeAdapter([position(Decimal("12"))], [accepted()])
+    outcome = await protect(adapter, sig=signal(stop="977.9632"))
+
+    assert "978.00" in outcome.detail
+    assert "977.9632" not in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_rounding_a_stop_never_widens_what_the_trade_can_lose() -> None:
+    """A long's stop rounds up, toward the entry. On a short it rounds down.
+
+    Either way the correction can only reduce the loss, never increase it --
+    which is why this is one rule and not a round-to-nearest.
+    """
+    long_adapter = FakeAdapter([position(Decimal("12"))], [accepted()])
+    await protect(long_adapter, sig=signal(stop="977.9632"))
+    assert long_adapter.submitted[0].side == "SELL"
+    assert long_adapter.submitted[0].trigger_price >= Decimal("977.9632")
+
+    short_adapter = FakeAdapter([position(Decimal("-12"))], [accepted()])
+    await protect(short_adapter, sig=signal(stop="977.9632"))
+    assert short_adapter.submitted[0].side == "BUY"
+    assert short_adapter.submitted[0].trigger_price <= Decimal("977.9632")
+
+
+@pytest.mark.asyncio
 async def test_the_stop_is_sized_from_the_broker_not_the_order() -> None:
     """A partial fill sized from the order would leave the excess to OPEN a
     position in the opposite direction when the stop triggered."""

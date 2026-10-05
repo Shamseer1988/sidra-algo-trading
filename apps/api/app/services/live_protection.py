@@ -53,6 +53,7 @@ from app.services.live_orders import (
     prepare_submission,
     send_prepared_order,
 )
+from app.services.price_ticks import round_to_tick
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +227,11 @@ async def _protect(
 
     quantity = int(abs(net))
     exit_side = _exit_side(net > 0)
-    stop_price = Decimal(str(signal.stop_price))
+    # On the exchange's tick grid before anything is said about it. The request
+    # normalises it anyway, but a number announced to the operator that the
+    # broker never saw is its own small lie -- and this path announced
+    # "Stop at 977.9632" on a day the broker rejected exactly that price.
+    stop_price = round_to_tick(Decimal(str(signal.stop_price)), exit_side)
     # The canonical product, never submission.product. That field holds what
     # the broker was asked for -- "I" at Upstox -- and describe() translates
     # again on the way out, so passing it back raised "Unsupported order field:

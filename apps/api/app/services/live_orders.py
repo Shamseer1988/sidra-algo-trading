@@ -62,6 +62,7 @@ from app.services.broker_adapter import (
     BrokerOrder,
     BrokerOrderDescription,
 )
+from app.services.price_ticks import round_to_tick
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,24 @@ class LiveOrderRequest:
     price: Decimal
     trigger_price: Decimal = Decimal("0")
     validity: str = "DAY"
+
+    def __post_init__(self) -> None:
+        """Put both prices on the exchange's tick grid, at birth.
+
+        Here rather than in the three callers, and rather than in the adapter,
+        because this object is the only way an order can be expressed in this
+        system: a price normalised here is normalised in the write-ahead
+        record, in the approval message the operator reads, and in whatever
+        reaches the broker, and the three cannot drift apart.
+
+        The live failure that prompted it: a protective stop was sent at
+        ``977.9632`` -- a structural level stored to four decimal places, which
+        nothing had ever asked to be a tradable price -- and Upstox rejected it
+        for not being a multiple of the tick size. The long it was meant to
+        protect was left open with nothing behind it.
+        """
+        object.__setattr__(self, "price", round_to_tick(self.price, self.side))
+        object.__setattr__(self, "trigger_price", round_to_tick(self.trigger_price, self.side))
 
     def to_broker_order(self, client_order_id: str) -> BrokerOrder:
         return BrokerOrder(
