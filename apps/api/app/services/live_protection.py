@@ -265,20 +265,52 @@ async def _protect(
         # order book is the only thing holding it, so it is withdrawn here.
         return ProtectionOutcome(True, "flat", await _withdraw_unfilled(adapter, submission))
 
-    quantity = int(abs(net))
-    exit_side = _exit_side(net > 0)
-    # On the exchange's tick grid before anything is said about it. The request
-    # normalises it anyway, but a number announced to the operator that the
-    # broker never saw is its own small lie -- and this path announced
-    # "Stop at 977.9632" on a day the broker rejected exactly that price.
-    stop_price = round_to_tick(Decimal(str(signal.stop_price)), exit_side)
     # The canonical product, never submission.product. That field holds what
     # the broker was asked for -- "I" at Upstox -- and describe() translates
     # again on the way out, so passing it back raised "Unsupported order field:
     # 'I'" and refused both the stop AND the close that would have covered for
     # it. INTRADAY is the fallback only for rows written before the snapshot
     # carried this, and it is what every order this system places uses.
-    product = submission.canonical_product or INTRADAY
+    return await protect_position(
+        session,
+        adapter,
+        signal=signal,
+        net=net,
+        product=submission.canonical_product or INTRADAY,
+        symbol=symbol,
+    )
+
+
+async def protect_position(
+    session: AsyncSession,
+    adapter: BrokerAdapter,
+    *,
+    signal: PaperSignal,
+    net: Decimal,
+    product: str,
+    symbol: str | None = None,
+) -> ProtectionOutcome:
+    """Put a stop behind a held position, or close it if one cannot be placed.
+
+    Separate from ``protect_after_fill`` so it can be run again later. That one
+    fires once, immediately after the entry, and for a long time it was the only
+    attempt this system ever made: a stop rejected at 09:37 left the position
+    naked for the rest of the day, with nothing scheduled that would notice. On
+    5 October that cost more than twice the planned risk on a trade whose stop
+    had simply been refused for an invalid tick price. The minute sweep now
+    calls this for any open position with no stop behind it.
+
+    ``net`` is the broker's signed quantity, so the side and size come from what
+    is actually held rather than from what was ordered.
+    """
+    quantity = int(abs(net))
+    exit_side = _exit_side(net > 0)
+    name = symbol or signal.instrument_token
+    # On the exchange's tick grid before anything is said about it. The request
+    # normalises it anyway, but a number announced to the operator that the
+    # broker never saw is its own small lie -- and this path announced
+    # "Stop at 977.9632" on a day the broker rejected exactly that price.
+    stop_price = round_to_tick(Decimal(str(signal.stop_price)), exit_side)
 
     for attempt in range(STOP_PLACE_ATTEMPTS):
         status, ids, detail = await _place_exit(
@@ -294,7 +326,7 @@ async def _protect(
         )
         if status == ACCEPTED:
             logger.info(
-                "live_protection.stop_placed symbol=%s qty=%s trigger=%s ids=%s", symbol, quantity, stop_price, ids
+                "live_protection.stop_placed symbol=%s qty=%s trigger=%s ids=%s", name, quantity, stop_price, ids
             )
             return ProtectionOutcome(True, "stopped", f"Stop at {stop_price}.", quantity, ids)
         if status == UNKNOWN:
@@ -304,14 +336,14 @@ async def _protect(
             return ProtectionOutcome(
                 False,
                 "unknown_stop",
-                f"The stop for {quantity} of {symbol} returned no usable answer ({detail}). "
+                f"The stop for {quantity} of {name} returned no usable answer ({detail}). "
                 "It may or may not be resting. Check the order book before doing anything else.",
                 quantity,
             )
         logger.warning(
             "live_protection.stop_attempt_failed attempt=%s symbol=%s status=%s detail=%s",
             attempt + 1,
-            symbol,
+            name,
             status,
             detail,
         )
@@ -342,6 +374,6 @@ async def _protect(
         False,
         "exposed",
         f"The stop could not be placed AND the position could not be closed ({close_detail}). "
-        f"{quantity} of {symbol} is open with nothing behind it. Close it by hand now.",
+        f"{quantity} of {name} is open with nothing behind it. Close it by hand now.",
         quantity,
     )

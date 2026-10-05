@@ -25,8 +25,11 @@ from app.services.trading_calendar import MarketPhase
 class FakeAdapter:
     name = "UPSTOX"
 
-    def __init__(self, positions, *, cancel_ok: bool = True, submit=None, resolved: bool = True) -> None:
+    def __init__(self, positions, *, cancel_ok: bool = True, submit=None, resolved: bool = True, orders=None) -> None:
         self._positions = positions
+        # Our stop, working at the broker. The default, because that is the
+        # normal state of a held position and the sweep now checks for it.
+        self._orders = working_book() if orders is None else orders
         self._cancel_ok = cancel_ok
         self._submit = submit or SimpleNamespace(
             status="ACCEPTED", broker_order_ids=["exit-1"], detail="", failure_code=None, failure_name=None
@@ -37,6 +40,11 @@ class FakeAdapter:
 
     async def normalised_positions(self):
         return self._positions
+
+    async def normalised_orders(self):
+        if isinstance(self._orders, Exception):
+            raise self._orders
+        return self._orders
 
     async def cancel(self, broker_order_id: str):
         self.cancelled.append(broker_order_id)
@@ -50,6 +58,31 @@ class FakeAdapter:
     async def submit(self, order, description):  # noqa: ANN001
         self.submitted.append(order)
         return self._submit
+
+
+def book_order(broker_order_id: str = "stop-1", status: str = "OPEN"):
+    """A real BrokerOrderRecord, not a stand-in.
+
+    The sweep reads ``status`` and ``broker_order_id`` off these, and a
+    SimpleNamespace would answer for a field that does not exist -- which is
+    the shape of fake behind two earlier live failures on this path.
+    """
+    from app.services.broker_adapter import BrokerOrderRecord
+
+    return BrokerOrderRecord(
+        broker_order_id=broker_order_id,
+        client_order_id="sidra-stop-stop-1",
+        status=status,
+        symbol="RVNL",
+        side="BUY",
+        order_type="SL-M",
+        quantity=143,
+        filled_quantity=0,
+    )
+
+
+def working_book():
+    return [book_order()]
 
 
 def position(net, symbol: str = "RVNL"):
@@ -190,6 +223,121 @@ async def test_a_long_below_its_target_is_held(wiring) -> None:
     assert result.exits[0].step == "holding"
     assert wiring.adapter.submitted == []
     assert wiring.adapter.cancelled == []
+
+
+# --- the position is still protected -----------------------------------------
+#
+# ``protect_after_fill`` fires once, in the seconds after the entry. For a long
+# time that was the only attempt this system ever made, so a stop refused at
+# 09:37 left the position naked until the square-off and nothing scheduled
+# would notice. On 5 October a ₹100 planned risk reached ₹163 and climbing on a
+# position whose stop had simply been rejected for an invalid tick price.
+
+
+@pytest.mark.asyncio
+async def test_a_held_position_with_no_working_stop_is_protected(wiring, monkeypatch) -> None:
+    calls = []
+
+    async def spy(_session, _adapter, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(protected=True, flattened=False, detail="Stop at 2850.00.")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.signal = signal(target="2900")
+    wiring.close = Decimal("2880")
+    # The book holds nothing of ours: the stop was rejected at placement.
+    wiring.adapter = FakeAdapter([position(Decimal("50"))], orders=[])
+
+    result = await sweep(wiring)
+
+    assert len(calls) == 1
+    assert calls[0]["net"] == Decimal("50")
+    assert calls[0]["signal"] is wiring.signal
+    assert result.exits[0].step == "unprotected"
+    assert "no working stop behind it" in result.exits[0].detail
+
+
+@pytest.mark.asyncio
+async def test_a_stop_the_broker_has_finished_with_does_not_count(wiring, monkeypatch) -> None:
+    """Our table says what we were told at placement. Only the book says whether
+    the order is working now -- a stop cancelled or rejected after the fact
+    leaves a row that still reads ACCEPTED."""
+    calls = []
+
+    async def spy(_session, _adapter, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(protected=True, flattened=False, detail="Stop re-placed.")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.signal = signal(target="2900")
+    wiring.close = Decimal("2880")
+    wiring.adapter = FakeAdapter([position(Decimal("50"))], orders=[book_order(status="REJECTED")])
+
+    await sweep(wiring)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_working_stop_is_left_exactly_alone(wiring, monkeypatch) -> None:
+    calls = []
+
+    async def spy(*_a, **_k):
+        calls.append(1)
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.signal = signal(target="2900")
+    wiring.close = Decimal("2880")
+    wiring.adapter = FakeAdapter([position(Decimal("50"))])
+
+    result = await sweep(wiring)
+
+    assert calls == []
+    assert result.exits[0].step == "holding"
+    assert wiring.adapter.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_order_book_places_no_second_stop(wiring, monkeypatch) -> None:
+    """A book we cannot read is not a book with no stops in it.
+
+    Treating it as empty would put a second stop behind a position that already
+    has one. Both would fill, and the position would end up reversed rather
+    than flat -- the one outcome this module exists to prevent.
+    """
+    calls = []
+
+    async def spy(*_a, **_k):
+        calls.append(1)
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.signal = signal(target="2900")
+    wiring.close = Decimal("2880")
+    wiring.adapter = FakeAdapter([position(Decimal("50"))], orders=RuntimeError("connection reset"))
+
+    result = await sweep(wiring)
+
+    assert calls == []
+    assert result.exits[0].step == "holding"
+
+
+@pytest.mark.asyncio
+async def test_a_position_at_its_target_exits_rather_than_being_re_stopped(wiring, monkeypatch) -> None:
+    """The protection check must not divert a trade that should be closing."""
+    calls = []
+
+    async def spy(*_a, **_k):
+        calls.append(1)
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.signal = signal(target="2850")
+    wiring.close = Decimal("2840")
+    wiring.adapter = FakeAdapter([position(Decimal("-143"))], orders=[])
+
+    result = await sweep(wiring)
+
+    assert calls == []
+    assert result.exits[0].acted is True
+    assert wiring.adapter.submitted[0].order_type == "MARKET"
 
 
 @pytest.mark.asyncio

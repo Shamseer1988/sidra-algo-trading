@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.db.models import LiveOrderSubmission, MarketCandle, PaperSignal
 from app.db.session import SessionLocal
-from app.services.broker_adapter import BUY, INTRADAY, SELL, BrokerAdapter
+from app.services.broker_adapter import BUY, INTRADAY, OPEN_STATUSES, SELL, BrokerAdapter
 from app.services.exit_rules import from_controls as exit_rules_from
 from app.services.exit_rules import time_exit_due
 from app.services.live_execution_gateway import BrokerNotSelectedError, live_order_adapter
@@ -57,6 +57,7 @@ from app.services.live_orders import (
     prepare_submission,
     send_prepared_order,
 )
+from app.services.live_protection import protect_position
 from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
 from app.services.trading_calendar import MARKET_TIMEZONE, MarketPhase, TradingCalendar
 
@@ -265,6 +266,17 @@ async def _sweep(settings: Settings, calendar: TradingCalendar) -> ExitSweepOutc
             return ExitSweepOutcome(False, "broker", f"Broker unreachable: {type(exc).__name__}: {exc}")
 
         positions = await adapter.normalised_positions()
+        # Read once for the whole sweep, not once per position: the protection
+        # check below asks the broker whether our stops are actually working,
+        # and the answer is the same book for every row.
+        try:
+            book = await adapter.normalised_orders()
+        except Exception as exc:  # noqa: BLE001
+            # A book we cannot read is not a book with no stops in it. Treating
+            # it as empty would have this sweep place a second stop behind a
+            # position that already has one.
+            logger.warning("live_exit_manager.order_book_unreadable error=%s", exc)
+            book = None
         start, end = session_bounds_utc(now.astimezone(MARKET_TIMEZONE).date())
         exits: list[PositionExit] = []
 
@@ -275,9 +287,76 @@ async def _sweep(settings: Settings, calendar: TradingCalendar) -> ExitSweepOutc
                 continue
             if net == 0:
                 continue
-            exits.append(await _consider(session, adapter, record, net, now, start, end))
+            exits.append(await _consider(session, adapter, record, net, now, start, end, book))
 
     return ExitSweepOutcome(True, "swept", f"{len(exits)} position(s) considered.", exits)
+
+
+async def _hold_or_protect(
+    session: AsyncSession,
+    adapter: BrokerAdapter,
+    signal: PaperSignal,
+    net: Decimal,
+    symbol: str,
+    quantity: int,
+    close: Decimal,
+    target: Decimal,
+    start,  # noqa: ANN001
+    end,  # noqa: ANN001
+    book: list | None,
+) -> PositionExit:
+    """Holding is only safe if something is behind the position.
+
+    ``protect_after_fill`` runs once, in the seconds after the entry. For a long
+    time that was the only attempt this system ever made, so a stop refused at
+    09:37 -- for a bad tick price, a margin blip, a broker hiccup -- left the
+    position naked until the square-off, and nothing scheduled would notice. On
+    5 October that turned a ₹100 planned risk into ₹163 and climbing, on a
+    position whose stop had simply been rejected.
+
+    The check is against the broker's book rather than our own records, and by
+    order id rather than by symbol. Our table says what we were told at
+    placement; only the book says whether the order is working *now*. And the
+    id is the one key both sides agree on -- matching on a symbol is what made
+    three earlier joins compare a trading name against an instrument token and
+    quietly find nothing.
+    """
+    holding = PositionExit(
+        symbol, False, "holding", f"Holding; last close {close} against target {target}.", quantity=quantity
+    )
+    if book is None:
+        # Unreadable book. Saying nothing is better than placing a second stop
+        # behind a position that already has one: both would fill and the
+        # position would end up reversed rather than flat.
+        return holding
+
+    ours = await _resting_stops(session, signal.id, start, end)
+    working = {str(order.broker_order_id) for order in book if order.status in OPEN_STATUSES and order.broker_order_id}
+    for stop in ours:
+        if any(str(number) in working for number in (stop.broker_order_numbers or [])):
+            return holding
+
+    logger.warning(
+        "live_exit_manager.position_unprotected symbol=%s qty=%s stops_recorded=%s",
+        symbol,
+        quantity,
+        len(ours),
+    )
+    outcome = await protect_position(
+        session,
+        adapter,
+        signal=signal,
+        net=net,
+        product=(ours[0].canonical_product if ours else None) or INTRADAY,
+        symbol=symbol,
+    )
+    return PositionExit(
+        symbol,
+        outcome.protected or outcome.flattened,
+        "unprotected",
+        f"{quantity} of {symbol} was open with no working stop behind it. {outcome.detail}",
+        quantity=quantity,
+    )
 
 
 async def _consider(
@@ -288,6 +367,7 @@ async def _consider(
     now: datetime,
     start,  # noqa: ANN001
     end,  # noqa: ANN001
+    book: list | None = None,
 ) -> PositionExit:
     quantity = int(abs(net))
     long = net > 0
@@ -314,8 +394,8 @@ async def _consider(
                 symbol, False, "no_price", "No completed candle to measure the target against.", quantity=quantity
             )
         if not target_reached(long=long, close=close, target=target):
-            return PositionExit(
-                symbol, False, "holding", f"Holding; last close {close} against target {target}.", quantity=quantity
+            return await _hold_or_protect(
+                session, adapter, signal, net, symbol, quantity, close, target, start, end, book
             )
         reason = f"Target reached at {close}"
 

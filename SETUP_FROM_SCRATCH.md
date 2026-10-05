@@ -355,6 +355,23 @@ This bounds the entry price. It is not a guarantee about the loss: a gap through
 the stop, a stop that cannot be placed, or a rejected exit each still exceed the
 budget, and no order type prevents them.
 
+### The protection watchdog
+
+A protective stop is placed in the seconds after an entry fills. If that attempt
+fails — a rejected price, a margin blip, a broker that did not answer — the
+minute sweep now notices. Every minute while the exchange is open it asks the
+broker which of our orders are actually working, and any open position with no
+working stop behind it gets one placed, or gets closed if it cannot be.
+
+The check is made against the broker's order book rather than against our own
+records, because our table says what we were told when the order was placed and
+only the book says whether it is live now. A stop cancelled or rejected after
+the fact leaves a row that still reads ACCEPTED.
+
+If the order book cannot be read, the sweep does nothing rather than assume the
+position is naked: placing a second stop behind a position that already has one
+means both can fill, and the position ends up reversed instead of flat.
+
 The **Broker** source on Orders & Positions is read-only on purpose: it will show
 you an order placed by hand on the broker's app, and mark it **Manual**, but it
 cannot withdraw it. That is the order that blocks reconciliation, and withdrawing
