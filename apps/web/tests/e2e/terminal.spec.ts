@@ -768,6 +768,8 @@ const MOCK_BROKER_SNAPSHOT = {
       filled_quantity: 67,
       average_price: 183.56,
       placed_at: "2026-10-01T04:07:01Z",
+      trigger_price: null,
+      status_message: null,
       ours: true,
     },
     {
@@ -781,6 +783,8 @@ const MOCK_BROKER_SNAPSHOT = {
       filled_quantity: 0,
       average_price: null,
       placed_at: "2026-10-01T04:31:00Z",
+      trigger_price: null,
+      status_message: null,
       ours: false,
     },
   ],
@@ -1250,6 +1254,48 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(book.getByText("Sidra", { exact: true })).toBeVisible();
     await expect(page.getByText(/1 working order is not ours/)).toBeVisible();
     await expect(page.getByText(/Reconciliation refuses new live orders/)).toBeVisible();
+  });
+
+  test("5c-2a. Orders: a refused stop says what it asked for and why it was refused", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/broker-books/snapshot*", async (route: Route) => {
+      await route.fulfill({
+        json: {
+          ...MOCK_BROKER_SNAPSHOT,
+          orders: [
+            {
+              broker_order_id: "261005000053817",
+              client_order_id: "sidra-stop",
+              status: "REJECTED",
+              symbol: "BAJFINANCE-EQ",
+              side: "SELL",
+              order_type: "SL",
+              quantity: 12,
+              filled_quantity: 0,
+              average_price: 0,
+              placed_at: "2026-10-05T06:37:00Z",
+              trigger_price: 977.9632,
+              status_message: "You've entered an invalid trigger price.",
+              ours: true,
+            },
+          ],
+          working_orders: 0,
+          untracked_working: 0,
+        },
+      });
+    });
+    await page.goto("/");
+
+    await go(page, "Orders & Positions", "Orders");
+    await page.getByRole("button", { name: "Broker", exact: true }).click();
+
+    // Both were sitting unparsed in the adapter on the day a stop was rejected
+    // for a trigger that was not a multiple of the tick size. The screen showed
+    // ₹0.00 -- the average price of an order that never filled -- and the
+    // operator had to open the broker's own app to find out why.
+    const stop = page.getByRole("row").filter({ hasText: "BAJFINANCE-EQ" });
+    await expect(stop).toContainText("trigger ₹977.96");
+    await expect(stop).toContainText("invalid trigger price");
   });
 
   test("5c-3. Orders: the broker view can look, and cannot touch", async ({ page }) => {

@@ -86,6 +86,12 @@ class SnapshotOrder:
     filled_quantity: int | None
     average_price: float | None
     placed_at: str | None
+    # What the stop was asked to do, and what the broker said about it. An
+    # average price of 0.00 on a rejected order says nothing; these two say
+    # everything, and without them a refusal can only be diagnosed in the
+    # broker's own app.
+    trigger_price: float | None
+    status_message: str | None
     # Whether this system placed it. The question an operator asked all week
     # about every untracked order that blocked reconciliation, answered in the
     # row rather than by cross-referencing two screens.
@@ -239,6 +245,8 @@ async def _fetch(session: AsyncSession, settings: Settings, broker: str | None =
                 filled_quantity=item.filled_quantity,
                 average_price=_money(item.average_price),
                 placed_at=item.placed_at,
+                trigger_price=_money(item.trigger_price),
+                status_message=item.status_message,
                 # Our client order ids are the tag carried to the broker. An
                 # order without one is one we did not place -- by hand, or by
                 # something else using this account.

@@ -171,6 +171,14 @@ class BrokerOrderRecord:
     filled_quantity: int | None = None
     average_price: Decimal | None = None
     placed_at: str | None = None
+    # The two fields that explain a stop. ``average_price`` is meaningless on an
+    # order that never filled -- a rejected stop reads ₹0.00 -- while the
+    # trigger is the whole of what was asked for, and the broker's own message
+    # is the whole of why it was refused. Both were sitting unparsed in ``raw``
+    # on the day an operator had to open the broker's app to find out that a
+    # trigger price was not a multiple of the tick size.
+    trigger_price: Decimal | None = None
+    status_message: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -509,6 +517,8 @@ class UpstoxAdapter:
                     filled_quantity=_int_or_none(raw.get("filled_quantity")),
                     average_price=_decimal_or_none(raw.get("average_price")),
                     placed_at=_text_or_none(raw.get("order_timestamp")),
+                    trigger_price=_decimal_or_none(raw.get("trigger_price")),
+                    status_message=_text_or_none(raw.get("status_message") or raw.get("status_message_raw")),
                     raw=raw,
                 )
             )
@@ -704,6 +714,11 @@ class FirstockAdapter:
                     filled_quantity=_int_or_none(raw.get("filledShares")),
                     average_price=_decimal_or_none(raw.get("averagePrice")),
                     placed_at=_text_or_none(raw.get("orderTime")),
+                    trigger_price=_decimal_or_none(raw.get("triggerPrice")),
+                    # Never ``remarks``: that field carries our own client order
+                    # id at Firstock, and reading it here would print our tag
+                    # back as the broker's explanation.
+                    status_message=_text_or_none(raw.get("rejectReason") or raw.get("rejReason")),
                     client_order_id=self.find_client_order_id(raw),
                     status=self._STATUS.get(str(raw.get("status") or "").strip().upper(), STATUS_UNREADABLE),
                     symbol=str(raw.get("tradingSymbol") or "unknown"),

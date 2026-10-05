@@ -74,6 +74,8 @@ def order(client_order_id=None, status="OPEN", symbol="TATASTEEL"):
         filled_quantity=67,
         average_price=Decimal("183.56"),
         placed_at="2026-10-01T09:37:01Z",
+        trigger_price=Decimal("978.00"),
+        status_message="Open",
     )
 
 
@@ -222,6 +224,51 @@ async def test_a_working_order_we_did_not_place_is_counted(wiring) -> None:
     result = await snapshot(wiring)
     assert result["working_orders"] == 2
     assert result["untracked_working"] == 1
+
+
+async def test_a_rejected_stop_carries_its_trigger_and_the_reason(wiring) -> None:
+    """The two fields that explain a refusal, which used to reach no screen.
+
+    A stop rejected for an invalid tick price showed as "₹0.00" -- the average
+    price of an order that never filled -- and the operator had to open the
+    broker's own app to find out why. The trigger is what was asked for; the
+    broker's message is why it was refused.
+    """
+    wiring.adapter = FakeAdapter(
+        orders=[
+            BrokerOrderRecord(
+                broker_order_id="261005000053817",
+                client_order_id="sidra-stop",
+                status="REJECTED",
+                symbol="BAJFINANCE-EQ",
+                side="SELL",
+                order_type="SL",
+                quantity=12,
+                filled_quantity=0,
+                average_price=Decimal("0"),
+                trigger_price=Decimal("977.9632"),
+                status_message="You've entered an invalid trigger price.",
+            )
+        ]
+    )
+    row = (await snapshot(wiring))["orders"][0]
+    assert row["trigger_price"] == 977.9632
+    assert "invalid trigger price" in row["status_message"]
+
+
+async def test_a_broker_that_said_nothing_about_an_order_says_nothing(wiring) -> None:
+    """None, not an empty string and not zero: a trigger of 0.00 would read as
+    a stop asked to trigger at nothing."""
+    wiring.adapter = FakeAdapter(orders=[order()])
+    rows = (await snapshot(wiring))["orders"]
+    assert rows[0]["trigger_price"] == 978.0
+
+    wiring.adapter = FakeAdapter(
+        orders=[BrokerOrderRecord(broker_order_id="x", client_order_id=None, status="OPEN", symbol="Y")]
+    )
+    bare = (await snapshot(wiring, force=True))["orders"][0]
+    assert bare["trigger_price"] is None
+    assert bare["status_message"] is None
 
 
 async def test_realised_and_unrealised_are_kept_apart(wiring) -> None:

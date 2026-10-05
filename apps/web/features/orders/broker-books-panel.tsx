@@ -254,7 +254,12 @@ function Orderbook({ rows, brokerLabel }: { rows: BrokerBookOrder[]; brokerLabel
                   </td>
                   <td>
                     {row.order_type ?? "—"}
-                    {row.quantity !== null && <span className="text-[11px] opacity-75"> · {row.quantity}</span>}
+                    <span className="text-[11px] opacity-75">
+                      {row.quantity !== null && `${row.quantity} qty`}
+                      {/* The trigger is the whole of what a stop was asked to do.
+                          Average price says nothing about one that never filled. */}
+                      {row.trigger_price !== null && ` · trigger ${money(row.trigger_price)}`}
+                    </span>
                   </td>
                   <td className="numeric">
                     {row.filled_quantity === null ? "—" : row.filled_quantity}
@@ -263,6 +268,11 @@ function Orderbook({ rows, brokerLabel }: { rows: BrokerBookOrder[]; brokerLabel
                   <td className="numeric">{cell(row.average_price)}</td>
                   <td>
                     <span className={`status-pill ${statusPill(row.status)}`}>{row.status}</span>
+                    {/* The broker's own words about this order. Without them a
+                        refusal can only be diagnosed in the broker's own app,
+                        which is where an operator had to go to find out that a
+                        stop had been rejected for an invalid tick price. */}
+                    {row.status_message && <span className="text-[11px] opacity-75">{row.status_message}</span>}
                   </td>
                   <td>
                     <PlacedBy ours={row.ours} />

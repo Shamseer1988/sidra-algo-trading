@@ -408,6 +408,67 @@ async def test_a_symbol_that_cannot_be_named_is_never_asked_about() -> None:
 # --- reading broker state back -------------------------------------------
 
 
+async def test_upstox_carries_the_trigger_and_the_rejection_reason() -> None:
+    """The two fields that explain a refused stop.
+
+    They sat unparsed in ``raw`` on the day a stop was rejected for a trigger
+    price that was not a multiple of the tick size. The screen showed "₹0.00"
+    -- the average price of an order that never filled -- and the operator had
+    to open the broker's own app to learn why.
+    """
+    adapter = UpstoxAdapter(
+        FakeUpstox(
+            book=[
+                {
+                    "order_id": "261005000053817",
+                    "status": "rejected",
+                    "order_type": "SL",
+                    "trigger_price": "977.9632",
+                    "status_message": "You've entered an invalid trigger price.",
+                }
+            ]
+        )
+    )
+    row = (await adapter.normalised_orders())[0]
+    assert row.trigger_price == Decimal("977.9632")
+    assert "invalid trigger price" in row.status_message
+
+
+async def test_firstock_carries_the_trigger_and_the_rejection_reason() -> None:
+    adapter = FirstockAdapter(
+        FakeFirstock(
+            book=[
+                {
+                    "orderNumber": "1",
+                    "status": "REJECTED",
+                    "triggerPrice": "185.20",
+                    "rejectReason": "price out of range",
+                }
+            ]
+        ),
+        FakeSession(),
+    )
+    row = (await adapter.normalised_orders())[0]
+    assert row.trigger_price == Decimal("185.20")
+    assert row.status_message == "price out of range"
+
+
+async def test_firstock_never_reports_our_own_tag_as_the_brokers_explanation() -> None:
+    """``remarks`` carries our client order id at Firstock. Reading it as the
+    rejection reason would print our own tag back as the broker's words."""
+    adapter = FirstockAdapter(
+        FakeFirstock(book=[{"orderNumber": "1", "status": "REJECTED", "remarks": "sidra-7f2c"}]), FakeSession()
+    )
+    assert (await adapter.normalised_orders())[0].status_message is None
+
+
+async def test_an_order_the_broker_said_nothing_about_reports_nothing() -> None:
+    adapter = UpstoxAdapter(FakeUpstox(book=[{"order_id": "1", "status": "open"}]))
+    row = (await adapter.normalised_orders())[0]
+    assert row.trigger_price is None
+    assert row.status_message is None
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

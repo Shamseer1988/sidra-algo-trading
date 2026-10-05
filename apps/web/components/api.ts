@@ -1,4 +1,4 @@
-export type BrokerBookOrder = { broker_order_id: string; client_order_id: string | null; status: string; symbol: string; side: string | null; order_type: string | null; quantity: number | null; filled_quantity: number | null; average_price: number | null; placed_at: string | null; ours: boolean };
+export type BrokerBookOrder = { broker_order_id: string; client_order_id: string | null; status: string; symbol: string; side: string | null; order_type: string | null; quantity: number | null; filled_quantity: number | null; average_price: number | null; placed_at: string | null; trigger_price: number | null; status_message: string | null; ours: boolean };
 export type BrokerBookPosition = { symbol: string; instrument_token: string | null; net_quantity: number | null; average_price: number | null; last_price: number | null; realised: number | null; unrealised: number | null; day_pnl: number | null };
 export type BrokerChoice = { key: string; label: string; connected: boolean; detail: string };
 export type BrokerChoices = { selected: string; brokers: BrokerChoice[] };
