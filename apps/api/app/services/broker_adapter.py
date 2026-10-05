@@ -42,10 +42,13 @@ falling into the gap between "open" and "terminal", where it would be ignored.
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.services.trading_calendar import MARKET_TIMEZONE
 
 ACCEPTED = "ACCEPTED"
 REJECTED = "REJECTED"
@@ -260,6 +263,51 @@ class MarginQuote:
         if not self.readable or self.required is None or self.available is None:
             return False
         return self.required <= self.available
+
+
+# Formats the brokers use for an order timestamp. None of them carries a
+# timezone, and both brokers mean IST.
+_STAMP_FORMATS = ("%Y-%m-%d %H:%M:%S", "%d-%m-%Y %H:%M:%S", "%d-%b-%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S")
+
+
+def _timestamp_or_none(value: Any) -> str | None:
+    """A broker's order time, as an instant rather than as a wall clock reading.
+
+    Upstox and Firstock both report ``"2026-10-05 09:37:01"`` -- the exchange's
+    local time, with nothing saying so. Passed through as that string it reaches
+    a browser, which parses an unzoned timestamp as *its own* local time. An
+    operator in Qatar then read an order placed at 09:37 IST as 14:51, two and a
+    half hours in the future, on a panel whose own header said it had been read
+    at 12:29. Order times are how you tell whether the trade window has closed,
+    so a clock that is confidently wrong is worse than one that is absent.
+
+    Stamping it here is the seam doing its job: the browser should not have to
+    know which timezone a broker thinks in, any more than it should have to know
+    that Firstock spells BUY as "B".
+
+    A value that cannot be parsed is passed through unchanged. An unreadable
+    time is still better than no time, and inventing an offset for a format
+    nobody recognised would be guessing about money.
+    """
+    text = _text_or_none(value)
+    if text is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        parsed = None
+        for shape in _STAMP_FORMATS:
+            try:
+                parsed = datetime.strptime(text, shape)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return text
+    # Already zoned -- the broker said what it meant, and we do not second-guess it.
+    if parsed.tzinfo is not None:
+        return parsed.isoformat()
+    return parsed.replace(tzinfo=MARKET_TIMEZONE).isoformat()
 
 
 def _text_or_none(value: Any) -> str | None:
@@ -516,7 +564,7 @@ class UpstoxAdapter:
                     quantity=_int_or_none(raw.get("quantity")),
                     filled_quantity=_int_or_none(raw.get("filled_quantity")),
                     average_price=_decimal_or_none(raw.get("average_price")),
-                    placed_at=_text_or_none(raw.get("order_timestamp")),
+                    placed_at=_timestamp_or_none(raw.get("order_timestamp")),
                     trigger_price=_decimal_or_none(raw.get("trigger_price")),
                     status_message=_text_or_none(raw.get("status_message") or raw.get("status_message_raw")),
                     raw=raw,
@@ -713,7 +761,7 @@ class FirstockAdapter:
                     quantity=_int_or_none(raw.get("quantity")),
                     filled_quantity=_int_or_none(raw.get("filledShares")),
                     average_price=_decimal_or_none(raw.get("averagePrice")),
-                    placed_at=_text_or_none(raw.get("orderTime")),
+                    placed_at=_timestamp_or_none(raw.get("orderTime")),
                     trigger_price=_decimal_or_none(raw.get("triggerPrice")),
                     # Never ``remarks``: that field carries our own client order
                     # id at Firstock, and reading it here would print our tag

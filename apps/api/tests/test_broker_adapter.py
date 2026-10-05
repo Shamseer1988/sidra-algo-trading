@@ -408,6 +408,53 @@ async def test_a_symbol_that_cannot_be_named_is_never_asked_about() -> None:
 # --- reading broker state back -------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("2026-10-05 09:37:01", "2026-10-05T09:37:01+05:30"),
+        ("05-10-2026 09:37:01", "2026-10-05T09:37:01+05:30"),
+        ("05-Oct-2026 09:37:01", "2026-10-05T09:37:01+05:30"),
+        ("2026-10-05T09:37:01", "2026-10-05T09:37:01+05:30"),
+    ],
+)
+def test_an_unzoned_broker_timestamp_is_stamped_as_exchange_time(raw: str, expected: str) -> None:
+    """Both brokers report the exchange's wall clock with nothing saying so.
+
+    Passed through as that string it reaches a browser, which parses an unzoned
+    timestamp as *its own* local time. An operator in Qatar read an order placed
+    at 09:37 IST as 14:51 -- two and a half hours in the future, on a panel
+    whose own header said it had been read at 12:29. Order times are how you
+    tell whether the trade window has closed.
+    """
+    from app.services.broker_adapter import _timestamp_or_none
+
+    assert _timestamp_or_none(raw) == expected
+
+
+def test_a_broker_that_said_which_zone_it_meant_is_believed() -> None:
+    from app.services.broker_adapter import _timestamp_or_none
+
+    assert _timestamp_or_none("2026-10-05T09:37:01Z") == "2026-10-05T09:37:01+00:00"
+    assert _timestamp_or_none("2026-10-05T09:37:01+05:30") == "2026-10-05T09:37:01+05:30"
+
+
+def test_a_timestamp_nobody_recognises_is_passed_through_not_guessed_at() -> None:
+    """An unreadable time beats no time, and inventing an offset for a shape
+    nobody parsed would be guessing about money."""
+    from app.services.broker_adapter import _timestamp_or_none
+
+    assert _timestamp_or_none("sometime tuesday") == "sometime tuesday"
+    assert _timestamp_or_none(None) is None
+    assert _timestamp_or_none("") is None
+
+
+async def test_the_order_book_carries_a_zoned_timestamp() -> None:
+    adapter = UpstoxAdapter(
+        FakeUpstox(book=[{"order_id": "1", "status": "complete", "order_timestamp": "2026-10-05 09:37:01"}])
+    )
+    assert (await adapter.normalised_orders())[0].placed_at.endswith("+05:30")
+
+
 async def test_upstox_carries_the_trigger_and_the_rejection_reason() -> None:
     """The two fields that explain a refused stop.
 
