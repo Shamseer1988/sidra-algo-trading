@@ -188,8 +188,8 @@ async def protect_after_fill(
         return ProtectionOutcome(False, "error", f"{type(exc).__name__}: {exc}")
 
 
-async def _withdraw_unfilled(adapter: BrokerAdapter, submission: LiveOrderSubmission) -> str:
-    """Cancel an entry that produced no position, and say what happened.
+async def _cancel_entry(adapter: BrokerAdapter, submission: LiveOrderSubmission) -> tuple[bool, str]:
+    """Cancel whatever is left of this entry order. Never raises.
 
     Never raises: this runs on the path whose whole job is to leave an account
     safe, and a cancellation that fails is something to report rather than
@@ -199,10 +199,13 @@ async def _withdraw_unfilled(adapter: BrokerAdapter, submission: LiveOrderSubmis
     refuses it -- and is the right way round. The alternative, leaving a live
     order resting because it *might* have filled, is how an account acquires a
     position nobody is watching.
+
+    Returns whether everything was withdrawn, and the order numbers either way,
+    so the caller can say which of the two situations it is reporting.
     """
     numbers = [str(number) for number in (submission.broker_order_numbers or []) if number]
     if not numbers:
-        return "Nothing filled; there is no position to protect."
+        return True, ""
 
     withdrawn: list[str] = []
     stuck: list[str] = []
@@ -214,11 +217,19 @@ async def _withdraw_unfilled(adapter: BrokerAdapter, submission: LiveOrderSubmis
             ok, detail = False, f"{type(exc).__name__}: {exc}"
         (withdrawn if ok else stuck).append(number if ok else f"{number} ({detail})")
 
-    if not stuck:
-        return f"Nothing filled. The resting entry was withdrawn ({', '.join(withdrawn)})."
+    return (not stuck), ("; ".join(stuck) if stuck else ", ".join(withdrawn))
+
+
+async def _withdraw_unfilled(adapter: BrokerAdapter, submission: LiveOrderSubmission) -> str:
+    """Cancel an entry that produced no position, and say what happened."""
+    if not [number for number in (submission.broker_order_numbers or []) if number]:
+        return "Nothing filled; there is no position to protect."
+    ok, detail = await _cancel_entry(adapter, submission)
+    if ok:
+        return f"Nothing filled. The resting entry was withdrawn ({detail})."
     return (
         "Nothing filled, and the entry could not be withdrawn: "
-        f"{'; '.join(stuck)}. It may still be live at the broker -- cancel it by hand before "
+        f"{detail}. It may still be live at the broker -- cancel it by hand before "
         "it fills with no stop behind it."
     )
 
@@ -264,6 +275,52 @@ async def _protect(
         # re-checked, with no stop behind it and no risk budget consulted. The
         # order book is the only thing holding it, so it is withdrawn here.
         return ProtectionOutcome(True, "flat", await _withdraw_unfilled(adapter, submission))
+
+    # A partial fill leaves the rest of the entry resting, and that half was
+    # invisible here: the stop below is sized to what filled, the remainder goes
+    # on working, and when it fills twenty minutes later the position is larger
+    # than the stop behind it. The minute sweep then sees a working stop and
+    # holds, because it checked that a stop existed rather than that it covered
+    # anything. A limit for 2 that filled 1 could run the second share naked to
+    # the square-off.
+    #
+    # Withdrawn before the stop is placed, so the exposure stops growing first.
+    # The quantity is then read again rather than assumed: the remainder can
+    # fill while the cancellation is in flight, and a stop sized to the earlier
+    # reading would leave the same gap one share smaller.
+    ordered = int(submission.quantity or 0)
+    if ordered and abs(net) < ordered:
+        withdrawn, detail = await _cancel_entry(adapter, submission)
+        logger.info(
+            "live_protection.partial_entry_withdrawn symbol=%s held=%s ordered=%s ok=%s",
+            symbol,
+            net,
+            ordered,
+            withdrawn,
+        )
+        if not withdrawn:
+            # The remainder may still fill. A stop placed now would be the right
+            # size for the wrong position, and this is the one case where saying
+            # so beats guessing -- exactly as an unreadable quantity does above.
+            return ProtectionOutcome(
+                False,
+                "partial_unwithdrawn",
+                f"{abs(net)} of {ordered} filled and the rest of the entry could not be withdrawn "
+                f"({detail}). No stop was placed, because the position may still grow. Cancel the "
+                "resting entry by hand, then protect what is held.",
+                int(abs(net)),
+            )
+        after = await _held_quantity(adapter, token, symbol)
+        if after is None:
+            return ProtectionOutcome(
+                False,
+                "unreadable",
+                f"Broker net quantity for {symbol} could not be read after withdrawing the rest of a "
+                "partial entry. No stop was placed; check the position by hand immediately.",
+            )
+        if after == 0:
+            return ProtectionOutcome(True, "flat", "The partial fill was closed before a stop was needed.")
+        net = after
 
     # The canonical product, never submission.product. That field holds what
     # the broker was asked for -- "I" at Upstox -- and describe() translates

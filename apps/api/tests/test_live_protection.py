@@ -625,3 +625,73 @@ def test_prepare_submission_writes_the_keys_the_properties_read() -> None:
     )
     assert record.instrument_token == "value-of-instrumentToken"
     assert record.canonical_product == "value-of-product"
+
+
+# --- a partially filled entry ------------------------------------------------
+#
+# Half of this was invisible. The stop below was sized to what filled and the
+# rest of the limit went on working; when it filled twenty minutes later the
+# position was larger than the stop behind it, and the minute sweep saw a
+# working stop and held -- it checked that a stop existed, not that it covered
+# anything. A limit for 2 that filled 1 could run the second share naked to the
+# square-off.
+
+
+@pytest.mark.asyncio
+async def test_a_partial_fill_has_its_remainder_withdrawn_before_a_stop_goes_down() -> None:
+    adapter = FakeAdapter([position(Decimal("-4"))])
+    outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
+
+    # The entry was for 10 and 4 filled. The rest comes off the book first, so
+    # the exposure stops growing before anything else is attempted.
+    assert adapter.cancelled == ["2610050001"]
+    assert outcome.protected is True
+    assert outcome.quantity == 4
+
+
+@pytest.mark.asyncio
+async def test_the_stop_is_sized_from_a_second_reading_not_the_first() -> None:
+    """The remainder can fill while the cancellation is in flight. A stop sized
+    to the earlier reading leaves the same gap, one share smaller."""
+    adapter = FakeAdapter([position(Decimal("-4")), position(Decimal("-7"))])
+    outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
+
+    assert outcome.quantity == 7
+    assert adapter.submitted[0].quantity == 7
+
+
+@pytest.mark.asyncio
+async def test_a_remainder_that_will_not_withdraw_gets_no_stop_at_all() -> None:
+    """A stop placed while the entry may still fill is the right size for the
+    wrong position -- the same reason an unreadable quantity gets no stop."""
+    adapter = FakeAdapter([position(Decimal("-4"))])
+    adapter.cancel_result = (False, "order already in progress")
+    outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
+
+    assert outcome.protected is False
+    assert outcome.step == "partial_unwithdrawn"
+    assert adapter.submitted == []
+    assert "by hand" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_a_full_fill_withdraws_nothing() -> None:
+    """The entry is finished. Asking the broker to cancel it would be a request
+    that can only fail."""
+    adapter = FakeAdapter([position(Decimal("-10"))])
+    outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
+
+    assert adapter.cancelled == []
+    assert outcome.protected is True
+    assert outcome.quantity == 10
+
+
+@pytest.mark.asyncio
+async def test_a_position_larger_than_the_order_is_not_treated_as_partial() -> None:
+    """Whatever else is going on, it is not an entry with something left to
+    withdraw, and cancelling on that reading would be acting on a guess."""
+    adapter = FakeAdapter([position(Decimal("-12"))])
+    outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
+
+    assert adapter.cancelled == []
+    assert outcome.quantity == 12

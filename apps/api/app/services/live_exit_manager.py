@@ -161,8 +161,8 @@ async def _signal_for(session: AsyncSession, position, start, end) -> PaperSigna
     return None
 
 
-async def _resting_stops(session: AsyncSession, signal_id, start, end) -> list[LiveOrderSubmission]:  # noqa: ANN001
-    """Every stop still resting for this trade.
+async def _recorded_stops(session: AsyncSession, signal_id, start, end) -> list[LiveOrderSubmission]:  # noqa: ANN001
+    """Every stop this system placed for this trade, as our records have it.
 
     Selected on the canonical order type rather than the stored one. The column
     holds the broker's spelling, and comparing it against SL-M found the stops
@@ -171,6 +171,9 @@ async def _resting_stops(session: AsyncSession, signal_id, start, end) -> list[L
     exit anyway. The stop is then still live beside it, both can fill, and the
     position ends up reversed rather than flat. That is the one outcome this
     module exists to prevent.
+
+    This is what we were told at placement, which is a different question from
+    what is working now. ``_working`` answers that one.
     """
     rows = await session.scalars(
         select(LiveOrderSubmission).where(
@@ -183,21 +186,113 @@ async def _resting_stops(session: AsyncSession, signal_id, start, end) -> list[L
     return [row for row in rows.all() if row.canonical_order_type == STOP_MARKET]
 
 
-async def _cancel_stops(adapter: BrokerAdapter, stops: list[LiveOrderSubmission]) -> tuple[bool, str]:
-    """Cancel every resting stop for this position, or report why not."""
+def _open_ids(book: list) -> set[str]:
+    """The broker order ids that are actually working right now."""
+    return {str(order.broker_order_id) for order in book if order.status in OPEN_STATUSES and order.broker_order_id}
+
+
+def _working(stops: list[LiveOrderSubmission], book: list | None) -> list[LiveOrderSubmission]:
+    """The stops the broker's book still shows as open.
+
+    Our own record says ACCEPTED forever: nothing writes a submission back to
+    cancelled, and nothing can, because a cancellation we sent and a fill the
+    broker took look the same from here afterwards. So a stop cancelled at the
+    square-off was still being handed back as resting a minute later, the cancel
+    was re-sent, the broker refused it -- an order that is already gone cannot be
+    cancelled -- and ``_consider`` read that refusal as "a stop may still be
+    live" and sent no exit at all. Every subsequent minute did the same. The one
+    case the square-off exists for, an exit that did not go through, was the
+    case in which it stopped trying.
+
+    An unreadable book returns everything recorded, which is the conservative
+    direction: a stop assumed live is cancelled needlessly, a stop assumed dead
+    fills beside the exit.
+    """
+    if book is None:
+        return stops
+    open_ids = _open_ids(book)
+    return [stop for stop in stops if any(str(number) in open_ids for number in (stop.broker_order_numbers or []))]
+
+
+def _ids_resting_on(book: list | None, position) -> set[str]:  # noqa: ANN001
+    """Every working order at the broker for this instrument, ours or not.
+
+    Our records are not the whole truth about what is resting against a
+    position. A stop whose send returned UNKNOWN is deliberately recorded as
+    unresolved rather than accepted -- ``live_protection`` says in as many words
+    that it "may or may not be resting" -- and is skipped by every query keyed on
+    ACCEPTED. A stop placed by hand from the broker's app is not in our tables at
+    all. Either one survives a cancellation that only looked at our own rows,
+    fills beside the market exit, and leaves the position reversed rather than
+    flat.
+
+    So before flattening, everything working on this instrument is cleared,
+    whoever placed it and whichever side it is on. A resting order on a position
+    we are about to close is either an exit that would double ours or an entry
+    that would re-open what we just closed.
+
+    Matched on the symbol, which is the only key the two books share: an order
+    row carries the broker's trading name and no instrument token, and both
+    books are the same broker's, so the two names agree. Matching our token
+    against their symbol is the mistake that made three earlier joins find
+    nothing.
+    """
+    if book is None:
+        return set()
+    return {
+        str(order.broker_order_id)
+        for order in book
+        if order.status in OPEN_STATUSES and order.broker_order_id and position.identifies(None, order.symbol)
+    }
+
+
+async def _already_finished(adapter: BrokerAdapter, number: str) -> bool:
+    """Is this order off the book already?
+
+    Asked of the book rather than of the broker's refusal text. A cancellation
+    fails for two quite different reasons -- the order is already gone, or the
+    broker would not do it -- and only one of them is a reason to hold the exit
+    back. Telling them apart by parsing an error message would be a string
+    comparison standing between a position and being closed.
+
+    An unreadable book answers False: unknown is treated as "may still be live",
+    which holds the exit rather than sending one beside a working stop.
+    """
+    try:
+        book = await adapter.normalised_orders()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("live_exit_manager.recheck_unreadable order=%s error=%s", number, exc)
+        return False
+    return str(number) not in _open_ids(book)
+
+
+async def _cancel_orders(adapter: BrokerAdapter, numbers: list[str]) -> tuple[bool, str]:
+    """Clear these orders from the book, or report which ones would not clear."""
     problems: list[str] = []
-    for stop in stops:
-        for number in stop.broker_order_numbers or []:
-            try:
-                cancelled, detail = await adapter.cancel(str(number))
-            except Exception as exc:  # noqa: BLE001
-                problems.append(f"{number}: {type(exc).__name__}: {exc}")
-                continue
-            if not cancelled:
-                problems.append(f"{number}: {detail}")
+    for number in numbers:
+        try:
+            cancelled, detail = await adapter.cancel(str(number))
+        except Exception as exc:  # noqa: BLE001
+            cancelled, detail = False, f"{type(exc).__name__}: {exc}"
+        if cancelled:
+            continue
+        if await _already_finished(adapter, str(number)):
+            logger.info("live_exit_manager.cancel_already_finished order=%s", number)
+            continue
+        problems.append(f"{number}: {detail}")
     if problems:
         return False, "; ".join(problems)
     return True, ""
+
+
+def _ids_to_clear(position, stops: list[LiveOrderSubmission], book: list | None) -> list[str]:  # noqa: ANN001
+    """Everything that must be off the book before an exit is sent."""
+    if book is None:
+        # Blind. Our own records are all there is, and all of them are treated
+        # as possibly live.
+        return sorted({str(number) for stop in stops for number in (stop.broker_order_numbers or []) if number})
+    ours = {str(number) for stop in _working(stops, book) for number in (stop.broker_order_numbers or []) if number}
+    return sorted(_ids_resting_on(book, position) | ours)
 
 
 async def _market_exit(
@@ -327,6 +422,7 @@ async def _account_deadline(session: AsyncSession) -> str | None:
 async def _hold_or_protect(
     session: AsyncSession,
     adapter: BrokerAdapter,
+    position,  # noqa: ANN001 - BrokerPositionRecord
     signal: PaperSignal,
     net: Decimal,
     symbol: str,
@@ -364,17 +460,28 @@ async def _hold_or_protect(
         # position would end up reversed rather than flat.
         return holding
 
-    ours = await _resting_stops(session, signal.id, start, end)
-    working = {str(order.broker_order_id) for order in book if order.status in OPEN_STATUSES and order.broker_order_id}
-    for stop in ours:
-        if any(str(number) in working for number in (stop.broker_order_numbers or [])):
-            return holding
+    ours = await _recorded_stops(session, signal.id, start, end)
+    working = _working(ours, book)
+    # How much of the position is actually covered, not merely whether a stop
+    # exists. The check used to stop at "any working stop" and return, so a stop
+    # for 1 behind a position of 2 -- which is what a partially filled entry
+    # leaves -- read as protected, once a minute, all day.
+    covered = sum(int(stop.quantity or 0) for stop in working)
+    if covered >= quantity:
+        return holding
 
     logger.warning(
-        "live_exit_manager.position_unprotected symbol=%s qty=%s stops_recorded=%s",
+        "live_exit_manager.position_unprotected symbol=%s qty=%s covered=%s stops_recorded=%s",
         symbol,
         quantity,
+        covered,
         len(ours),
+    )
+    shortfall = quantity - covered
+    gap = (
+        f"{quantity} of {symbol} was open with no working stop behind it"
+        if covered == 0
+        else f"{quantity} of {symbol} was open with a working stop covering only {covered}"
     )
 
     # Near the deadline a stop is the wrong instrument. It would be cancelled
@@ -386,6 +493,21 @@ async def _hold_or_protect(
     # protection means this late.
     left = minutes_until_square_off(rules, now) if (rules is not None and now is not None) else None
     if left is not None and left <= STOP_IS_POINTLESS_MINUTES:
+        # The whole position is closed here, so anything resting against it has
+        # to come off the book first. When this branch could only be reached
+        # with no stop at all there was nothing to cancel; a stop covering part
+        # of the position is a stop that would fill beside this exit and reverse
+        # what is left.
+        cleared, problem = await _cancel_orders(adapter, _ids_to_clear(position, ours, book))
+        if not cleared:
+            return PositionExit(
+                symbol,
+                False,
+                "cancel_failed",
+                f"{gap} with {left:.0f} minute(s) to square-off, and the resting orders could not be "
+                f"cleared ({problem}). No exit was sent; close this by hand.",
+                quantity=quantity,
+            )
         status, detail = await _market_exit(
             session,
             adapter,
@@ -399,16 +521,20 @@ async def _hold_or_protect(
             symbol,
             status == ACCEPTED,
             "unprotected_closing",
-            f"{quantity} of {symbol} had no working stop with {left:.0f} minute(s) to square-off, "
-            f"so it was closed rather than stopped. {detail}".strip(),
+            f"{gap}, with {left:.0f} minute(s) to square-off, so it was closed rather than stopped. {detail}".strip(),
             quantity=quantity,
         )
 
+    # A stop for the uncovered part, not a replacement for the whole position.
+    # Cancelling the stop that works and placing a bigger one would leave the
+    # position with nothing behind it for as long as that takes; two stops that
+    # together match the position close it between them whichever fills first.
+    uncovered = Decimal(shortfall) if net > 0 else Decimal(-shortfall)
     outcome = await protect_position(
         session,
         adapter,
         signal=signal,
-        net=net,
+        net=uncovered,
         product=(ours[0].canonical_product if ours else None) or INTRADAY,
         symbol=symbol,
     )
@@ -416,7 +542,7 @@ async def _hold_or_protect(
         symbol,
         outcome.protected or outcome.flattened,
         "unprotected",
-        f"{quantity} of {symbol} was open with no working stop behind it. {outcome.detail}",
+        f"{gap}. {outcome.detail}",
         quantity=quantity,
     )
 
@@ -460,20 +586,27 @@ async def _consider(
             )
         if not target_reached(long=long, close=close, target=target):
             return await _hold_or_protect(
-                session, adapter, signal, net, symbol, quantity, close, target, start, end, book, rules, now
+                session, adapter, position, signal, net, symbol, quantity, close, target, start, end, book, rules, now
             )
         reason = f"Target reached at {close}"
 
-    stops = await _resting_stops(session, signal.id, start, end)
-    cancelled, problem = await _cancel_stops(adapter, stops)
+    stops = await _recorded_stops(session, signal.id, start, end)
+    clearing = _ids_to_clear(position, stops, book)
+    if clearing:
+        # Logged because this list can hold orders we did not place -- a stop put
+        # on by hand, or one whose send returned UNKNOWN -- and an operator
+        # whose manual order disappeared deserves to find out why from
+        # somewhere other than the broker's app.
+        logger.info("live_exit_manager.clearing_book symbol=%s orders=%s", symbol, ",".join(clearing))
+    cancelled, problem = await _cancel_orders(adapter, clearing)
     if not cancelled:
-        # No second order while a stop may still be live: both could fill, and
+        # No second order while anything may still be live: both could fill, and
         # the position would end up reversed rather than flat.
         return PositionExit(
             symbol,
             False,
             "cancel_failed",
-            f"{reason}, but the resting stop could not be cancelled ({problem}). No exit was sent; close this by hand.",
+            f"{reason}, but a resting order could not be cancelled ({problem}). No exit was sent; close this by hand.",
             reason,
             quantity,
         )

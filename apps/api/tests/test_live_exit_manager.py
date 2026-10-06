@@ -87,8 +87,17 @@ def working_book():
     return [book_order()]
 
 
-def position(net, symbol: str = "RVNL"):
-    return SimpleNamespace(symbol=symbol, net_quantity=net, day_pnl=None, raw={})
+def position(net, symbol: str = "RVNL", token: str = "NSE_EQ|INE415G01027"):
+    """A real BrokerPositionRecord, for the same reason ``book_order`` is real.
+
+    The sweep now asks a position whether a book row belongs to it, and a
+    SimpleNamespace answers for ``identifies`` by raising rather than by
+    matching -- which is the shape of fake that let two earlier live failures
+    through on this path.
+    """
+    from app.services.broker_adapter import BrokerPositionRecord
+
+    return BrokerPositionRecord(symbol=symbol, net_quantity=net, day_pnl=None, instrument_token=token, raw={})
 
 
 def calendar(*, trading: bool = True, phase: str = "OPEN"):
@@ -217,7 +226,7 @@ def wiring(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(module, "live_order_adapter", adapter_for)
     monkeypatch.setattr(module, "_signal_for", find_signal)
     monkeypatch.setattr(module, "_latest_close", latest_close)
-    monkeypatch.setattr(module, "_resting_stops", resting)
+    monkeypatch.setattr(module, "_recorded_stops", resting)
     monkeypatch.setattr(module, "prepare_submission", prepare)
     monkeypatch.setattr(module, "apply_outcome", lambda *_a, **_k: None)
     return state
@@ -622,7 +631,7 @@ def test_the_position_is_matched_to_the_latest_entry_not_the_first() -> None:
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[1] / "app" / "services" / "live_exit_manager.py").read_text()
-    body = source[source.index("async def _signal_for") : source.index("async def _resting_stops")]
+    body = source[source.index("async def _signal_for") : source.index("async def _recorded_stops")]
     assert "created_at.desc()" in body
     assert "created_at.asc()" not in body
 
@@ -729,3 +738,204 @@ async def test_a_broker_without_tokens_still_matches_on_symbol() -> None:
     session = MatchSession([entry("RVNL", "NSE_EQ|INE415G01027")], wanted)
     found = await module._signal_for(session, held("RVNL", None), *WINDOW)
     assert found is wanted
+
+
+# --- the three failures the live-path review found ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_stop_already_cancelled_does_not_block_the_next_exit(wiring) -> None:
+    """The square-off has to be able to try twice.
+
+    Nothing ever writes a submission back to cancelled, so a stop cancelled at
+    15:00 was still handed back as resting at 15:01. The cancel was re-sent, the
+    broker refused it -- an order that is already gone cannot be cancelled --
+    and that refusal was read as "a stop may still be live", so no exit was
+    sent. Every minute after that did the same. The one case the square-off
+    exists for, an exit that did not go through, was the case in which it gave
+    up.
+    """
+    wiring.adapter = FakeAdapter([position(Decimal("143"))], orders=[book_order(status="CANCELLED")])
+
+    with _at_ist(15, 2):
+        wiring.signal = signal(square_off="15:00")
+        result = await sweep(wiring)
+
+    # Nothing was asked of the broker, because nothing was resting.
+    assert wiring.adapter.cancelled == []
+    assert result.exits[0].step == "exited"
+    assert len(wiring.adapter.submitted) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_refused_for_an_order_that_is_already_gone_lets_the_exit_through(wiring) -> None:
+    """A cancellation fails for two quite different reasons, and only one of
+    them is a reason to hold the exit back. The book settles it, not the
+    broker's error text."""
+
+    class VanishingAdapter(FakeAdapter):
+        """Open on the first read, gone once the cancel has been refused."""
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self._asked = False
+
+        async def normalised_orders(self):
+            return [book_order(status="OPEN" if not self._asked else "CANCELLED")]
+
+        async def cancel(self, broker_order_id: str):
+            self._asked = True
+            self.cancelled.append(broker_order_id)
+            return False, "order is not open"
+
+    wiring.adapter = VanishingAdapter([position(Decimal("143"))])
+
+    with _at_ist(15, 2):
+        wiring.signal = signal(square_off="15:00")
+        result = await sweep(wiring)
+
+    assert wiring.adapter.cancelled == ["stop-1"]
+    assert result.exits[0].step == "exited"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_the_broker_really_refuses_still_sends_no_exit(wiring) -> None:
+    """The protection the re-check must not remove: a stop that is genuinely
+    still working is a stop that would fill beside the exit."""
+    wiring.adapter = FakeAdapter([position(Decimal("143"))], cancel_ok=False)
+
+    with _at_ist(15, 2):
+        wiring.signal = signal(square_off="15:00")
+        result = await sweep(wiring)
+
+    assert result.exits[0].step == "cancel_failed"
+    assert wiring.adapter.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_an_order_we_never_recorded_is_cleared_before_the_exit(wiring) -> None:
+    """A stop placed by hand, or one whose send returned UNKNOWN, is not in our
+    tables. It survived a cancellation that looked only at our own rows, filled
+    beside the market exit, and left the position reversed rather than flat."""
+    wiring.stops = []
+    wiring.adapter = FakeAdapter(
+        [position(Decimal("143"))],
+        orders=[book_order(broker_order_id="placed-by-hand", status="OPEN")],
+    )
+
+    with _at_ist(15, 2):
+        wiring.signal = signal(square_off="15:00")
+        result = await sweep(wiring)
+
+    assert wiring.adapter.cancelled == ["placed-by-hand"]
+    assert result.exits[0].step == "exited"
+
+
+def _book_order_for(symbol: str, broker_order_id: str):
+    from app.services.broker_adapter import BrokerOrderRecord
+
+    return BrokerOrderRecord(
+        broker_order_id=broker_order_id,
+        client_order_id=None,
+        status="OPEN",
+        symbol=symbol,
+        side="SELL",
+        order_type="SL-M",
+        quantity=10,
+        filled_quantity=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_resting_order_on_another_instrument_is_left_alone(wiring) -> None:
+    """Clearing the book for this position must not reach into another one."""
+    wiring.stops = []
+    wiring.adapter = FakeAdapter(
+        [position(Decimal("143"))],
+        orders=[_book_order_for("TATASTEEL", "somebody-elses")],
+    )
+
+    with _at_ist(15, 2):
+        wiring.signal = signal(square_off="15:00")
+        await sweep(wiring)
+
+    assert wiring.adapter.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_a_stop_covering_only_part_of_the_position_is_topped_up(wiring, monkeypatch) -> None:
+    """A partially filled entry leaves a stop for what filled and a resting
+    remainder that fills later. The watchdog checked that a stop existed rather
+    than that it covered anything, so a stop for 1 behind a position of 2 read
+    as protected -- once a minute, all day."""
+    calls = []
+
+    async def spy(_session, _adapter, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(protected=True, flattened=False, detail="Stop at 2850.00 for the rest.")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.stops = [stop_row()]
+    wiring.stops[0].quantity = 100
+    wiring.signal = signal(target="2900")
+    wiring.close = Decimal("2880")
+    wiring.adapter = FakeAdapter([position(Decimal("143"))])
+
+    result = await sweep(wiring)
+
+    # The uncovered part only, and on the side the position is held.
+    assert len(calls) == 1
+    assert calls[0]["net"] == Decimal("43")
+    assert "covering only 100" in result.exits[0].detail
+
+
+@pytest.mark.asyncio
+async def test_a_short_tops_up_on_the_side_it_is_held(wiring, monkeypatch) -> None:
+    calls = []
+
+    async def spy(_session, _adapter, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(protected=True, flattened=False, detail="")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.stops = [stop_row()]
+    wiring.stops[0].quantity = 2
+    wiring.signal = signal(target="2800")
+    wiring.close = Decimal("2880")
+    wiring.adapter = FakeAdapter([position(Decimal("-5"))])
+
+    await sweep(wiring)
+    assert calls[0]["net"] == Decimal("-3")
+
+
+@pytest.mark.asyncio
+async def test_a_part_covered_position_near_the_deadline_clears_its_stop_before_closing(wiring) -> None:
+    """Closing the whole position beside a stop that still covers part of it is
+    how a flat intention becomes a reversed position."""
+    wiring.stops = [stop_row()]
+    wiring.stops[0].quantity = 100
+
+    with _at_ist(14, 58):
+        wiring.signal = signal(target="2900", square_off="15:00")
+        wiring.close = Decimal("2880")
+        wiring.adapter = FakeAdapter([position(Decimal("143"))])
+        result = await sweep(wiring)
+
+    assert wiring.adapter.cancelled == ["stop-1"]
+    assert result.exits[0].step == "unprotected_closing"
+    assert len(wiring.adapter.submitted) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_part_covered_position_near_the_deadline_sends_nothing_if_the_stop_will_not_clear(wiring) -> None:
+    wiring.stops = [stop_row()]
+    wiring.stops[0].quantity = 100
+
+    with _at_ist(14, 58):
+        wiring.signal = signal(target="2900", square_off="15:00")
+        wiring.close = Decimal("2880")
+        wiring.adapter = FakeAdapter([position(Decimal("143"))], cancel_ok=False)
+        result = await sweep(wiring)
+
+    assert result.exits[0].step == "cancel_failed"
+    assert wiring.adapter.submitted == []
