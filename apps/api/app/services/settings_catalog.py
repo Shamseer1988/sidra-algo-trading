@@ -346,6 +346,23 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
         unit=TIME_IST,
         effect=NEXT_SESSION,
     ),
+    SettingSpec(
+        key="session_square_off_time",
+        group=SESSION,
+        label="Be flat by",
+        help=(
+            "IST. The account's deadline for holding nothing. It is a ceiling over every strategy's "
+            "own square-off, not a default for it: a strategy may close earlier, none may sit past "
+            "this. Set it before the broker's own forced square-off, and before the broker stops "
+            'accepting intraday orders — Upstox refused a protective stop at 15:10 with "the '
+            'Intraday Order window for the segment is currently closed for the day". Unlike the '
+            "other exit rules this one reaches positions that are already open, because it is the "
+            "broker's deadline rather than part of a trade's plan."
+        ),
+        unit=TIME_IST,
+        is_ceiling=True,
+        effect=IMMEDIATE,
+    ),
     # --- signal quality ----------------------------------------------------
     SettingSpec(
         key="universe_max_share_price",

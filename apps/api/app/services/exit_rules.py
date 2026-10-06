@@ -235,6 +235,56 @@ def trail_to(
     return candidate
 
 
+def under_account_deadline(rules: ExitRules, deadline: str | None) -> ExitRules:
+    """The strategy's square-off, capped at the account's deadline.
+
+    A ceiling, not a default. A strategy that wants to be flat by 14:30 keeps
+    14:30; one that says 15:15, or says nothing at all, gets the account's time.
+    The earlier of the two always wins, because the account deadline exists to
+    answer a question the strategy cannot see: when the broker stops accepting
+    intraday orders, and when it starts closing positions itself at its own
+    price and its own fee.
+
+    On 6 October a position carried 15:15 from the morning's settings while the
+    operator had since moved the account to 15:00. Upstox refused a protective
+    stop at 15:10 -- "the Intraday Order window for the segment is currently
+    closed for the day" -- and the position was closed by hand. The strategy's
+    own figure had no way of knowing any of that, and should not have had to.
+
+    A deadline that cannot be parsed is ignored rather than guessed at: an
+    unreadable setting must not become an 00:00 square-off that closes every
+    position the instant the market opens.
+    """
+    if not deadline:
+        return rules
+    try:
+        hour, minute = (int(part) for part in str(deadline).split(":"))
+        capped = time(hour, minute)
+    except (ArithmeticError, TypeError, ValueError):
+        return rules
+
+    own = rules.square_off
+    if own is not None and own <= capped:
+        return rules
+    return rules.model_copy(update={"square_off_time": f"{capped.hour:02d}:{capped.minute:02d}"})
+
+
+def minutes_until_square_off(rules: ExitRules, now: datetime) -> float | None:
+    """How long a position has left, or None when nothing closes it on the clock.
+
+    Negative once the deadline has passed. Used to decide whether placing a
+    protective stop is still worth doing: a stop with three minutes to live
+    protects almost nothing, and after the broker's intraday window shuts it
+    cannot be placed at all.
+    """
+    square_off = rules.square_off
+    if square_off is None:
+        return None
+    local = now.astimezone(MARKET_TIMEZONE)
+    deadline = local.replace(hour=square_off.hour, minute=square_off.minute, second=0, microsecond=0)
+    return (deadline - local).total_seconds() / 60
+
+
 def time_exit_due(
     *,
     opened_at: datetime | None,

@@ -45,7 +45,7 @@ from app.db.models import LiveOrderSubmission, MarketCandle, PaperSignal
 from app.db.session import SessionLocal
 from app.services.broker_adapter import BUY, INTRADAY, OPEN_STATUSES, SELL, BrokerAdapter
 from app.services.exit_rules import from_controls as exit_rules_from
-from app.services.exit_rules import time_exit_due
+from app.services.exit_rules import minutes_until_square_off, time_exit_due, under_account_deadline
 from app.services.live_execution_gateway import BrokerNotSelectedError, live_order_adapter
 from app.services.live_orders import (
     ACCEPTED,
@@ -62,6 +62,13 @@ from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
 from app.services.trading_calendar import MARKET_TIMEZONE, MarketPhase, TradingCalendar
 
 logger = logging.getLogger(__name__)
+
+# How close to the square-off a protective stop stops being worth placing. A
+# stop with less than this to live would be cancelled by the square-off before
+# it could do anything, and the broker refuses new intraday stops near the
+# close regardless. Five minutes, because the sweep runs every minute and that
+# leaves several attempts at the close that actually matters.
+STOP_IS_POINTLESS_MINUTES = 5.0
 
 MARKET = "MARKET"
 STOP_MARKET = "SL-M"
@@ -277,6 +284,11 @@ async def _sweep(settings: Settings, calendar: TradingCalendar) -> ExitSweepOutc
             # position that already has one.
             logger.warning("live_exit_manager.order_book_unreadable error=%s", exc)
             book = None
+        # Read live, not from any signal's snapshot. This is the one exit rule
+        # that must reach a position already open: it is the broker's deadline,
+        # not part of a trade's plan, and an operator who moves it because the
+        # broker moved it needs every open position to hear about it.
+        deadline = await _account_deadline(session)
         start, end = session_bounds_utc(now.astimezone(MARKET_TIMEZONE).date())
         exits: list[PositionExit] = []
 
@@ -287,9 +299,29 @@ async def _sweep(settings: Settings, calendar: TradingCalendar) -> ExitSweepOutc
                 continue
             if net == 0:
                 continue
-            exits.append(await _consider(session, adapter, record, net, now, start, end, book))
+            exits.append(await _consider(session, adapter, record, net, now, start, end, book, deadline))
 
     return ExitSweepOutcome(True, "swept", f"{len(exits)} position(s) considered.", exits)
+
+
+async def _account_deadline(session: AsyncSession) -> str | None:
+    """The account's "be flat by" time, or None if it cannot be read.
+
+    None rather than a raise, and None rather than a guess: a sweep that
+    refused to run because a settings row would not parse is a sweep that
+    closes nothing all afternoon, and a made-up deadline is a square-off at a
+    time nobody chose.
+    """
+    try:
+        from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
+        from app.db.models import ApplicationSetting
+
+        row = await session.get(ApplicationSetting, TRADING_KEY)
+        controls = TradingControls.model_validate(row.value if row else DEFAULT_TRADING_CONTROLS)
+        return controls.session_square_off_time
+    except Exception:  # noqa: BLE001
+        logger.warning("live_exit_manager.account_deadline_unreadable")
+        return None
 
 
 async def _hold_or_protect(
@@ -304,6 +336,8 @@ async def _hold_or_protect(
     start,  # noqa: ANN001
     end,  # noqa: ANN001
     book: list | None,
+    rules=None,  # noqa: ANN001 - ExitRules; already resolved against the account deadline
+    now: datetime | None = None,
 ) -> PositionExit:
     """Holding is only safe if something is behind the position.
 
@@ -342,6 +376,34 @@ async def _hold_or_protect(
         quantity,
         len(ours),
     )
+
+    # Near the deadline a stop is the wrong instrument. It would be cancelled
+    # within minutes by the square-off that is about to run, it protects almost
+    # nothing in the meantime, and the broker stops accepting new intraday
+    # stops before the close in any case -- on 6 October Upstox refused one at
+    # 15:10 with "the Intraday Order window for the segment is currently closed
+    # for the day", and the watchdog had nothing else to try. Closing is what
+    # protection means this late.
+    left = minutes_until_square_off(rules, now) if (rules is not None and now is not None) else None
+    if left is not None and left <= STOP_IS_POINTLESS_MINUTES:
+        status, detail = await _market_exit(
+            session,
+            adapter,
+            instrument_token=signal.instrument_token,
+            side=SELL if net > 0 else BUY,
+            quantity=quantity,
+            product=(ours[0].canonical_product if ours else None) or INTRADAY,
+            paper_signal_id=signal.id,
+        )
+        return PositionExit(
+            symbol,
+            status == ACCEPTED,
+            "unprotected_closing",
+            f"{quantity} of {symbol} had no working stop with {left:.0f} minute(s) to square-off, "
+            f"so it was closed rather than stopped. {detail}".strip(),
+            quantity=quantity,
+        )
+
     outcome = await protect_position(
         session,
         adapter,
@@ -368,6 +430,7 @@ async def _consider(
     start,  # noqa: ANN001
     end,  # noqa: ANN001
     book: list | None = None,
+    deadline: str | None = None,
 ) -> PositionExit:
     quantity = int(abs(net))
     long = net > 0
@@ -383,7 +446,9 @@ async def _consider(
             quantity=quantity,
         )
 
-    rules = exit_rules_from((signal.strategy_snapshot or {}).get("effective_controls") or {})
+    rules = under_account_deadline(
+        exit_rules_from((signal.strategy_snapshot or {}).get("effective_controls") or {}), deadline
+    )
     reason = time_exit_due(opened_at=signal.created_at, now=now, rules=rules)
 
     if reason is None:
@@ -395,7 +460,7 @@ async def _consider(
             )
         if not target_reached(long=long, close=close, target=target):
             return await _hold_or_protect(
-                session, adapter, signal, net, symbol, quantity, close, target, start, end, book
+                session, adapter, signal, net, symbol, quantity, close, target, start, end, book, rules, now
             )
         reason = f"Target reached at {close}"
 

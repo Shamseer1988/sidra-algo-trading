@@ -159,6 +159,21 @@ async def main() -> int:
             if cap <= 0:
                 line(WARN, "No share-price cap, so a very expensive share can still take a trade one share wide.")
 
+        print(f"  session_square_off_time    : {controls.session_square_off_time}")
+        deadline = controls.session_square_off_time
+        if deadline >= "15:15":
+            problems += 1
+            line(
+                BAD,
+                f"Be flat by {deadline} leaves no margin: the broker squares off at its own time and "
+                "stops accepting intraday orders before the close. On 6 October Upstox refused a "
+                "protective stop at 15:10.",
+            )
+        elif deadline >= "15:05":
+            line(WARN, f"Be flat by {deadline} is tight; the sweep runs every minute, so leave it room to retry.")
+        else:
+            line(OK, f"Be flat by {deadline}, which caps every strategy's own square-off.")
+
         heading("4. Execution")
         print(f"  live_broker                : {controls.live_broker}")
         print(f"  execution_approval_mode    : {controls.execution_approval_mode}")
@@ -202,10 +217,17 @@ async def main() -> int:
                 continue
             effective = configuration.effective_controls(base)
             name = configuration.name[:30]
-            square_off = configuration.exit_rules.square_off_time or "NONE"
-            flag = OK if configuration.exit_rules.square_off_time else BAD
-            if not configuration.exit_rules.square_off_time:
+            own = configuration.exit_rules.square_off_time
+            square_off = own or "NONE"
+            flag = OK if own else BAD
+            if not own:
                 problems += 1
+            elif deadline and own > deadline:
+                # Not a problem any more -- the account deadline caps it at run
+                # time -- but worth saying, because the screen shows a number
+                # that is not the one that will act.
+                square_off = f"{own} -> capped at {deadline}"
+                flag = WARN
             line(flag, f"{name:30} enabled={configuration.enabled}  square-off={square_off}")
             for label, key in (
                 ("rr", "minimum_rr"),

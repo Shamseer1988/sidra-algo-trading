@@ -396,6 +396,31 @@ properly sized position is worth ₹76 on a single share.
 when it allows a trade only one or two shares wide. The band takes effect at the
 next universe refresh, not on the shares already being watched today.
 
+### Being flat by the end of the session
+
+**Be flat by**, in Settings → Trading controls, is the account's deadline for
+holding nothing. It is a **ceiling** over each strategy's own square-off, not a
+default for it: a strategy may close earlier, none may sit past it.
+
+Set it before two separate broker deadlines. The broker squares off intraday
+positions itself, at its own time and price and usually for a fee. And it stops
+accepting new intraday orders *before* that — on 6 October Upstox refused a
+protective stop at 15:10 with "the Intraday Order window for the segment is
+currently closed for the day". **15:00** leaves fifteen minutes of margin, and
+since the sweep runs every minute that is roughly fifteen attempts rather than
+one.
+
+Unlike every other exit rule, this one is read live and reaches positions that
+are already open. The stop and the target are the trade's thesis and stay frozen
+at entry — that is what makes a result mean something. The deadline is not a
+thesis; it is when the broker stops taking orders, and an operator who moves it
+because the broker moved it needs every open position to hear about it.
+
+Near that deadline, a position found with no working stop is **closed rather
+than re-stopped**. A stop with three minutes to live protects almost nothing,
+would be cancelled by the square-off about to run, and is refused by the broker
+near the close in any case.
+
 The **Broker** source on Orders & Positions is read-only on purpose: it will show
 you an order placed by hand on the broker's app, and mark it **Manual**, but it
 cannot withdraw it. That is the order that blocks reconciliation, and withdrawing

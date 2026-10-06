@@ -11,10 +11,12 @@ asserting that an exit still works while the system is disarmed, because a
 disarmed system with an open position is exactly the state this exists for.
 """
 
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -112,6 +114,29 @@ def signal(*, target: str = "2850.00", square_off: str | None = None, minutes_ag
     )
 
 
+@contextmanager
+def _at_ist(hour: int, minute: int):
+    """Run the sweep as if the exchange clock read this.
+
+    The square-off is an exchange-time decision, so a test that used the real
+    clock would pass or fail depending on what time of day it ran -- and the
+    one failure it is guarding against happened at ten past three.
+    """
+    real = module.datetime
+
+    class Frozen(real):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            moment = real(2026, 10, 6, hour, minute, tzinfo=ZoneInfo("Asia/Kolkata"))
+            return moment.astimezone(tz) if tz is not None else moment
+
+    module.datetime = Frozen
+    try:
+        yield
+    finally:
+        module.datetime = real
+
+
 def stop_row(product: str = "INTRADAY", numbers=("stop-1",)):
     """The real mapped class, for the reason the live failure gives.
 
@@ -162,7 +187,7 @@ class FakeSession:
 
 @pytest.fixture
 def wiring(monkeypatch: pytest.MonkeyPatch):
-    state = SimpleNamespace(session=None, signal=signal(), close=Decimal("2900"), stops=[stop_row()])
+    state = SimpleNamespace(session=None, signal=signal(), close=Decimal("2900"), stops=[stop_row()], deadline=None)
 
     def session_factory():
         state.session = FakeSession(sig=state.signal, close=state.close, stops=state.stops)
@@ -185,6 +210,10 @@ def wiring(monkeypatch: pytest.MonkeyPatch):
     async def prepare(_session, _request, _description, **kwargs):
         return SimpleNamespace(client_order_id=kwargs["client_order_id"], status="PREPARED")
 
+    async def deadline(_session):
+        return state.deadline
+
+    monkeypatch.setattr(module, "_account_deadline", deadline)
     monkeypatch.setattr(module, "live_order_adapter", adapter_for)
     monkeypatch.setattr(module, "_signal_for", find_signal)
     monkeypatch.setattr(module, "_latest_close", latest_close)
@@ -338,6 +367,91 @@ async def test_a_position_at_its_target_exits_rather_than_being_re_stopped(wirin
     assert calls == []
     assert result.exits[0].acted is True
     assert wiring.adapter.submitted[0].order_type == "MARKET"
+
+
+@pytest.mark.asyncio
+async def test_the_account_deadline_closes_a_position_the_strategy_would_have_held(wiring) -> None:
+    """The regression, end to end.
+
+    A position carried 15:15 from the morning's settings while the operator had
+    since moved the account to 15:00. Nothing fired at 15:00, Upstox refused a
+    protective stop at 15:10, and the position was closed by hand.
+    """
+    wiring.signal = signal(target="2900", square_off="15:15")
+    wiring.close = Decimal("2880")  # nowhere near the target
+    wiring.deadline = "15:00"
+    wiring.adapter = FakeAdapter([position(Decimal("50"))])
+
+    with _at_ist(15, 5):
+        result = await sweep(wiring)
+
+    assert result.exits[0].acted is True
+    assert "15:00" in result.exits[0].reason
+    assert wiring.adapter.submitted[0].order_type == "MARKET"
+
+
+@pytest.mark.asyncio
+async def test_a_strategy_that_closes_earlier_keeps_its_own_time(wiring) -> None:
+    """A ceiling, not an override. 14:30 is a strategy's decision and stands."""
+    wiring.signal = signal(target="2900", square_off="14:30")
+    wiring.close = Decimal("2880")
+    wiring.deadline = "15:00"
+    wiring.adapter = FakeAdapter([position(Decimal("50"))])
+
+    with _at_ist(14, 45):
+        result = await sweep(wiring)
+
+    assert result.exits[0].acted is True
+    assert "14:30" in result.exits[0].reason
+
+
+@pytest.mark.asyncio
+async def test_an_unprotected_position_near_the_deadline_is_closed_not_stopped(wiring, monkeypatch) -> None:
+    """A stop with three minutes to live protects almost nothing, would be
+    cancelled by the square-off about to run, and is refused by the broker near
+    the close anyway -- "the Intraday Order window for the segment is currently
+    closed for the day"."""
+    calls = []
+
+    async def spy(*_a, **_k):
+        calls.append(1)
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.signal = signal(target="2900", square_off="15:00")
+    wiring.close = Decimal("2880")
+    wiring.deadline = "15:00"
+    wiring.adapter = FakeAdapter([position(Decimal("50"))], orders=[])
+
+    with _at_ist(14, 57):
+        result = await sweep(wiring)
+
+    assert calls == []
+    assert result.exits[0].step == "unprotected_closing"
+    assert wiring.adapter.submitted[0].order_type == "MARKET"
+
+
+@pytest.mark.asyncio
+async def test_an_unprotected_position_early_in_the_day_still_gets_a_stop(wiring, monkeypatch) -> None:
+    """The watchdog must not become a hair trigger that closes every position
+    that briefly loses its stop at eleven in the morning."""
+    calls = []
+
+    async def spy(*_a, **_k):
+        calls.append(1)
+        return SimpleNamespace(protected=True, flattened=False, detail="Stop at 2850.00.")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.signal = signal(target="2900", square_off="15:00")
+    wiring.close = Decimal("2880")
+    wiring.deadline = "15:00"
+    wiring.adapter = FakeAdapter([position(Decimal("50"))], orders=[])
+
+    with _at_ist(11, 0):
+        result = await sweep(wiring)
+
+    assert len(calls) == 1
+    assert result.exits[0].step == "unprotected"
+    assert wiring.adapter.submitted == []
 
 
 @pytest.mark.asyncio

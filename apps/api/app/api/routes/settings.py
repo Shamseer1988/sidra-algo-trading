@@ -89,6 +89,7 @@ DEFAULT_TRADING_CONTROLS = {
     "min_stop_distance_percent": 0.35,
     "trade_start_time": "09:24",
     "trade_cutoff_time": "14:45",
+    "session_square_off_time": "15:00",
     "intraday_leverage_enabled": True,
     "intraday_leverage_multiplier": 5.0,
     "execution_approval_mode": "DISABLED",
@@ -125,6 +126,19 @@ class TradingControls(BaseModel):
     min_stop_distance_percent: float = Field(default=0.35, ge=0, le=5)
     trade_start_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     trade_cutoff_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    # The account's own deadline for being flat, and a ceiling over every
+    # strategy's square-off rather than a default for it. A strategy may close
+    # earlier; none may sit past this.
+    #
+    # It is read live rather than from the signal's snapshot, which is the one
+    # place this system deliberately breaks "a trade runs on the rules it was
+    # taken under". Those rules are the trade's thesis -- where the stop goes,
+    # where the target is -- and freezing them is what makes a result mean
+    # something. This is not a thesis. It is when the broker stops accepting
+    # intraday orders, and an operator who moves it because the broker moved it
+    # needs every open position to hear about it, not only the ones taken
+    # afterwards.
+    session_square_off_time: str = Field(default="15:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     intraday_leverage_enabled: bool = Field(default=True)
     intraday_leverage_multiplier: float = Field(default=5.0, ge=1.0, le=10.0)
     # How a live order reaches the broker, once a live path exists at all.

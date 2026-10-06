@@ -404,3 +404,86 @@ def test_every_rule_has_a_label_for_the_screen():
     assert set(exit_rules.STOP_RULE_LABELS) == {exit_rules.WIDEST_OF}
     assert set(exit_rules.TARGET_RULE_LABELS) == {RR_MULTIPLE, ATR_MULTIPLE}
     assert set(exit_rules.TRAILING_LABELS) == {NO_TRAIL, BREAKEVEN_AT_R, ATR_TRAIL}
+
+
+# --- the account's deadline is a ceiling, not a default ----------------------
+#
+# On 6 October a position carried 15:15 from the morning's settings while the
+# operator had since moved the account to 15:00. Upstox refused a protective
+# stop at 15:10 -- "the Intraday Order window for the segment is currently
+# closed for the day" -- and the position was closed by hand. The strategy's own
+# figure had no way of knowing when the broker stops accepting orders.
+
+
+def test_a_strategy_may_close_earlier_than_the_account():
+    from app.services.exit_rules import ExitRules, under_account_deadline
+
+    rules = under_account_deadline(ExitRules(square_off_time="14:30"), "15:00")
+    assert rules.square_off_time == "14:30"
+
+
+def test_a_strategy_may_never_sit_later_than_the_account():
+    """The regression. 15:15 was the figure that outlived the setting change."""
+    from app.services.exit_rules import ExitRules, under_account_deadline
+
+    rules = under_account_deadline(ExitRules(square_off_time="15:15"), "15:00")
+    assert rules.square_off_time == "15:00"
+
+
+def test_a_strategy_with_no_opinion_takes_the_account_deadline():
+    """Nothing closing a position at the end of an intraday session is the one
+    default that does not match how the account actually behaves."""
+    from app.services.exit_rules import ExitRules, under_account_deadline
+
+    assert under_account_deadline(ExitRules(), "15:00").square_off_time == "15:00"
+
+
+def test_no_deadline_leaves_the_strategy_alone():
+    from app.services.exit_rules import ExitRules, under_account_deadline
+
+    assert under_account_deadline(ExitRules(square_off_time="15:15"), None).square_off_time == "15:15"
+    assert under_account_deadline(ExitRules(square_off_time="15:15"), "").square_off_time == "15:15"
+
+
+def test_an_unreadable_deadline_is_ignored_rather_than_guessed_at():
+    """A setting that will not parse must not become an 00:00 square-off that
+    closes every position the instant the market opens."""
+    from app.services.exit_rules import ExitRules, under_account_deadline
+
+    for bad in ("nonsense", "25:00", "15", None):
+        assert under_account_deadline(ExitRules(square_off_time="15:15"), bad).square_off_time == "15:15"
+
+
+# --- how long a position has left --------------------------------------------
+
+
+def test_minutes_until_square_off_counts_down_and_goes_negative():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.services.exit_rules import ExitRules, minutes_until_square_off
+
+    ist = ZoneInfo("Asia/Kolkata")
+    rules = ExitRules(square_off_time="15:00")
+    assert minutes_until_square_off(rules, datetime(2026, 10, 6, 14, 57, tzinfo=ist)) == 3
+    assert minutes_until_square_off(rules, datetime(2026, 10, 6, 15, 10, tzinfo=ist)) == -10
+
+
+def test_minutes_until_square_off_is_none_when_nothing_closes_on_the_clock():
+    from datetime import UTC, datetime
+
+    from app.services.exit_rules import ExitRules, minutes_until_square_off
+
+    assert minutes_until_square_off(ExitRules(), datetime(2026, 10, 6, 9, 30, tzinfo=UTC)) is None
+
+
+def test_the_countdown_is_measured_in_exchange_time_not_the_servers():
+    """A container in UTC must not think the square-off is five and a half
+    hours away from when it is."""
+    from datetime import UTC, datetime
+
+    from app.services.exit_rules import ExitRules, minutes_until_square_off
+
+    # 09:27 UTC is 14:57 IST, three minutes from a 15:00 square-off.
+    left = minutes_until_square_off(ExitRules(square_off_time="15:00"), datetime(2026, 10, 6, 9, 27, tzinfo=UTC))
+    assert left == 3
