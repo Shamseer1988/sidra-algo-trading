@@ -4,6 +4,8 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api, type HistoryDay, type HistoryTrade } from "../../components/api";
+import { BrokerSelect } from "../orders/source-controls";
+import type { OrderSource } from "../orders/use-order-source";
 import { pnlTone, rupees, toNumber } from "../history/money";
 
 /**
@@ -45,7 +47,19 @@ function leadingBlanks(year: number, month: number): number {
   return (new Date(year, month, 1).getDay() + 6) % 7;
 }
 
-export function PnlCalendar({ onMessage }: { onMessage: (message: string) => void }) {
+export function PnlCalendar({
+  onMessage,
+  source,
+}: {
+  onMessage: (message: string) => void;
+  source: OrderSource;
+}) {
+  // "Broker" means the trades that reached a broker, not a second ledger. A
+  // live trade and its paper journal row are the same trade, so summing both
+  // would double a day -- and showing them together, which is what this screen
+  // did, gives an operator a figure their broker account never saw.
+  const mode = source.source === "broker" ? ("LIVE" as const) : ("PAPER" as const);
+  const broker = source.source === "broker" ? (source.broker ?? undefined) : undefined;
   const today = useMemo(() => new Date(), []);
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth());
@@ -59,13 +73,20 @@ export function PnlCalendar({ onMessage }: { onMessage: (message: string) => voi
     setLoading(true);
     try {
       const last = new Date(year, month + 1, 0).getDate();
-      setDays(await api.historyDaily({ from_date: key(year, month, 1), to_date: key(year, month, last) }));
+      setDays(
+        await api.historyDaily({
+          from_date: key(year, month, 1),
+          to_date: key(year, month, last),
+          mode,
+          broker,
+        }),
+      );
     } catch (error) {
       onMessage(error instanceof Error ? error.message : "Could not load the month");
     } finally {
       setLoading(false);
     }
-  }, [year, month, onMessage]);
+  }, [year, month, onMessage, mode, broker]);
 
   useEffect(() => {
     void load();
@@ -81,7 +102,7 @@ export function PnlCalendar({ onMessage }: { onMessage: (message: string) => voi
     let current = true;
     setTradesLoading(true);
     void api
-      .historyTrades({ from_date: open, to_date: open })
+      .historyTrades({ from_date: open, to_date: open, mode, broker })
       .then((rows) => {
         if (current) setTrades(rows);
       })
@@ -94,7 +115,7 @@ export function PnlCalendar({ onMessage }: { onMessage: (message: string) => voi
     return () => {
       current = false;
     };
-  }, [open]);
+  }, [open, mode, broker]);
 
   const byDate = useMemo(() => new Map(days.map((day) => [day.session_date, day])), [days]);
 
@@ -126,11 +147,15 @@ export function PnlCalendar({ onMessage }: { onMessage: (message: string) => voi
           <p className="eyebrow">Month at a glance</p>
           <h2 className="page-title">P&amp;L calendar</h2>
           <p className="page-copy">
-            Net of charges, from this system&apos;s own records. Charges are estimated from the published rate card
-            unless a broker figure has been fetched for that day — where one has, the day shows both.
+            {source.source === "broker"
+              ? "Only the trades that reached a broker. Charges are this system's estimate from the published rate card until the broker's own figure is fetched after settlement — where one has been, the day shows both."
+              : "Simulated trades only. These never reached a broker and no money moved; the figures are the paper ledger's."}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {source.source === "broker" && (
+            <BrokerSelect broker={source.broker} choices={source.choices} setBroker={source.setBroker} />
+          )}
           <button className="secondary-button" onClick={() => step(-1)} aria-label="Previous month">
             <ChevronLeft className="h-4 w-4" />
           </button>

@@ -82,6 +82,7 @@ class TradeResponse(BaseModel):
     # guaranteed to lose, so the screen is told which it is holding.
     price_source: str
     slippage: Decimal | None
+    broker: str | None
 
 
 class DayResponse(BaseModel):
@@ -213,6 +214,7 @@ def _trade(record: trade_history.TradeRecord) -> TradeResponse:
         reconciliation_note=record.reconciliation_note,
         price_source=record.price_source,
         slippage=record.slippage,
+        broker=record.broker,
     )
 
 
@@ -249,9 +251,11 @@ async def overview(
     _: CurrentUser,
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
+    mode: str | None = Query(default=None, description="PAPER, LIVE, or omitted for both."),
+    broker: str | None = Query(default=None, description="Narrow to one broker's account."),
 ) -> OverviewResponse:
     begin, end = _range(from_date, to_date)
-    records = await trade_history.load_trades(session, begin, end)
+    records = await trade_history.load_trades(session, begin, end, execution_mode=mode, broker=broker)
     days = await trade_history.summarise_days(session, records, begin, end)
     totals = trade_history.summarise_range(records, days, begin, end)
     return OverviewResponse(
@@ -289,9 +293,11 @@ async def daily(
     _: CurrentUser,
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
+    mode: str | None = Query(default=None, description="PAPER, LIVE, or omitted for both."),
+    broker: str | None = Query(default=None, description="Narrow to one broker's account."),
 ) -> list[DayResponse]:
     begin, end = _range(from_date, to_date)
-    records = await trade_history.load_trades(session, begin, end)
+    records = await trade_history.load_trades(session, begin, end, execution_mode=mode, broker=broker)
     return [_day(summary) for summary in await trade_history.summarise_days(session, records, begin, end)]
 
 
@@ -304,10 +310,18 @@ async def trades(
     session_date: date | None = Query(default=None),
     instrument_token: str | None = Query(default=None),
     strategy_version: str | None = Query(default=None),
+    mode: str | None = Query(default=None, description="PAPER, LIVE, or omitted for both."),
+    broker: str | None = Query(default=None, description="Narrow to one broker's account."),
 ) -> list[TradeResponse]:
     begin, end = (session_date, session_date) if session_date else _range(from_date, to_date)
     records = await trade_history.load_trades(
-        session, begin, end, instrument_token=instrument_token, strategy_version=strategy_version
+        session,
+        begin,
+        end,
+        instrument_token=instrument_token,
+        strategy_version=strategy_version,
+        execution_mode=mode,
+        broker=broker,
     )
     return [_trade(record) for record in records]
 

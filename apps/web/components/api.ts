@@ -124,6 +124,7 @@ export type HistoryTrade = {
   reconciliation_note: string;
   price_source: "BROKER" | "MODEL";
   slippage: string | null;
+  broker: string | null;
 };
 export type HistoryDay = {
   session_date: string;
@@ -220,7 +221,7 @@ export type BrokerFetchResult = {
   fetched_at: string;
   note: string;
 };
-export type HistoryRange = { from_date?: string; to_date?: string };
+export type HistoryRange = { from_date?: string; to_date?: string; mode?: "PAPER" | "LIVE"; broker?: string };
 export type RiskPreset = { key: string; label: string; description: string; controls: Record<string, number>; effective: EffectiveLimits };
 export type SettingRevision = { created_at: string; changed_keys: string[]; risk_increased: string[]; changed_by_user_id: string | null };
 export type TradingControls = { account_capital: number; risk_per_trade_percent: number; maximum_daily_risk_percent: number; maximum_open_positions: number; maximum_open_exposure_percent: number; maximum_daily_trades: number; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number; stop_atr_multiple: number; min_stop_distance_percent: number; trade_start_time: string; trade_cutoff_time: string; intraday_leverage_enabled?: boolean; intraday_leverage_multiplier?: number; execution_approval_mode?: ExecutionApprovalMode; live_broker?: LiveBroker; live_entry_order_type?: "MARKET" | "LIMIT"; entry_slippage_cap_percent?: number; universe_max_share_price?: number; universe_min_share_price?: number; session_square_off_time?: string };

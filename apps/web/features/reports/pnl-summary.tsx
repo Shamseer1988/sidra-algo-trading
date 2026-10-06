@@ -4,6 +4,8 @@ import { RefreshCw } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 
 import { api, type BrokerSnapshot, type HistoryOverview } from "../../components/api";
+import { BrokerSelect } from "../orders/source-controls";
+import type { OrderSource } from "../orders/use-order-source";
 import { formatIstTimestamp } from "../../lib/formatting";
 import { Money, percent, ratio } from "../history/money";
 
@@ -38,7 +40,15 @@ function tone(value: number | null): string {
   return value > 0 ? "text-emerald-400" : "text-rose-400";
 }
 
-export function PnlSummary({ onMessage }: { onMessage: (message: string) => void }) {
+export function PnlSummary({
+  onMessage,
+  source,
+}: {
+  onMessage: (message: string) => void;
+  source: OrderSource;
+}) {
+  const mode = source.source === "broker" ? ("LIVE" as const) : ("PAPER" as const);
+  const broker = source.source === "broker" ? (source.broker ?? undefined) : undefined;
   const [snapshot, setSnapshot] = useState<BrokerSnapshot | null>(null);
   const [overview, setOverview] = useState<HistoryOverview | null>(null);
   const [days, setDays] = useState(30);
@@ -52,7 +62,7 @@ export function PnlSummary({ onMessage }: { onMessage: (message: string) => void
       from.setDate(from.getDate() - (days - 1));
       try {
         const [nextOverview, nextSnapshot] = await Promise.all([
-          api.historyOverview({ from_date: isoDate(from), to_date: isoDate(to) }),
+          api.historyOverview({ from_date: isoDate(from), to_date: isoDate(to), mode, broker }),
           api.brokerSnapshot({ force }).catch(() => null),
         ]);
         setOverview(nextOverview);
@@ -63,7 +73,7 @@ export function PnlSummary({ onMessage }: { onMessage: (message: string) => void
         setLoading(false);
       }
     },
-    [days, onMessage],
+    [days, onMessage, mode, broker],
   );
 
   useEffect(() => {
@@ -77,11 +87,18 @@ export function PnlSummary({ onMessage }: { onMessage: (message: string) => void
           <p className="eyebrow">Realised and unrealised</p>
           <h2 className="page-title">P&amp;L</h2>
           <p className="page-copy">
-            What the broker says about today, and what our own records say about the period. Gross, charges and net are
-            three figures, not one — a day that made ₹900 before costs and ₹340 after is a ₹340 day.
+            What the broker says about today, and what the period came to.{" "}
+            {source.source === "broker"
+              ? "The period below counts only trades that reached a broker."
+              : "The period below counts only simulated trades, which never reached one."}{" "}
+            Gross, charges and net are three figures, not one — a day that made ₹900 before costs and ₹340 after is a
+            ₹340 day.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {source.source === "broker" && (
+            <BrokerSelect broker={source.broker} choices={source.choices} setBroker={source.setBroker} />
+          )}
           <select
             className="field-input py-2 text-sm"
             value={days}

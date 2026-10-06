@@ -32,7 +32,7 @@ async def reset():
 async def test_the_overview_reports_the_range_it_was_asked_for():
     await a_trade(gross="500", charges="40")
     async with SessionLocal() as session:
-        result = await routes.overview(session, OPERATOR, SESSION_DATE, SESSION_DATE)
+        result = await routes.overview(session, OPERATOR, SESSION_DATE, SESSION_DATE, None, None)
     assert result.from_date == SESSION_DATE.isoformat()
     assert result.net_pnl == 460
     assert result.trades == 1
@@ -40,14 +40,14 @@ async def test_the_overview_reports_the_range_it_was_asked_for():
 
 async def test_the_overview_ships_the_status_labels_so_the_ui_does_not_invent_them():
     async with SessionLocal() as session:
-        result = await routes.overview(session, OPERATOR, SESSION_DATE, SESSION_DATE)
+        result = await routes.overview(session, OPERATOR, SESSION_DATE, SESSION_DATE, None, None)
     assert result.reconciliation_labels == trade_history.STATUS_LABELS
 
 
 async def test_the_daily_list_carries_a_label_beside_the_status():
     await a_trade(live=True)
     async with SessionLocal() as session:
-        rows = await routes.daily(session, OPERATOR, SESSION_DATE, SESSION_DATE)
+        rows = await routes.daily(session, OPERATOR, SESSION_DATE, SESSION_DATE, None, None)
     assert rows[0].reconciliation == trade_history.BROKER_DATA_PENDING
     assert rows[0].reconciliation_label == "Broker data pending"
 
@@ -55,7 +55,7 @@ async def test_the_daily_list_carries_a_label_beside_the_status():
 async def test_the_trade_list_can_be_pinned_to_one_session():
     await a_trade()
     async with SessionLocal() as session:
-        rows = await routes.trades(session, OPERATOR, None, None, SESSION_DATE, None, None)
+        rows = await routes.trades(session, OPERATOR, None, None, SESSION_DATE, None, None, None, None)
     assert len(rows) == 1
     assert rows[0].session_date == SESSION_DATE.isoformat()
 
@@ -64,7 +64,7 @@ async def test_the_trade_list_filters_by_instrument():
     await a_trade(instrument="NSE_EQ|INE002A01018")
     await a_trade(instrument="NSE_EQ|INE467B01029")
     async with SessionLocal() as session:
-        rows = await routes.trades(session, OPERATOR, None, None, SESSION_DATE, "NSE_EQ|INE467B01029", None)
+        rows = await routes.trades(session, OPERATOR, None, None, SESSION_DATE, "NSE_EQ|INE467B01029", None, None, None)
     assert [row.instrument_token for row in rows] == ["NSE_EQ|INE467B01029"]
 
 
@@ -72,7 +72,7 @@ async def test_the_trade_list_filters_by_strategy():
     await a_trade(strategy="orb-retest-v1@3")
     await a_trade(strategy="vwap-pullback-v1@1")
     async with SessionLocal() as session:
-        rows = await routes.trades(session, OPERATOR, None, None, SESSION_DATE, None, "vwap-pullback-v1@1")
+        rows = await routes.trades(session, OPERATOR, None, None, SESSION_DATE, None, "vwap-pullback-v1@1", None, None)
     assert [row.strategy_version for row in rows] == ["vwap-pullback-v1@1"]
 
 

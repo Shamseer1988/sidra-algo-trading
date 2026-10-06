@@ -17,8 +17,11 @@ import { api, type BrokerChoices } from "../../components/api";
  * broker can never be confused with routing orders to one.
  */
 
-const SOURCE_KEY = "sidra.orders.source";
-const BROKER_KEY = "sidra.orders.broker";
+// Per screen, because "show me the broker" on Orders and on Reports are two
+// different questions an operator answers differently: one is about what is
+// open right now, the other about what a month came to.
+const SOURCE_KEY = (scope: string) => `sidra.${scope}.source`;
+const BROKER_KEY = (scope: string) => `sidra.${scope}.broker`;
 
 export type Source = "paper" | "broker";
 
@@ -31,7 +34,7 @@ export type OrderSource = {
   setBroker: (next: string | null) => void;
 };
 
-export function useOrderSource(active: boolean): OrderSource {
+export function useOrderSource(active: boolean, scope = "orders"): OrderSource {
   const [source, setSourceState] = useState<Source>("paper");
   const [broker, setBrokerState] = useState<string | null>(null);
   const [choices, setChoices] = useState<BrokerChoices | null>(null);
@@ -40,14 +43,14 @@ export function useOrderSource(active: boolean): OrderSource {
   // the first client render agree.
   useEffect(() => {
     try {
-      const storedSource = window.localStorage.getItem(SOURCE_KEY);
+      const storedSource = window.localStorage.getItem(SOURCE_KEY(scope));
       if (storedSource === "broker" || storedSource === "paper") setSourceState(storedSource);
-      const storedBroker = window.localStorage.getItem(BROKER_KEY);
+      const storedBroker = window.localStorage.getItem(BROKER_KEY(scope));
       if (storedBroker) setBrokerState(storedBroker);
     } catch {
       /* a browser that refuses storage still gets the default view */
     }
-  }, []);
+  }, [scope]);
 
   // Only when the screen is open and the broker source is chosen. The call
   // contacts no broker, but a request made from every other workspace would
@@ -63,21 +66,21 @@ export function useOrderSource(active: boolean): OrderSource {
   const setSource = useCallback((next: Source) => {
     setSourceState(next);
     try {
-      window.localStorage.setItem(SOURCE_KEY, next);
+      window.localStorage.setItem(SOURCE_KEY(scope), next);
     } catch {
       /* the choice simply will not persist */
     }
-  }, []);
+  }, [scope]);
 
   const setBroker = useCallback((next: string | null) => {
     setBrokerState(next);
     try {
-      if (next) window.localStorage.setItem(BROKER_KEY, next);
-      else window.localStorage.removeItem(BROKER_KEY);
+      if (next) window.localStorage.setItem(BROKER_KEY(scope), next);
+      else window.localStorage.removeItem(BROKER_KEY(scope));
     } catch {
       /* the choice simply will not persist */
     }
-  }, []);
+  }, [scope]);
 
   const named = choices?.brokers.find((item) => item.key === broker);
   const live = choices?.brokers.find((item) => item.key === choices.selected);

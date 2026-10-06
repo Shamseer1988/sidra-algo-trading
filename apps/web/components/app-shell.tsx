@@ -56,6 +56,9 @@ export function AppShell() {
   // it controls renders below — one source of truth rather than two that can
   // disagree about whose book is on screen.
   const orderSource = useOrderSource(active === "orders");
+  // Reports asks the same question of a different thing: not what is open now,
+  // but what a month came to. Its own choice, its own memory.
+  const reportSource = useOrderSource(active === "reports", "reports");
   const [menuOpen, setMenuOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -162,7 +165,7 @@ export function AppShell() {
       content = showing === "journal" ? <JournalPanel signals={signals} /> : <HistoryWorkspace canOperate={Boolean(canOperate)} onMessage={setMessage} />;
       break;
     case "reports":
-      content = <ReportsWorkspace tab={showing ?? "calendar"} onMessage={setMessage} />;
+      content = <ReportsWorkspace tab={showing ?? "calendar"} onMessage={setMessage} source={reportSource} />;
       break;
     case "risk":
       content = <RiskCenter safety={safety} isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
@@ -199,7 +202,7 @@ export function AppShell() {
       break;
   }
 
-  return <main className="min-h-screen bg-terminal-950 text-slate-200"><TerminalSidebar active={active} collapsed={collapsed} menuOpen={menuOpen} user={user} onSelect={selectWorkspace} onToggle={() => setCollapsed((value) => !value)} onSignOut={() => void signOut()} /><div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}><TerminalHeader active={active} overview={overview} scanner={scanner} safety={safety} user={user} onOpenNavigation={() => setMenuOpen((value) => !value)} onOpenControls={() => selectWorkspace("risk")} /><div className="mx-auto max-w-[1600px] p-4 sm:p-6">{tabs && showing && <WorkspaceTabs tabs={tabs} active={showing} onSelect={setTab} actions={active === "orders" ? <SourceToggle source={orderSource.source} setSource={orderSource.setSource} /> : null} />}{content}</div></div><Toaster toasts={toasts} onDismiss={dismissToast} /></main>;
+  return <main className="min-h-screen bg-terminal-950 text-slate-200"><TerminalSidebar active={active} collapsed={collapsed} menuOpen={menuOpen} user={user} onSelect={selectWorkspace} onToggle={() => setCollapsed((value) => !value)} onSignOut={() => void signOut()} /><div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}><TerminalHeader active={active} overview={overview} scanner={scanner} safety={safety} user={user} onOpenNavigation={() => setMenuOpen((value) => !value)} onOpenControls={() => selectWorkspace("risk")} /><div className="mx-auto max-w-[1600px] p-4 sm:p-6">{tabs && showing && <WorkspaceTabs tabs={tabs} active={showing} onSelect={setTab} actions={active === "orders" ? <SourceToggle source={orderSource.source} setSource={orderSource.setSource} /> : active === "reports" ? <SourceToggle source={reportSource.source} setSource={reportSource.setSource} /> : null} />}{content}</div></div><Toaster toasts={toasts} onDismiss={dismissToast} /></main>;
 }
 
 function Toaster({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {

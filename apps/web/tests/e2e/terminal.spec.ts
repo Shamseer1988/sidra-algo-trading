@@ -1680,6 +1680,45 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText(/priced from completed candles, not from what the broker filled/)).toBeVisible();
   });
 
+  test("8k. Reports: the calendar says whose record it is showing", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const asked: string[] = [];
+    await page.route("**/api/v1/history/daily*", async (route: Route) => {
+      asked.push(new URL(route.request().url()).search);
+      await route.fulfill({ json: [calendarDay(2, "146.34")] });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports");
+
+    // Paper by default, and it says so rather than letting a simulated figure
+    // be read as money.
+    await expect(page.getByText(/Simulated trades only/)).toBeVisible();
+    expect(asked.at(-1)).toContain("mode=PAPER");
+
+    await page.getByRole("button", { name: "Broker", exact: true }).click();
+    await expect(page.getByText(/Only the trades that reached a broker/)).toBeVisible();
+    expect(asked.at(-1)).toContain("mode=LIVE");
+  });
+
+  test("8l. Reports: the broker selector narrows the calendar to one account", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const asked: string[] = [];
+    await page.route("**/api/v1/history/daily*", async (route: Route) => {
+      asked.push(new URL(route.request().url()).search);
+      await route.fulfill({ json: [calendarDay(2, "146.34")] });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports");
+    await page.getByRole("button", { name: "Broker", exact: true }).click();
+    // Two connected brokers are two accounts; a figure summing them is true of
+    // neither, so the selector has to reach the query.
+    await page.getByLabel("Broker to view").selectOption("UPSTOX");
+
+    await expect.poll(() => asked.at(-1)).toContain("broker=UPSTOX");
+  });
+
   test("8i. Reports: realised and unrealised are two figures, never one", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");

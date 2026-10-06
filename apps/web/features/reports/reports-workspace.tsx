@@ -1,5 +1,6 @@
 "use client";
 
+import type { OrderSource } from "../orders/use-order-source";
 import { PnlCalendar } from "./pnl-calendar";
 import { PnlSummary } from "./pnl-summary";
 
@@ -14,6 +15,18 @@ import { PnlSummary } from "./pnl-summary";
  * one screen made both harder to read.
  */
 
-export function ReportsWorkspace({ tab, onMessage }: { tab: string; onMessage: (message: string) => void }) {
-  return tab === "pnl" ? <PnlSummary onMessage={onMessage} /> : <PnlCalendar onMessage={onMessage} />;
+export function ReportsWorkspace({
+  tab,
+  onMessage,
+  source,
+}: {
+  tab: string;
+  onMessage: (message: string) => void;
+  source: OrderSource;
+}) {
+  return tab === "pnl" ? (
+    <PnlSummary onMessage={onMessage} source={source} />
+  ) : (
+    <PnlCalendar onMessage={onMessage} source={source} />
+  );
 }

@@ -115,6 +115,10 @@ class TradeRecord:
     # Where the prices above came from. BROKER means the fills were read back
     # from the order book; MODEL means they are the simulator's, either because
     # the trade was paper or because no fill has been recorded for it yet.
+    # Which broker this trade reached, or None for a paper one. On the record
+    # rather than looked up per screen: an account's P&L is a question about one
+    # account, and a figure that summed two brokers would be true of neither.
+    broker: str | None = None
     price_source: str = MODEL
     # The simulator's gross, kept alongside even when the broker's is shown.
     # Their difference is slippage, and it is the number that was invisible for
@@ -316,16 +320,20 @@ def trade_reconciliation(record_mode: str, day_status: str, day_note: str) -> tu
 # --- loading --------------------------------------------------------------
 
 
-async def live_signal_ids(session: AsyncSession, from_date: date, to_date: date) -> set[UUID]:
-    """Signals that actually reached a broker, so a trade can be called live.
+async def live_brokers_by_signal(session: AsyncSession, from_date: date, to_date: date) -> dict[UUID, str]:
+    """Which broker each live signal reached, for the signals that reached one.
 
     Keyed off ``LiveOrderSubmission`` rather than a flag on the position, because
     the submission record is the only thing written on the path that talks to a
     broker. A position marked live by anything else would be a claim nobody
     checked.
+
+    The broker comes with it because "what did I make" is a question about an
+    account, and an operator with two brokers connected has two accounts. A
+    figure that summed them would be true of neither.
     """
     rows = await session.execute(
-        select(LiveOrderSubmission.paper_signal_id, PaperSignal.session_date)
+        select(LiveOrderSubmission.paper_signal_id, LiveOrderSubmission.broker)
         .join(PaperSignal, PaperSignal.id == LiveOrderSubmission.paper_signal_id)
         .where(
             LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
@@ -334,7 +342,15 @@ async def live_signal_ids(session: AsyncSession, from_date: date, to_date: date)
             PaperSignal.session_date <= to_date,
         )
     )
-    return {signal_id for signal_id, _ in rows.all()}
+    # One trade writes several submissions and they all carry the same broker,
+    # so last-one-wins is the same answer as first-one-wins. A blank broker on an
+    # older row is dropped rather than recorded as a broker named "".
+    return {signal_id: broker for signal_id, broker in rows.all() if broker}
+
+
+async def live_signal_ids(session: AsyncSession, from_date: date, to_date: date) -> set[UUID]:
+    """Signals that reached a broker. Kept for callers that do not need which."""
+    return set(await live_brokers_by_signal(session, from_date, to_date))
 
 
 async def latest_broker_snapshots(
@@ -417,8 +433,17 @@ async def load_trades(
     *,
     instrument_token: str | None = None,
     strategy_version: str | None = None,
+    execution_mode: str | None = None,
+    broker: str | None = None,
 ) -> list[TradeRecord]:
-    """Every position in the range, as trades, newest first."""
+    """Every position in the range, as trades, newest first.
+
+    ``execution_mode`` and ``broker`` narrow the record to one account's worth.
+    The filter is applied after the day verdicts are computed, deliberately: a
+    day's reconciliation against the broker is a fact about the whole day, and
+    recomputing it from a filtered subset would report a mismatch that is only
+    an artefact of the filter.
+    """
     statement = (
         select(PaperPosition, PaperSignal)
         .join(PaperSignal, PaperSignal.id == PaperPosition.paper_signal_id)
@@ -435,7 +460,8 @@ async def load_trades(
         )
     ).all()
 
-    live_ids = await live_signal_ids(session, from_date, to_date)
+    live_brokers = await live_brokers_by_signal(session, from_date, to_date)
+    live_ids = set(live_brokers)
     snapshots = await latest_broker_snapshots(session, from_date, to_date)
 
     # What the broker actually filled, for the live signals in range. Recorded
@@ -460,9 +486,15 @@ async def load_trades(
 
     day_verdicts: dict[date, tuple[str, str]] = {}
     for session_date, entries in per_day.items():
-        gross = sum((priced[item.id].gross for item, _ in entries), start=Decimal("0"))
-        charges = sum((_money(item.fees_total) for item, _ in entries), start=Decimal("0"))
-        live_count = sum(1 for _, sig in entries if sig.id in live_ids)
+        # Live only, on both sides of the comparison. The broker's figure covers
+        # the trades that reached the broker and nothing else, so measuring it
+        # against a day that also contains paper trades reports a mismatch on
+        # every day that had one of each -- a stop-and-investigate instruction
+        # raised by arithmetic rather than by anything being wrong.
+        live_entries = [(item, sig) for item, sig in entries if sig.id in live_ids]
+        gross = sum((priced[item.id].gross for item, _ in live_entries), start=Decimal("0"))
+        charges = sum((_money(item.fees_total) for item, _ in live_entries), start=Decimal("0"))
+        live_count = len(live_entries)
         day_verdicts[session_date] = reconcile_day(
             live_trades=live_count,
             local_gross=gross,
@@ -508,8 +540,15 @@ async def load_trades(
                 reconciliation_note=note,
                 price_source=money.source,
                 modelled_gross_pnl=_money(position.realized_pnl),
+                broker=live_brokers.get(signal.id),
             )
         )
+
+    wanted = (execution_mode or "").upper()
+    if wanted in (PAPER, LIVE):
+        records = [record for record in records if record.execution_mode == wanted]
+    if broker:
+        records = [record for record in records if (record.broker or "").upper() == broker.upper()]
     return records
 
 

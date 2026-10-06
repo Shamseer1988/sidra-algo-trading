@@ -656,3 +656,93 @@ async def test_the_day_is_reconciled_against_the_figures_on_the_screen():
 
     trade = (await load())[0][0]
     assert trade.reconciliation != history.MISMATCH
+
+
+# --- one account's worth ------------------------------------------------------
+#
+# The P&L calendar summed paper and live together, so an operator reading "what
+# did I make" got a figure their broker account had never seen: a day with one
+# live trade and one paper trade showed the two added up.
+
+
+async def test_the_record_can_be_narrowed_to_live_trades():
+    await a_trade(gross="500", charges="40", live=True)
+    await a_trade(gross="-200", charges="35", live=False)
+
+    async with SessionLocal() as session:
+        live = await history.load_trades(session, SESSION_DATE, SESSION_DATE, execution_mode="LIVE")
+        paper = await history.load_trades(session, SESSION_DATE, SESSION_DATE, execution_mode="PAPER")
+        both = await history.load_trades(session, SESSION_DATE, SESSION_DATE)
+
+    assert [record.execution_mode for record in live] == ["LIVE"]
+    assert [record.execution_mode for record in paper] == ["PAPER"]
+    assert len(both) == 2
+
+
+async def test_a_live_trade_carries_the_broker_it_reached():
+    await a_trade(live=True)
+    trade = (await load())[0][0]
+    assert trade.broker == "UPSTOX"
+
+
+async def test_a_paper_trade_has_no_broker():
+    await a_trade(live=False)
+    assert (await load())[0][0].broker is None
+
+
+async def test_the_record_can_be_narrowed_to_one_broker():
+    """Two connected brokers are two accounts, and a figure summing them would
+    be true of neither."""
+    await a_trade(gross="500", live=True)
+
+    async with SessionLocal() as session:
+        ours = await history.load_trades(session, SESSION_DATE, SESSION_DATE, broker="UPSTOX")
+        other = await history.load_trades(session, SESSION_DATE, SESSION_DATE, broker="FIRSTOCK")
+
+    assert len(ours) == 1
+    assert other == []
+
+
+async def test_the_broker_filter_ignores_case():
+    await a_trade(live=True)
+    async with SessionLocal() as session:
+        assert len(await history.load_trades(session, SESSION_DATE, SESSION_DATE, broker="upstox")) == 1
+
+
+async def test_an_unrecognised_mode_narrows_nothing():
+    """A typo in a query string must not silently empty the record."""
+    await a_trade(live=True)
+    await a_trade(live=False)
+    async with SessionLocal() as session:
+        assert len(await history.load_trades(session, SESSION_DATE, SESSION_DATE, execution_mode="BOTH")) == 2
+
+
+async def test_the_broker_is_compared_against_the_trades_it_actually_saw():
+    """A paper trade on a live day must not look like a broker mismatch.
+
+    The broker's figure covers what reached the broker and nothing else.
+    Measured against a day that also holds a paper trade, every such day reports
+    MISMATCH -- a stop-and-investigate instruction raised by arithmetic rather
+    than by anything being wrong. ₹500 live and −₹200 paper summed to ₹300
+    against a broker who correctly said ₹500.
+    """
+    await a_trade(gross="500", charges="40", live=True)
+    await a_trade(gross="-200", charges="35", live=False)
+    await record_broker(realized="500.00", charges="40")
+
+    trades, days, _ = await load()
+    by_mode = {trade.execution_mode: trade for trade in trades}
+
+    assert by_mode["LIVE"].reconciliation != history.MISMATCH
+    # The day's own totals still cover everything that happened; only the
+    # comparison against the broker is narrowed.
+    assert days[0].gross_pnl == Decimal("300.0000")
+
+
+async def test_a_real_broker_disagreement_is_still_caught():
+    """Narrowing the comparison must not make it blind."""
+    await a_trade(gross="500", charges="40", live=True)
+    await record_broker(realized="380.00", charges="40")
+
+    trade = (await load())[0][0]
+    assert trade.reconciliation == history.MISMATCH
