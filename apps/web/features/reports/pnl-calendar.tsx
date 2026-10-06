@@ -18,9 +18,18 @@ import { pnlTone, rupees, toNumber } from "../history/money";
  * Two rules it keeps from the History screen, because they are the same
  * figures. **Net, not gross.** A day that made ₹900 before costs and ₹340
  * after is a ₹340 day, and the cell shows ₹340. **The broker's figure is never
- * silently substituted.** Where a broker figure has been fetched for a day it
- * is shown in the detail strip beside ours, labelled, and the two are allowed
- * to disagree; nothing on this screen overwrites a local record with one.
+ * silently substituted.** Nothing on this screen overwrites a local record with
+ * a broker one; the local figure stays in the table and in the database either
+ * way.
+ *
+ * What the Broker view does do is *lead* with the broker's own day figures
+ * where they have been fetched, because that is the question it is asked: the
+ * money in the account. Our charges are an estimate from the published rate
+ * card and our fills are modelled until reconciliation records the real ones,
+ * so a Broker view showing them disagrees with the broker's app by a few rupees
+ * a day and leaves the operator to work out which screen is lying. It leads
+ * with the statement, labels the days the broker has not settled yet, and keeps
+ * our own figures on screen beneath it rather than hiding the difference.
  *
  * Dates are handled as plain YYYY-MM-DD strings and local date parts. Parsing
  * "2026-10-01" with the Date constructor gives UTC midnight, which is the
@@ -47,6 +56,28 @@ function leadingBlanks(year: number, month: number): number {
   return (new Date(year, month, 1).getDay() + 6) % 7;
 }
 
+/**
+ * The day's three figures as the chosen view reports them.
+ *
+ * ``settled`` says which: true when these came off the broker's statement,
+ * false when they are this system's own. Every one of them is a figure the
+ * server computed — ``broker_net_pnl`` included, which is why it arrives as its
+ * own field rather than as a subtraction done here.
+ */
+type Reported = { gross: string; charges: string; net: string; settled: boolean };
+
+function reported(day: HistoryDay, preferBroker: boolean): Reported {
+  // ?? rather than a !== null test, so a response from an older API that omits
+  // the field behaves like one that reports nothing. A missing figure read as
+  // present is how a screen comes to print "undefined" where money goes.
+  const gross = day.broker_realized_pnl ?? null;
+  const charges = day.broker_charges ?? null;
+  const net = day.broker_net_pnl ?? null;
+  return preferBroker && gross !== null && charges !== null && net !== null
+    ? { gross, charges, net, settled: true }
+    : { gross: day.gross_pnl, charges: day.charges, net: day.net_pnl, settled: false };
+}
+
 export function PnlCalendar({
   onMessage,
   source,
@@ -60,6 +91,7 @@ export function PnlCalendar({
   // did, gives an operator a figure their broker account never saw.
   const mode = source.source === "broker" ? ("LIVE" as const) : ("PAPER" as const);
   const broker = source.source === "broker" ? (source.broker ?? undefined) : undefined;
+  const preferBroker = source.source === "broker";
   const today = useMemo(() => new Date(), []);
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth());
@@ -132,10 +164,19 @@ export function PnlCalendar({
   // window, a cached response from the previous month -- would put a figure
   // above a calendar that cannot account for it.
   const shown = days.filter((day) => day.session_date.startsWith(`${year}-${pad(month + 1)}-`));
-  const total = shown.reduce((sum, day) => sum + (toNumber(day.net_pnl) ?? 0), 0);
-  const charges = shown.reduce((sum, day) => sum + (toNumber(day.charges) ?? 0), 0);
-  const green = shown.filter((day) => (toNumber(day.net_pnl) ?? 0) > 0).length;
-  const red = shown.filter((day) => (toNumber(day.net_pnl) ?? 0) < 0).length;
+  // A caption over the grid, built from the per-day figures the server already
+  // computed -- never from the individual trades, which is the sum that comes
+  // out different. Each day contributes whichever figure its own cell shows, so
+  // the four tiles and the thirty cells cannot tell two different stories.
+  const figures = shown.map((day) => reported(day, preferBroker));
+  const total = figures.reduce((sum, day) => sum + (toNumber(day.net) ?? 0), 0);
+  const charges = figures.reduce((sum, day) => sum + (toNumber(day.charges) ?? 0), 0);
+  const green = figures.filter((day) => (toNumber(day.net) ?? 0) > 0).length;
+  const red = figures.filter((day) => (toNumber(day.net) ?? 0) < 0).length;
+  // Days that traded on the account but whose statement has not been fetched.
+  // Named rather than silently folded in: a month total that is part statement
+  // and part estimate is still useful, and only if it says so.
+  const pending = preferBroker ? shown.filter((day) => day.live_trades > 0 && day.broker_net_pnl === null).length : 0;
   const cells = new Date(year, month + 1, 0).getDate();
   const blanks = leadingBlanks(year, month);
   const detail = open ? byDate.get(open) : undefined;
@@ -148,7 +189,7 @@ export function PnlCalendar({
           <h2 className="page-title">P&amp;L calendar</h2>
           <p className="page-copy">
             {source.source === "broker"
-              ? "Only the trades that reached a broker. Charges are this system's estimate from the published rate card until the broker's own figure is fetched after settlement — where one has been, the day shows both."
+              ? "Only the trades that reached a broker, and where the broker has published a statement for the day, that statement's realised figure and charges rather than ours. Days it has not settled yet are marked and show this system's estimate."
               : "Simulated trades only. These never reached a broker and no money moved; the figures are the paper ledger's."}
           </p>
         </div>
@@ -169,11 +210,22 @@ export function PnlCalendar({
       </div>
 
       <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Tile label="Month net" value={rupees(String(total), { signed: true })} tone={total} />
+        <Tile
+          label={preferBroker ? "Month net (broker)" : "Month net"}
+          value={rupees(String(total), { signed: true })}
+          tone={total}
+        />
         <Tile label="Charges" value={rupees(String(charges))} tone={0} />
         <Tile label="Green days" value={String(green)} tone={green ? 1 : 0} />
         <Tile label="Red days" value={String(red)} tone={red ? -1 : 0} />
       </div>
+      {pending > 0 && (
+        <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+          {pending} of {shown.length} day{shown.length === 1 ? "" : "s"} in this month {pending === 1 ? "is" : "are"}{" "}
+          still on this system&apos;s estimate — marked <strong>est.</strong> below. Brokers publish a session&apos;s
+          charges after settlement, so the most recent days read this way until the figures are fetched.
+        </p>
+      )}
 
       <article className="panel mt-6 p-4 sm:p-5">
         <div className="grid grid-cols-7 gap-1 sm:gap-2">
@@ -193,6 +245,7 @@ export function PnlCalendar({
                 day={index + 1}
                 date={date}
                 row={byDate.get(date)}
+                preferBroker={preferBroker}
                 loading={loading}
                 selected={open === date}
                 onSelect={() => setOpen(open === date ? null : date)}
@@ -202,7 +255,7 @@ export function PnlCalendar({
         </div>
       </article>
 
-      {detail && <DayDetail day={detail} trades={trades} loading={tradesLoading} />}
+      {detail && <DayDetail day={detail} trades={trades} loading={tradesLoading} preferBroker={preferBroker} />}
       {open && !detail && (
         <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">Nothing was traded on {open}.</p>
       )}
@@ -224,6 +277,7 @@ function DayCell({
   day,
   date,
   row,
+  preferBroker,
   loading,
   selected,
   onSelect,
@@ -231,11 +285,16 @@ function DayCell({
   day: number;
   date: string;
   row: HistoryDay | undefined;
+  preferBroker: boolean;
   loading: boolean;
   selected: boolean;
   onSelect: () => void;
 }) {
-  const net = row ? toNumber(row.net_pnl) : null;
+  const figure = row ? reported(row, preferBroker) : null;
+  // "est." only where a statement was expected: a day that traded on the
+  // account and has not been settled. A paper day is not waiting on anything.
+  const estimated = Boolean(figure && !figure.settled && preferBroker && row && row.live_trades > 0);
+  const net = figure ? toNumber(figure.net) : null;
   // A day with no record is not a flat day. It is a day this system has nothing
   // to say about, and it must not be drawn as a ₹0 result.
   const base = "rounded-md border p-1.5 text-left transition min-h-[62px] sm:min-h-[74px]";
@@ -254,19 +313,25 @@ function DayCell({
       type="button"
       onClick={onSelect}
       disabled={!row}
-      aria-label={row ? `${date}: ${rupees(row.net_pnl, { signed: true })} over ${row.trades} trade(s)` : `${date}: no trades`}
+      aria-label={
+        figure
+          ? `${date}: ${rupees(figure.net, { signed: true })} over ${row!.trades} trade(s)` +
+            (figure.settled ? ` as reported by ${row!.broker ?? "the broker"}` : estimated ? ", estimated" : "")
+          : `${date}: no trades`
+      }
       className={`${base} ${tone} ${ring} ${row ? "hover:brightness-110" : "cursor-default"}`}
     >
       <span className="block text-[11px] font-semibold opacity-80">{day}</span>
       {loading && !row ? (
         <span className="mt-2 block h-3 w-full rounded bg-slate-500/10" />
-      ) : row ? (
+      ) : row && figure ? (
         <>
           <span className="numeric mt-1 block text-[11px] font-semibold leading-tight sm:text-xs">
-            {rupees(row.net_pnl, { signed: true })}
+            {rupees(figure.net, { signed: true })}
           </span>
           <span className="block text-[10px] opacity-75">
             {row.trades} trade{row.trades === 1 ? "" : "s"}
+            {estimated ? " · est." : ""}
           </span>
         </>
       ) : null}
@@ -274,7 +339,19 @@ function DayCell({
   );
 }
 
-function DayDetail({ day, trades, loading }: { day: HistoryDay; trades: HistoryTrade[]; loading: boolean }) {
+function DayDetail({
+  day,
+  trades,
+  loading,
+  preferBroker,
+}: {
+  day: HistoryDay;
+  trades: HistoryTrade[];
+  loading: boolean;
+  preferBroker: boolean;
+}) {
+  const figure = reported(day, preferBroker);
+  const statement = figure.settled;
   return (
     <article className="panel mt-4 overflow-hidden">
       <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-200 dark:border-slate-800 px-5 py-4">
@@ -340,13 +417,34 @@ function DayDetail({ day, trades, loading }: { day: HistoryDay; trades: HistoryT
               {/* The day's totals as the server computed them, not a sum of the
                   rows above. Adding eight Decimals in a browser is how a total
                   comes to disagree with the figure the same day shows on the
-                  History screen, and the one that disagrees is always this one. */}
+                  History screen, and the one that disagrees is always this one.
+
+                  Where the broker has settled the day, its statement is the
+                  total and ours is kept on the line beneath it. The per-trade
+                  columns stay ours in both cases: no broker reports charges per
+                  trade, so splitting the statement across the rows would be
+                  this screen inventing a breakdown nobody published. */}
               <tr className="border-t border-slate-300 dark:border-slate-700 font-semibold">
-                <td colSpan={5}>Day total</td>
-                <td className={`numeric ${pnlTone(day.gross_pnl)}`}>{rupees(day.gross_pnl, { signed: true })}</td>
-                <td className="numeric">{rupees(day.charges)}</td>
-                <td className={`numeric ${pnlTone(day.net_pnl)}`}>{rupees(day.net_pnl, { signed: true })}</td>
+                <td colSpan={5}>
+                  Day total
+                  {statement && (
+                    <span className="block text-[11px] font-normal opacity-75">
+                      as {day.broker ?? "the broker"} reports it
+                    </span>
+                  )}
+                </td>
+                <td className={`numeric ${pnlTone(figure.gross)}`}>{rupees(figure.gross, { signed: true })}</td>
+                <td className="numeric">{rupees(figure.charges)}</td>
+                <td className={`numeric ${pnlTone(figure.net)}`}>{rupees(figure.net, { signed: true })}</td>
               </tr>
+              {statement && (
+                <tr className="text-slate-500 dark:text-slate-400">
+                  <td colSpan={5}>This system&apos;s own figures</td>
+                  <td className="numeric">{rupees(day.gross_pnl, { signed: true })}</td>
+                  <td className="numeric">{rupees(day.charges)}</td>
+                  <td className="numeric">{rupees(day.net_pnl, { signed: true })}</td>
+                </tr>
+              )}
             </tfoot>
           </table>
         </div>
@@ -372,10 +470,27 @@ function DayDetail({ day, trades, loading }: { day: HistoryDay; trades: HistoryT
             {rupees(day.unrealized_pnl, { signed: true })}, and it is not part of the net above.
           </p>
         )}
-        {day.broker_realized_pnl !== null && (
+        {statement ? (
           <p>
-            {day.broker ?? "The broker"} reported {rupees(day.broker_realized_pnl, { signed: true })} realised and{" "}
-            {rupees(day.broker_charges)} in charges for this day, recorded beside our figures rather than replacing them.
+            The totals above are {day.broker ?? "the broker"}&apos;s own for this day. Our figures are unchanged
+            underneath them and in the record — the statement is shown, not written over them. Per-trade charges stay
+            this system&apos;s estimate because no broker publishes a per-trade cost, so the rows will not add up to the
+            total; the total is the one to trust.
+          </p>
+        ) : (
+          day.broker_realized_pnl !== null && (
+            <p>
+              {day.broker ?? "The broker"} reported {rupees(day.broker_realized_pnl, { signed: true })} realised and{" "}
+              {rupees(day.broker_charges)} in charges for this day, recorded beside our figures rather than replacing
+              them.
+            </p>
+          )
+        )}
+        {preferBroker && !statement && day.live_trades > 0 && (
+          <p>
+            {day.broker ?? "The broker"} has not published settled figures for this day yet, so the totals above are
+            this system&apos;s own: fills as recorded and charges estimated from the published rate card. They will
+            differ from the broker&apos;s app by the estimate&apos;s error until the statement is fetched.
           </p>
         )}
         {day.halt_reason && <p className="text-amber-600 dark:text-amber-300">Trading halted: {day.halt_reason}</p>}

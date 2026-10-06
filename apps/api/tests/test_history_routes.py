@@ -10,6 +10,7 @@ charges are estimated.
 import csv
 import io
 from datetime import date, timedelta
+from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
@@ -50,6 +51,38 @@ async def test_the_daily_list_carries_a_label_beside_the_status():
         rows = await routes.daily(session, OPERATOR, SESSION_DATE, SESSION_DATE, None, None)
     assert rows[0].reconciliation == trade_history.BROKER_DATA_PENDING
     assert rows[0].reconciliation_label == "Broker data pending"
+
+
+async def test_the_daily_list_ships_the_brokers_net_so_the_browser_never_subtracts():
+    """The Broker calendar leads with this figure. Computed on the server, for
+    the same reason every other total here is."""
+    await a_trade(gross="172.27", charges="25.94", live=True)
+    await record_broker(realized="166.93", charges="37.65")
+    async with SessionLocal() as session:
+        rows = await routes.daily(session, OPERATOR, SESSION_DATE, SESSION_DATE, "LIVE", "UPSTOX")
+    assert rows[0].broker_realized_pnl == Decimal("166.9300")
+    assert rows[0].broker_charges == Decimal("37.6500")
+    assert rows[0].broker_net_pnl == Decimal("129.2800")
+    # Ours travels alongside, unchanged.
+    assert rows[0].net_pnl == Decimal("146.3300")
+
+
+async def test_the_daily_list_leaves_the_brokers_net_absent_when_it_reported_half():
+    await a_trade(gross="500", charges="40", live=True)
+    await record_broker(realized="500.00", charges=None)
+    async with SessionLocal() as session:
+        rows = await routes.daily(session, OPERATOR, SESSION_DATE, SESSION_DATE, "LIVE", "UPSTOX")
+    assert rows[0].broker_net_pnl is None
+
+
+async def test_the_overview_carries_the_brokers_own_period_total():
+    await a_trade(gross="172.27", charges="25.94", live=True)
+    await record_broker(realized="166.93", charges="37.65")
+    async with SessionLocal() as session:
+        result = await routes.overview(session, OPERATOR, SESSION_DATE, SESSION_DATE, "LIVE", "UPSTOX")
+    assert result.broker_days == 1
+    assert result.days_pending_broker == 0
+    assert result.broker_net_pnl == Decimal("129.2800")
 
 
 async def test_the_trade_list_can_be_pinned_to_one_session():

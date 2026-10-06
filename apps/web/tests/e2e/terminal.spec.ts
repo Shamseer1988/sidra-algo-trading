@@ -838,6 +838,7 @@ const MOCK_HISTORY_DAYS = [
     broker: "UPSTOX",
     broker_realized_pnl: "380.00",
     broker_charges: "75.00",
+    broker_net_pnl: "305.00",
     broker_fetched_at: new Date().toISOString(),
   },
   {
@@ -862,6 +863,7 @@ const MOCK_HISTORY_DAYS = [
     broker: null,
     broker_realized_pnl: null,
     broker_charges: null,
+    broker_net_pnl: null,
     broker_fetched_at: null,
   },
 ];
@@ -1717,6 +1719,81 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await page.getByLabel("Broker to view").selectOption("UPSTOX");
 
     await expect.poll(() => asked.at(-1)).toContain("broker=UPSTOX");
+  });
+
+  test("8m. Reports: the Broker view leads with the broker's own figures for the day", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    // 1 October 2026, as both screens showed it. Ours: gross +₹172.27, charges
+    // ₹25.94, net +₹146.34. Upstox: realised +₹166.93, charges ₹37.65, net
+    // +₹129.28. Under a heading that said "Broker", the operator was reading
+    // ours.
+    await page.route("**/api/v1/history/daily*", async (route: Route) => {
+      await route.fulfill({
+        json: [
+          calendarDay(2, "146.34", {
+            gross_pnl: "172.27",
+            charges: "25.94",
+            live_trades: 2,
+            broker: "UPSTOX",
+            broker_realized_pnl: "166.93",
+            broker_charges: "37.65",
+            broker_net_pnl: "129.28",
+          }),
+        ],
+      });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports");
+    await page.getByRole("button", { name: "Broker", exact: true }).click();
+
+    // The cell, the month tile and the day total all read the statement.
+    const cell = page.getByRole("button", { name: new RegExp(`${dayInThisMonth(2)}: \\+₹129.28`) });
+    await expect(cell).toBeVisible();
+    await cell.click();
+
+    const total = page.getByRole("row").filter({ hasText: "as UPSTOX reports it" });
+    await expect(total).toContainText("+₹166.93");
+    await expect(total).toContainText("₹37.65");
+    await expect(total).toContainText("+₹129.28");
+
+    // And ours is still on the screen underneath, not overwritten.
+    const ours = page.getByRole("row").filter({ hasText: "This system's own figures" });
+    await expect(ours).toContainText("+₹172.27");
+    await expect(ours).toContainText("₹25.94");
+    await expect(ours).toContainText("+₹146.34");
+  });
+
+  test("8m-1. Reports: a day the broker has not settled says so rather than passing as one", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/history/daily*", async (route: Route) => {
+      await route.fulfill({
+        json: [
+          calendarDay(2, "146.34", {
+            gross_pnl: "172.27",
+            charges: "25.94",
+            live_trades: 2,
+            broker: null,
+            broker_realized_pnl: null,
+            broker_charges: null,
+            broker_net_pnl: null,
+          }),
+        ],
+      });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports");
+    await page.getByRole("button", { name: "Broker", exact: true }).click();
+
+    // Still ours, and marked as ours. A broker's charges arrive after
+    // settlement, so the newest days always read this way for a while.
+    const cell = page.getByRole("button", {
+      name: new RegExp(`${dayInThisMonth(2)}: \\+₹146.34 over 2 trade\\(s\\), estimated`),
+    });
+    await expect(cell).toBeVisible();
+    await expect(cell).toContainText("est.");
+    await expect(page.getByText(/still on this system's estimate/)).toBeVisible();
   });
 
   test("8i. Reports: realised and unrealised are two figures, never one", async ({ page }) => {

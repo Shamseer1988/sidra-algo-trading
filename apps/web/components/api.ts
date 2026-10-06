@@ -148,6 +148,9 @@ export type HistoryDay = {
   broker: string | null;
   broker_realized_pnl: string | null;
   broker_charges: string | null;
+  /** Realised minus charges, as the broker's own statement nets the day. Null
+   *  unless the broker reported both halves; never assembled in the browser. */
+  broker_net_pnl: string | null;
   broker_fetched_at: string | null;
 };
 export type HistoryOverview = {
@@ -176,6 +179,13 @@ export type HistoryOverview = {
   live_trades: number;
   reconciliation_counts: Record<string, number>;
   reconciliation_labels: Record<string, string>;
+  broker_realized_pnl: string | null;
+  broker_charges: string | null;
+  broker_net_pnl: string | null;
+  /** How many of the period's days the broker has settled, and how many live
+   *  days are still waiting on its figures. */
+  broker_days: number;
+  days_pending_broker: number;
 };
 export type HistoryOrder = {
   order_id: string;

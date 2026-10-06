@@ -35,6 +35,10 @@ from app.db.session import SessionLocal
 from app.services import trade_history as history
 
 SESSION_DATE = date(2026, 9, 21)
+# A second session, for the range totals. One day cannot show the difference
+# between "the broker has settled this period" and "the broker has settled part
+# of it", which is the distinction the overview has to carry.
+NEXT_DATE = date(2026, 9, 22)
 
 
 def snapshot(realized=None, charges=None, broker="UPSTOX", source="profit-loss/data"):
@@ -188,11 +192,12 @@ def test_every_status_has_a_label():
 
 async def clean() -> None:
     async with SessionLocal() as session:
-        await session.execute(delete(BrokerDaySnapshot).where(BrokerDaySnapshot.session_date == SESSION_DATE))
-        await session.execute(delete(SessionHalt).where(SessionHalt.session_date == SESSION_DATE))
-        await session.execute(delete(PaperPosition).where(PaperPosition.session_date == SESSION_DATE))
-        await session.execute(delete(PaperOrder).where(PaperOrder.session_date == SESSION_DATE))
-        await session.execute(delete(PaperSignal).where(PaperSignal.session_date == SESSION_DATE))
+        dates = (SESSION_DATE, NEXT_DATE)
+        await session.execute(delete(BrokerDaySnapshot).where(BrokerDaySnapshot.session_date.in_(dates)))
+        await session.execute(delete(SessionHalt).where(SessionHalt.session_date.in_(dates)))
+        await session.execute(delete(PaperPosition).where(PaperPosition.session_date.in_(dates)))
+        await session.execute(delete(PaperOrder).where(PaperOrder.session_date.in_(dates)))
+        await session.execute(delete(PaperSignal).where(PaperSignal.session_date.in_(dates)))
         await session.commit()
 
 
@@ -216,6 +221,7 @@ async def a_trade(
     strategy="orb-retest-v1@3",
     risk="100",
     session_date=SESSION_DATE,
+    broker="UPSTOX",
 ):
     """One signal, its position, and optionally a live submission behind it."""
     gross_d, charges_d = Decimal(gross), Decimal(charges)
@@ -263,7 +269,7 @@ async def a_trade(
                 LiveOrderSubmission(
                     client_order_id=key[:20],
                     paper_signal_id=signal.id,
-                    broker="UPSTOX",
+                    broker=broker,
                     exchange="NSE",
                     trading_symbol="RELIANCE",
                     product="I",
@@ -309,11 +315,11 @@ async def record_fills(signal_id, *, side="LONG", entry=None, exit=None, quantit
         await session.commit()
 
 
-async def record_broker(realized=None, charges=None, broker="UPSTOX", fetched_at=None):
+async def record_broker(realized=None, charges=None, broker="UPSTOX", fetched_at=None, session_date=SESSION_DATE):
     async with SessionLocal() as session:
         session.add(
             BrokerDaySnapshot(
-                session_date=SESSION_DATE,
+                session_date=session_date,
                 broker=broker,
                 source="profit-loss/data",
                 realized_pnl=None if realized is None else Decimal(str(realized)),
@@ -325,10 +331,10 @@ async def record_broker(realized=None, charges=None, broker="UPSTOX", fetched_at
         await session.commit()
 
 
-async def load(from_date=SESSION_DATE, to_date=SESSION_DATE):
+async def load(from_date=SESSION_DATE, to_date=SESSION_DATE, *, mode=None, broker=None):
     async with SessionLocal() as session:
-        records = await history.load_trades(session, from_date, to_date)
-        days = await history.summarise_days(session, records, from_date, to_date)
+        records = await history.load_trades(session, from_date, to_date, execution_mode=mode, broker=broker)
+        days = await history.summarise_days(session, records, from_date, to_date, broker=broker)
         return records, days, history.summarise_range(records, days, from_date, to_date)
 
 
@@ -746,3 +752,121 @@ async def test_a_real_broker_disagreement_is_still_caught():
 
     trade = (await load())[0][0]
     assert trade.reconciliation == history.MISMATCH
+
+
+# --- the day as the broker's own statement nets it ----------------------------
+#
+# The Broker view of the P&L calendar showed our modelled fills and our
+# estimated charges under a heading that said "broker". For 1 October 2026 that
+# read +₹146.34 net against the ₹129.28 Upstox showed on the same screen, with
+# charges of ₹25.94 against the broker's ₹37.65 -- two figures, both labelled as
+# the broker's account, neither of them the broker's.
+#
+# The fix is not to overwrite anything. The local figures stay exactly as
+# recorded, in the database and on the screen; what changes is which one the
+# Broker view *leads* with, and the net it leads with is computed here rather
+# than assembled from two Decimals in a browser.
+
+
+async def test_the_brokers_day_nets_its_own_charges_against_its_own_realised():
+    await a_trade(gross="172.27", charges="25.94", live=True)
+    await record_broker(realized="166.93", charges="37.65")
+
+    day = (await load(broker="UPSTOX"))[1][0]
+    assert day.broker_realized_pnl == Decimal("166.9300")
+    assert day.broker_charges == Decimal("37.6500")
+    assert day.broker_net_pnl == Decimal("129.2800")
+    # Ours is untouched beside it. That is the whole point of the table.
+    assert day.gross_pnl == Decimal("172.2700")
+    assert day.charges == Decimal("25.9400")
+
+
+async def test_a_realised_figure_with_no_charges_does_not_net():
+    """Subtracting an absent cost gives a net that is wrong in the flattering
+    direction every single time."""
+    await a_trade(gross="500", charges="40", live=True)
+    await record_broker(realized="500.00", charges=None)
+
+    day = (await load(broker="UPSTOX"))[1][0]
+    assert day.broker_realized_pnl == Decimal("500.0000")
+    assert day.broker_net_pnl is None
+
+
+async def test_charges_with_no_realised_figure_do_not_net():
+    await a_trade(gross="500", charges="40", live=True)
+    await record_broker(realized=None, charges="37.65")
+
+    day = (await load(broker="UPSTOX"))[1][0]
+    assert day.broker_net_pnl is None
+
+
+async def test_a_day_the_broker_has_not_reported_has_no_net_of_its_own():
+    await a_trade(gross="500", charges="40", live=True)
+    day = (await load(broker="UPSTOX"))[1][0]
+    assert (day.broker, day.broker_net_pnl) == (None, None)
+
+
+async def test_a_paper_only_view_borrows_no_broker_figures():
+    """A broker's realised figure under a column of simulated trades reads as a
+    claim that the simulation made that money."""
+    await a_trade(gross="500", charges="40", live=True)
+    await a_trade(gross="-200", charges="35", live=False)
+    await record_broker(realized="500.00", charges="40")
+
+    day = (await load(mode="PAPER"))[1][0]
+    assert (day.broker, day.broker_realized_pnl, day.broker_net_pnl) == (None, None, None)
+
+
+async def test_one_account_is_read_against_its_own_statement():
+    """Two brokers on one day are two statements, and the UPSTOX one covers the
+    UPSTOX trades only."""
+    await a_trade(gross="500", charges="40", live=True, broker="UPSTOX")
+    await a_trade(gross="900", charges="50", live=True, broker="FIRSTOCK")
+    await record_broker(realized="500.00", charges="40", broker="UPSTOX")
+
+    day = (await load(mode="LIVE", broker="UPSTOX"))[1][0]
+    assert day.broker == "UPSTOX"
+    assert day.broker_net_pnl == Decimal("460.0000")
+    assert day.reconciliation == history.MATCHED
+
+
+async def test_a_statement_is_never_borrowed_from_the_other_broker():
+    """Without this, selecting Firstock showed Upstox's realised figure as
+    Firstock's, and called the difference a mismatch."""
+    await a_trade(gross="900", charges="50", live=True, broker="FIRSTOCK")
+    await record_broker(realized="500.00", charges="40", broker="UPSTOX")
+
+    day = (await load(mode="LIVE", broker="FIRSTOCK"))[1][0]
+    assert (day.broker, day.broker_net_pnl) == (None, None)
+    assert day.reconciliation == history.BROKER_DATA_PENDING
+
+
+async def test_the_range_totals_only_the_days_the_broker_has_settled():
+    await a_trade(gross="172.27", charges="25.94", live=True, session_date=SESSION_DATE)
+    await a_trade(gross="300", charges="30", live=True, session_date=NEXT_DATE)
+    await record_broker(realized="166.93", charges="37.65", session_date=SESSION_DATE)
+
+    _, _, totals = await load(SESSION_DATE, NEXT_DATE, mode="LIVE", broker="UPSTOX")
+    assert totals.broker_days == 1
+    assert totals.days_pending_broker == 1
+    assert totals.broker_realized_pnl == Decimal("166.9300")
+    assert totals.broker_charges == Decimal("37.6500")
+    assert totals.broker_net_pnl == Decimal("129.2800")
+
+
+async def test_a_period_the_broker_has_not_settled_reports_nothing_not_zero():
+    """₹0 reads as "the broker says the period was flat", which is the opposite
+    of "the broker has not said"."""
+    await a_trade(gross="500", charges="40", live=True)
+
+    _, _, totals = await load(mode="LIVE", broker="UPSTOX")
+    assert totals.broker_days == 0
+    assert totals.days_pending_broker == 1
+    assert (totals.broker_realized_pnl, totals.broker_charges, totals.broker_net_pnl) == (None, None, None)
+
+
+async def test_a_paper_period_is_not_waiting_on_any_broker():
+    await a_trade(gross="500", charges="40", live=False)
+
+    _, _, totals = await load(mode="PAPER")
+    assert (totals.broker_days, totals.days_pending_broker) == (0, 0)

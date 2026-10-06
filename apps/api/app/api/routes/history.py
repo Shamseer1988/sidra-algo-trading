@@ -107,6 +107,7 @@ class DayResponse(BaseModel):
     broker: str | None
     broker_realized_pnl: Decimal | None
     broker_charges: Decimal | None
+    broker_net_pnl: Decimal | None
     broker_fetched_at: str | None
 
 
@@ -136,6 +137,11 @@ class OverviewResponse(BaseModel):
     live_trades: int
     reconciliation_counts: dict[str, int]
     reconciliation_labels: dict[str, str]
+    broker_realized_pnl: Decimal | None
+    broker_charges: Decimal | None
+    broker_net_pnl: Decimal | None
+    broker_days: int
+    days_pending_broker: int
 
 
 class OrderResponse(BaseModel):
@@ -241,6 +247,7 @@ def _day(summary: trade_history.DaySummary) -> DayResponse:
         broker=summary.broker,
         broker_realized_pnl=summary.broker_realized_pnl,
         broker_charges=summary.broker_charges,
+        broker_net_pnl=summary.broker_net_pnl,
         broker_fetched_at=_stamp(summary.broker_fetched_at),
     )
 
@@ -256,7 +263,7 @@ async def overview(
 ) -> OverviewResponse:
     begin, end = _range(from_date, to_date)
     records = await trade_history.load_trades(session, begin, end, execution_mode=mode, broker=broker)
-    days = await trade_history.summarise_days(session, records, begin, end)
+    days = await trade_history.summarise_days(session, records, begin, end, broker=broker)
     totals = trade_history.summarise_range(records, days, begin, end)
     return OverviewResponse(
         from_date=totals.from_date.isoformat(),
@@ -284,6 +291,11 @@ async def overview(
         live_trades=totals.live_trades,
         reconciliation_counts=totals.reconciliation_counts,
         reconciliation_labels=trade_history.STATUS_LABELS,
+        broker_realized_pnl=totals.broker_realized_pnl,
+        broker_charges=totals.broker_charges,
+        broker_net_pnl=totals.broker_net_pnl,
+        broker_days=totals.broker_days,
+        days_pending_broker=totals.days_pending_broker,
     )
 
 
@@ -298,7 +310,9 @@ async def daily(
 ) -> list[DayResponse]:
     begin, end = _range(from_date, to_date)
     records = await trade_history.load_trades(session, begin, end, execution_mode=mode, broker=broker)
-    return [_day(summary) for summary in await trade_history.summarise_days(session, records, begin, end)]
+    return [
+        _day(summary) for summary in await trade_history.summarise_days(session, records, begin, end, broker=broker)
+    ]
 
 
 @router.get("/trades", response_model=list[TradeResponse])
@@ -427,6 +441,7 @@ DAY_COLUMNS = (
     ("broker", "Broker"),
     ("broker_realized_pnl", "Broker realised"),
     ("broker_charges", "Broker charges"),
+    ("broker_net_pnl", "Broker net"),
     ("broker_fetched_at", "Broker figures fetched"),
     ("reconciliation_note", "Reconciliation note"),
 )

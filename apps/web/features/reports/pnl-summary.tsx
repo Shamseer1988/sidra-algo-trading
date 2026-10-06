@@ -174,6 +174,39 @@ export function PnlSummary({
           )}
         </article>
       )}
+
+      {/* The same period as the broker's own statements total it, over the days
+          it has settled -- kept as its own panel rather than replacing the one
+          above, because the two cover different sets of days and stacking them
+          in one table would invite reading a figure over four settled sessions
+          as a figure over nineteen traded ones. */}
+      {overview && source.source === "broker" && overview.broker_days > 0 && (
+        <article className="panel mt-4 p-5">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h3 className="font-semibold text-slate-900 dark:text-white">
+              As {source.broker ?? "the broker"} reports it
+            </h3>
+            <span className="text-xs text-slate-500 dark:text-slate-400">
+              {overview.broker_days} settled day{overview.broker_days === 1 ? "" : "s"}
+              {overview.days_pending_broker > 0 ? ` · ${overview.days_pending_broker} still pending` : ""}
+            </span>
+          </div>
+          <dl className="mt-4 grid gap-3 sm:grid-cols-3">
+            <Figure label="Realised" value={<Money value={overview.broker_realized_pnl} signed />} />
+            <Figure label="Charges" value={<Money value={overview.broker_charges} />} />
+            <Figure label="Net" value={<Money value={overview.broker_net_pnl} signed />} />
+          </dl>
+          <p className="mt-4 text-xs text-slate-500 dark:text-slate-400">
+            These are the broker&apos;s own figures for the {overview.broker_days} day
+            {overview.broker_days === 1 ? "" : "s"} it has published, and they cover only those days — not the whole
+            period above.
+            {overview.days_pending_broker > 0
+              ? ` ${overview.days_pending_broker} live day${overview.days_pending_broker === 1 ? "" : "s"} in this period ${overview.days_pending_broker === 1 ? "is" : "are"} still waiting on a statement.`
+              : ""}{" "}
+            Nothing here replaces our records; where the two disagree, the P&amp;L calendar says so day by day.
+          </p>
+        </article>
+      )}
     </section>
   );
 }

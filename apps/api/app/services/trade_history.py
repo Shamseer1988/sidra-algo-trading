@@ -182,6 +182,24 @@ class DaySummary:
     broker: str | None = None
 
     @property
+    def broker_net_pnl(self) -> Decimal | None:
+        """The day as the broker's own statement nets it, or None.
+
+        Both halves or nothing. A broker that reported a realised figure but no
+        charges has not told us what the day was worth, and subtracting zero
+        charges from it would publish a net that is too flattering by exactly
+        the amount the day cost — the error always points the same way.
+
+        Computed here rather than in the browser for the reason every other
+        total in this system is: a figure assembled from two Decimals by
+        JavaScript arithmetic is the one that ends up disagreeing with the
+        statement it claims to be quoting.
+        """
+        if self.broker_realized_pnl is None or self.broker_charges is None:
+            return None
+        return self.broker_realized_pnl - self.broker_charges
+
+    @property
     def win_rate_percent(self) -> Decimal | None:
         decided = self.wins + self.losses
         if not decided:
@@ -216,6 +234,16 @@ class Overview:
     halted_days: int = 0
     live_trades: int = 0
     reconciliation_counts: dict[str, int] = field(default_factory=dict)
+    # The same range as the broker's own statements add it up, over the days the
+    # broker has reported both a realised figure and charges for. ``broker_days``
+    # and ``days_pending_broker`` are carried beside it because a total over four
+    # of a month's nineteen sessions is not a month, and a reader given only the
+    # total has no way to tell which they are looking at.
+    broker_realized_pnl: Decimal | None = None
+    broker_charges: Decimal | None = None
+    broker_net_pnl: Decimal | None = None
+    broker_days: int = 0
+    days_pending_broker: int = 0
 
     @property
     def win_rate_percent(self) -> Decimal | None:
@@ -354,19 +382,27 @@ async def live_signal_ids(session: AsyncSession, from_date: date, to_date: date)
 
 
 async def latest_broker_snapshots(
-    session: AsyncSession, from_date: date, to_date: date
+    session: AsyncSession, from_date: date, to_date: date, *, broker: str | None = None
 ) -> dict[date, BrokerDaySnapshot]:
     """The most recent snapshot per session date.
 
     The table is append-only, so a day commonly holds several. The newest is the
     one to compare against; the older ones remain as the record of how the
     broker's own figures settled.
+
+    ``broker`` narrows it to one account. Without it, a day on which two brokers
+    were used returns whichever was fetched last — and comparing that against a
+    record filtered to the *other* broker reports a mismatch that is an artefact
+    of reading one account's statement against another's trades.
     """
+    statement = select(BrokerDaySnapshot).where(
+        BrokerDaySnapshot.session_date >= from_date, BrokerDaySnapshot.session_date <= to_date
+    )
+    if broker:
+        statement = statement.where(BrokerDaySnapshot.broker == broker.upper())
     rows = (
         await session.scalars(
-            select(BrokerDaySnapshot)
-            .where(BrokerDaySnapshot.session_date >= from_date, BrokerDaySnapshot.session_date <= to_date)
-            .order_by(BrokerDaySnapshot.session_date.asc(), BrokerDaySnapshot.fetched_at.asc())
+            statement.order_by(BrokerDaySnapshot.session_date.asc(), BrokerDaySnapshot.fetched_at.asc())
         )
     ).all()
     # Ascending, so the last write per date wins and the newest survives.
@@ -439,10 +475,14 @@ async def load_trades(
     """Every position in the range, as trades, newest first.
 
     ``execution_mode`` and ``broker`` narrow the record to one account's worth.
-    The filter is applied after the day verdicts are computed, deliberately: a
-    day's reconciliation against the broker is a fact about the whole day, and
-    recomputing it from a filtered subset would report a mismatch that is only
-    an artefact of the filter.
+    The ``execution_mode`` filter is applied after the day verdicts are computed,
+    deliberately: a day's reconciliation against the broker is a fact about the
+    live trades of that day, and recomputing it from a paper-only subset would
+    report a mismatch that is only an artefact of the filter.
+
+    ``broker`` is different, and is applied on both sides *before* the verdict.
+    A statement is one account's, so an UPSTOX day compared against a record
+    that also holds Firstock trades disagrees by the whole of the Firstock side.
     """
     statement = (
         select(PaperPosition, PaperSignal)
@@ -462,7 +502,13 @@ async def load_trades(
 
     live_brokers = await live_brokers_by_signal(session, from_date, to_date)
     live_ids = set(live_brokers)
-    snapshots = await latest_broker_snapshots(session, from_date, to_date)
+    snapshots = await latest_broker_snapshots(session, from_date, to_date, broker=broker)
+
+    def on_account(signal_id: UUID) -> bool:
+        """Did this signal reach the account the verdict is about?"""
+        if signal_id not in live_ids:
+            return False
+        return not broker or (live_brokers.get(signal_id) or "").upper() == broker.upper()
 
     # What the broker actually filled, for the live signals in range. Recorded
     # by ``live_fills`` from the order book reconciliation already reads; absent
@@ -491,7 +537,7 @@ async def load_trades(
         # against a day that also contains paper trades reports a mismatch on
         # every day that had one of each -- a stop-and-investigate instruction
         # raised by arithmetic rather than by anything being wrong.
-        live_entries = [(item, sig) for item, sig in entries if sig.id in live_ids]
+        live_entries = [(item, sig) for item, sig in entries if on_account(sig.id)]
         gross = sum((priced[item.id].gross for item, _ in live_entries), start=Decimal("0"))
         charges = sum((_money(item.fees_total) for item, _ in live_entries), start=Decimal("0"))
         live_count = len(live_entries)
@@ -569,9 +615,19 @@ def _classify(net: Decimal) -> str:
 
 
 async def summarise_days(
-    session: AsyncSession, records: list[TradeRecord], from_date: date, to_date: date
+    session: AsyncSession,
+    records: list[TradeRecord],
+    from_date: date,
+    to_date: date,
+    *,
+    broker: str | None = None,
 ) -> list[DaySummary]:
-    """One row per session date that had activity, newest first."""
+    """One row per session date that had activity, newest first.
+
+    ``broker`` picks which account's statement the days are read against, and
+    must be the same one ``load_trades`` was given, or the two halves of the
+    comparison describe different accounts.
+    """
     halts = {
         (row.session_date, row.mode): row
         for row in (
@@ -580,7 +636,7 @@ async def summarise_days(
             )
         ).all()
     }
-    snapshots = await latest_broker_snapshots(session, from_date, to_date)
+    snapshots = await latest_broker_snapshots(session, from_date, to_date, broker=broker)
 
     days: dict[date, DaySummary] = {}
     for record in records:
@@ -618,7 +674,11 @@ async def summarise_days(
             local_charges=day.charges,
             snapshot=snapshot,
         )
-        if snapshot is not None:
+        # Attached only to a day that actually traded on the account. A paper-only
+        # view of a day is not a day the broker has anything to say about, and a
+        # broker's realised figure shown under a column of simulated trades reads
+        # as a claim that the simulation made that money.
+        if snapshot is not None and day.live_trades:
             day.broker = snapshot.broker
             day.broker_fetched_at = snapshot.fetched_at
             day.broker_realized_pnl = None if snapshot.realized_pnl is None else _money(snapshot.realized_pnl)
@@ -679,6 +739,19 @@ def summarise_range(records: list[TradeRecord], days: list[DaySummary], from_dat
     for day in days:
         counts[day.reconciliation] = counts.get(day.reconciliation, 0) + 1
     overview.reconciliation_counts = counts
+
+    # Totalled over the days the broker has settled, and left as None when there
+    # are none. Zero would read as "the broker says the period was flat", which
+    # is the opposite of "the broker has not said".
+    settled = [day for day in days if day.broker_net_pnl is not None]
+    overview.broker_days = len(settled)
+    overview.days_pending_broker = sum(1 for day in days if day.live_trades and day.broker_net_pnl is None)
+    if settled:
+        overview.broker_realized_pnl = sum(
+            (day.broker_realized_pnl or Decimal("0") for day in settled), start=Decimal("0")
+        )
+        overview.broker_charges = sum((day.broker_charges or Decimal("0") for day in settled), start=Decimal("0"))
+        overview.broker_net_pnl = overview.broker_realized_pnl - overview.broker_charges
     return overview
 
 
