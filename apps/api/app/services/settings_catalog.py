@@ -348,6 +348,34 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
     ),
     # --- signal quality ----------------------------------------------------
     SettingSpec(
+        key="universe_max_share_price",
+        group=SIGNAL_QUALITY,
+        label="Most expensive share to watch",
+        help=(
+            "The scanner ignores anything dearer. Zero means no limit. This is a position-sizing "
+            "control, not a view about expensive companies: a risk budget is spent in whole shares, "
+            "so on a ₹10,000 account risking ₹100 a trade, a ₹4,777 share buys one — which spends "
+            "half the budget and earns half the target, while a ₹500 share buys nineteen and spends "
+            "all of it. Takes effect at the next universe refresh, not on the shares already being "
+            "watched today."
+        ),
+        unit=INR,
+        is_ceiling=True,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
+        key="universe_min_share_price",
+        group=SIGNAL_QUALITY,
+        label="Cheapest share to watch",
+        help=(
+            "The scanner ignores anything cheaper. Zero means no limit. A very low-priced share "
+            "moves in ticks that are large fractions of its price, so a stop placed where the "
+            "structure says often sits one or two ticks away."
+        ),
+        unit=INR,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
         key="minimum_score",
         group=SIGNAL_QUALITY,
         label="Minimum signal score",

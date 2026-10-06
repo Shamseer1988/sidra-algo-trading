@@ -159,3 +159,76 @@ async def test_refresh_universe_persists_a_ranked_selection() -> None:
             )
             await session.commit()
         await engine.dispose()
+
+
+# --- the price band is the operator's, not the deployment's -------------------
+#
+# ``universe_max_price`` existed from the start and could only be changed by
+# editing ``.env`` and restarting. It is a position-sizing control: a risk
+# budget is spent in whole shares, so on a ₹10,000 account risking ₹100 a
+# trade, a ₹4,777 share buys one -- which spends half the budget and earns half
+# the target -- while a ₹500 share buys nineteen and spends all of it. That is
+# a judgement an operator changes between sessions.
+
+
+def _stored(**values: object):
+    from types import SimpleNamespace
+
+    base = {"universe_max_share_price": 0.0, "universe_min_share_price": 0.0}
+    base.update(values)
+    return SimpleNamespace(**base)
+
+
+def test_a_saved_cap_beats_the_environment() -> None:
+    controls = UniverseControls.from_settings(_settings(), _stored(universe_max_share_price=1500.0))
+    assert controls.max_price == Decimal("1500")
+
+
+def test_an_unset_cap_keeps_the_behaviour_the_deployment_already_had() -> None:
+    """Zero means unbounded, so opening the screen and saving nothing changes
+    nothing. A new control that silently narrowed the universe would be a
+    scanner that stopped seeing shares nobody asked it to stop seeing."""
+    assert UniverseControls.from_settings(_settings(), _stored()).max_price == Decimal("15000")
+    assert UniverseControls.from_settings(_settings(), None).max_price == Decimal("15000")
+
+
+def test_a_saved_floor_beats_the_environment() -> None:
+    controls = UniverseControls.from_settings(_settings(), _stored(universe_min_share_price=100.0))
+    assert controls.min_price == Decimal("100")
+
+
+def test_an_unreadable_control_falls_back_rather_than_failing() -> None:
+    """A universe that refuses to rebuild because a settings row will not parse
+    is a scanner that watches nothing all day -- worse than the bounds it was
+    trying to honour."""
+    controls = UniverseControls.from_settings(_settings(), _stored(universe_max_share_price="not a number"))
+    assert controls.max_price == Decimal("15000")
+
+
+def test_the_cap_actually_removes_an_expensive_share() -> None:
+    """End to end through the ranking, with the share that prompted this.
+
+    HAL at ₹4,777 is a well-behaved instrument by every other measure; it is
+    excluded because a ₹100 budget cannot be spent on it in whole shares.
+    """
+    capped = UniverseControls(
+        size=5,
+        min_avg_turnover=Decimal("0"),
+        min_price=Decimal("40"),
+        max_price=Decimal("1500"),
+        min_atr_percent=Decimal("0"),
+        max_atr_percent=Decimal("100"),
+    )
+    daily = {
+        "HAL": _series("HAL", "4777", volume=1_000_000, spread="40"),
+        "SBIN": _series("SBIN", "500", volume=1_000_000, spread="5"),
+    }
+    ranked = rank_universe(daily, {token: None for token in daily}, capped)
+    by_token = {item.instrument_token: item for item in ranked}
+
+    assert by_token["HAL"].eligible is False
+    assert by_token["HAL"].selected is False
+    assert by_token["SBIN"].eligible is True
+    # The reason is on the row, because a share that silently stopped being
+    # watched is a strategy that silently stopped being tested.
+    assert by_token["HAL"].rejection_reason

@@ -28,6 +28,16 @@ logger = structlog.get_logger("universe")
 MIN_DAILY_CANDLES = 6
 
 
+def _bound(stored: object | None, key: str, fallback: float) -> Decimal:
+    """A saved price bound, or the environment's, with zero meaning unbounded."""
+    value = getattr(stored, key, None) if stored is not None else None
+    try:
+        saved = Decimal(str(value)) if value is not None else Decimal("0")
+    except (ArithmeticError, TypeError, ValueError):
+        saved = Decimal("0")
+    return saved if saved > 0 else Decimal(str(fallback))
+
+
 @dataclass(frozen=True)
 class UniverseControls:
     size: int
@@ -38,12 +48,27 @@ class UniverseControls:
     max_atr_percent: Decimal
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> UniverseControls:
+    def from_settings(cls, settings: Settings, stored: object | None = None) -> UniverseControls:
+        """Environment values, overridden by whatever the operator saved.
+
+        The price band moved into the trading controls because it is an
+        ordinary trading decision, not a deployment constant: a share price is
+        what decides whether a risk budget can be spent in whole shares. On a
+        ₹10,000 account risking ₹100, a ₹4,777 share buys one, and one share
+        spends half the budget and earns half the target. That is a judgement
+        an operator changes between sessions, and it was reachable only by
+        editing ``.env`` and restarting.
+
+        Zero means "no bound", which is how a deployment that has never opened
+        the setting keeps exactly the behaviour it had. The environment value
+        is the fallback rather than the other way round, so a saved setting
+        always wins and an unset one changes nothing.
+        """
         return cls(
             size=settings.universe_size,
             min_avg_turnover=Decimal(str(settings.universe_min_avg_turnover)),
-            min_price=Decimal(str(settings.universe_min_price)),
-            max_price=Decimal(str(settings.universe_max_price)),
+            min_price=_bound(stored, "universe_min_share_price", settings.universe_min_price),
+            max_price=_bound(stored, "universe_max_share_price", settings.universe_max_price),
             min_atr_percent=Decimal(str(settings.universe_min_atr_percent)),
             max_atr_percent=Decimal(str(settings.universe_max_atr_percent)),
         )
@@ -219,10 +244,29 @@ async def _session_open(session, token: str, session_date: date) -> Decimal | No
     return row.open if row else None
 
 
+async def _stored_controls():  # noqa: ANN202 - the settings model, imported late to avoid a cycle
+    """The operator's saved trading controls, or None if they cannot be read.
+
+    None rather than a raise: a universe that refuses to rebuild because a
+    settings row is missing is a scanner that watches nothing all day, which is
+    a far worse failure than falling back to the environment's bounds.
+    """
+    try:
+        from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
+        from app.db.models import ApplicationSetting
+
+        async with SessionLocal() as session:
+            row = await session.get(ApplicationSetting, TRADING_KEY)
+        return TradingControls.model_validate(row.value if row else DEFAULT_TRADING_CONTROLS)
+    except Exception:  # noqa: BLE001
+        logger.warning("universe.controls_unreadable_using_environment")
+        return None
+
+
 async def refresh_universe(settings: Settings, session_date: date | None = None) -> dict:
     """Rebuild ``scan_universe`` for the given session from persisted daily candles."""
     target = session_date or datetime.now(MARKET_TIMEZONE).date()
-    controls = UniverseControls.from_settings(settings)
+    controls = UniverseControls.from_settings(settings, await _stored_controls())
     benchmark = settings.upstox_nifty_benchmark_key
     candidates = [token for token in configured_subscriptions(settings) if token != benchmark]
     if not candidates:

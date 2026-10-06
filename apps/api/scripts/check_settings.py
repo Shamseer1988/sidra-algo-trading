@@ -126,6 +126,39 @@ async def main() -> int:
             else:
                 line(WARN, f"Risk sizing wants {sized:,.2f}; the exposure ceiling will cut position size.")
 
+        heading("3b. What the budget can buy")
+        cap = Decimal(str(getattr(controls, "universe_max_share_price", 0) or 0))
+        print(f"  universe_max_share_price   : {cap if cap > 0 else 'no limit'}")
+        if floor > 0:
+            # ``floor`` is the minimum stop distance as a fraction, so this is
+            # the tightest stop the system will ever place -- and therefore the
+            # most shares a budget can buy at a given price.
+            def shares_at(price: Decimal) -> int:
+                per_share = price * floor
+                return int(per_trade / per_share) if per_share > 0 else 0
+
+            reference = cap if cap > 0 else Decimal("5000")
+            at_cap = shares_at(reference)
+            spent = reference * floor * at_cap
+            if at_cap <= 0:
+                problems += 1
+                line(BAD, f"At {reference:,.0f} a share the budget does not cover one share; such a signal is skipped.")
+            elif at_cap < 5:
+                line(
+                    WARN,
+                    f"At {reference:,.0f} a share the budget buys {at_cap} share(s) and spends "
+                    f"{spent:,.2f} of {per_trade:,.2f}. Whole-share rounding wastes the rest, "
+                    "and the reward is cut by the same fraction as the risk.",
+                )
+            else:
+                line(
+                    OK,
+                    f"At {reference:,.0f} a share the budget buys {at_cap} shares and spends "
+                    f"{spent:,.2f} of {per_trade:,.2f}.",
+                )
+            if cap <= 0:
+                line(WARN, "No share-price cap, so a very expensive share can still take a trade one share wide.")
+
         heading("4. Execution")
         print(f"  live_broker                : {controls.live_broker}")
         print(f"  execution_approval_mode    : {controls.execution_approval_mode}")

@@ -97,6 +97,10 @@ DEFAULT_TRADING_CONTROLS = {
     "entry_slippage_cap_percent": 0.25,
     "daily_profit_target": 2000.0,
     "daily_loss_limit": 400.0,
+    # Zero means "no cap", which is the behaviour every deployment had before
+    # these became settings rather than environment variables.
+    "universe_max_share_price": 0.0,
+    "universe_min_share_price": 0.0,
 }
 
 
@@ -138,6 +142,15 @@ class TradingControls(BaseModel):
     # live submission on or off; that is the approval mode and the gates.
     live_entry_order_type: str = Field(default="LIMIT")
     entry_slippage_cap_percent: float = Field(default=0.25, ge=0, le=5)
+
+    # The price band the scanner will watch at all. Here rather than in the
+    # environment because it is an ordinary trading decision and belongs with
+    # the others: a share price is the thing that decides whether a risk budget
+    # can be spent in whole shares, and that is a judgement an operator changes,
+    # not a deployment constant. Zero on either side means no bound, which is
+    # what every deployment did before this existed.
+    universe_max_share_price: float = Field(default=0.0, ge=0, le=1_000_000)
+    universe_min_share_price: float = Field(default=0.0, ge=0, le=1_000_000)
 
     # Realised-plus-open session P&L at which the day stops, in rupees. Zero
     # disables the limit. Deliberately rupees rather than a percentage: a daily
@@ -189,6 +202,21 @@ class TradingControls(BaseModel):
         if normalized not in LIVE_ENTRY_ORDER_TYPES:
             raise ValueError(f"live_entry_order_type must be one of {sorted(LIVE_ENTRY_ORDER_TYPES)}")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_share_price_band(self) -> "TradingControls":
+        """A band with nothing in it would empty the universe silently.
+
+        Zero on either side means that side is unbounded, so only two real
+        numbers can contradict each other.
+        """
+        low, high = self.universe_min_share_price, self.universe_max_share_price
+        if low > 0 and high > 0 and low >= high:
+            raise ValueError(
+                f"universe_min_share_price ({low}) must be below universe_max_share_price ({high}); "
+                "as written no share could qualify and the scanner would watch nothing."
+            )
+        return self
 
 
 class StrategyMetric(BaseModel):

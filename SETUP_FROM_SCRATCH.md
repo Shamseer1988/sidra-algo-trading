@@ -372,6 +372,30 @@ If the order book cannot be read, the sweep does nothing rather than assume the
 position is naked: placing a second stop behind a position that already has one
 means both can fill, and the position ends up reversed instead of flat.
 
+### The share-price band
+
+**Most expensive share to watch** and **Cheapest share to watch**, in Settings →
+Trading controls, decide which shares the scanner looks at. Zero on either side
+means no limit, which is what every deployment did before they became settings.
+
+They are position-sizing controls, not a view about expensive companies. A risk
+budget is spent in whole shares, so on a ₹10,000 account risking ₹100 a trade:
+
+| Share price | Shares the budget buys | Budget actually used |
+|---|---|---|
+| ₹500 | 19 | 100% |
+| ₹1,000 | 9 | 94% |
+| ₹2,500 | 3 | 79% |
+| ₹4,777 | 1 | 50% |
+
+A share that only buys one costs you twice over: half the risk is left unspent,
+and the reward is cut by the same fraction. A 1:2 target worth ₹200 on a
+properly sized position is worth ₹76 on a single share.
+
+`scripts/check_settings.py` reports what your cap means in shares, and warns
+when it allows a trade only one or two shares wide. The band takes effect at the
+next universe refresh, not on the shares already being watched today.
+
 The **Broker** source on Orders & Positions is read-only on purpose: it will show
 you an order placed by hand on the broker's app, and mark it **Manual**, but it
 cannot withdraw it. That is the order that blocks reconciliation, and withdrawing
