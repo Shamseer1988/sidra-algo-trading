@@ -239,6 +239,33 @@ async def _label(session: AsyncSession | None, signal: PaperSignal) -> str:
     return f"{name} ({token})" if name != token else token
 
 
+def _size_line(label: str, signal: PaperSignal, submission) -> str:  # noqa: ANN001
+    """What was actually ordered, and what was planned when they differ.
+
+    Every line in this message used to read ``signal.quantity`` -- the size the
+    strategy asked for. Once entries began to be sized from the capped price,
+    that stopped being the size that was sent: a HAL signal for 2 shares went to
+    the broker as 1, and the alert announced 2. An operator comparing the alert
+    against the broker's app found two different numbers for the same order and
+    had no way to tell which was real.
+
+    The sent quantity leads, because it is what exists at the exchange. The
+    planned one is kept beside it, because a silently smaller position would be
+    its own surprise.
+    """
+    planned = int(getattr(signal, "quantity", 0) or 0)
+    sent = getattr(submission, "quantity", None)
+    sent = int(sent) if sent is not None else None
+
+    if sent is None or sent == planned:
+        return f"\U0001f4ca {label}  {signal.side}  {planned}\n"
+    return (
+        f"\U0001f4ca {label}  {signal.side}  {sent}\n"
+        f"\u2702\ufe0f {sent} of {planned} planned \u2014 sized from the capped entry price so a fill "
+        "anywhere inside the cap stays within the trade's risk budget\n"
+    )
+
+
 async def _announce_automatic(
     settings: Settings, signal: PaperSignal, decision, submission, protection=None, session: AsyncSession | None = None
 ) -> None:
@@ -264,6 +291,7 @@ async def _announce_automatic(
         if not decision.authorized:
             text = (
                 "\U0001f6ab <b>LIVE ORDER NOT SENT</b>\n\n"
+                # Nothing was sent, so the planned size is the only honest one.
                 f"\U0001f4ca {label}  {signal.side}  {signal.quantity}\n"
                 f"\U0001f4dd {decision.reason}"
             )
@@ -271,7 +299,7 @@ async def _announce_automatic(
             reason = getattr(submission, "failure_message", None) or status
             text = (
                 "\u26d4 <b>LIVE ORDER REJECTED</b>\n\n"
-                f"\U0001f4ca {label}  {signal.side}  {signal.quantity}\n"
+                f"{_size_line(label, signal, submission)}"
                 f"\U0001f4dd {reason}\n\n"
                 "<i>Placed automatically; the broker refused it. No position was opened.</i>"
             )
@@ -280,7 +308,11 @@ async def _announce_automatic(
             # nothing behind it is the state that prompted this whole module.
             text = (
                 "\U0001f6a8 <b>POSITION NOT PROTECTED</b>\n\n"
-                f"\U0001f4ca {label}  {signal.side}  {protection.quantity or signal.quantity}\n"
+                # The held quantity from the broker wins here: this message is
+                # about a position that exists, and its size is the broker's
+                # answer rather than anything we asked for.
+                f"\U0001f4ca {label}  {signal.side}  "
+                f"{protection.quantity or getattr(submission, 'quantity', None) or signal.quantity}\n"
                 f"\U0001f9fe Broker order: {numbers}\n"
                 f"\U0001f4dd {protection.detail}\n\n"
                 "<i>Check this position in the broker app now.</i>"
@@ -299,7 +331,7 @@ async def _announce_automatic(
             stop_line = f"\U0001f6d1 {protection.detail}\n" if protection is not None else ""
             text = (
                 "\u2705 <b>LIVE ORDER SENT</b>\n\n"
-                f"\U0001f4ca {label}  {signal.side}  {signal.quantity}\n"
+                f"{_size_line(label, signal, submission)}"
                 f"\U0001f9fe Broker order: {numbers}\n"
                 f"\U0001f4dd Status: {status}\n"
                 f"{stop_line}\n"

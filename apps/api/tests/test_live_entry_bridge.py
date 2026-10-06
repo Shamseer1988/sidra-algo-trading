@@ -304,6 +304,34 @@ async def test_a_limit_entry_is_priced_at_the_cap_and_sized_from_it(wiring) -> N
     assert (request.price - Decimal("977.9632")) * request.quantity <= Decimal("100")
 
 
+def test_the_sent_size_leads_and_the_planned_one_is_named() -> None:
+    """A HAL signal for 2 shares went to the broker as 1 and the alert said 2.
+
+    Every line in that message read the signal's quantity -- the size the
+    strategy asked for -- which stopped being the size that was sent once
+    entries began to be sized from the capped price. An operator comparing the
+    alert against the broker's app found two numbers for one order and no way
+    to tell which was real.
+    """
+    line = module._size_line("HAL", signal(quantity=2), SimpleNamespace(quantity=1))
+    assert "  1\n" in line
+    assert "1 of 2 planned" in line
+    assert "risk budget" in line
+
+
+def test_an_unreduced_order_says_its_size_once() -> None:
+    """No note when nothing was trimmed; a reassurance on every ordinary order
+    is noise, and noise is how the one that matters gets missed."""
+    line = module._size_line("HAL", signal(quantity=2), SimpleNamespace(quantity=2))
+    assert "planned" not in line
+    assert "  2\n" in line
+
+
+def test_a_submission_that_never_got_a_size_falls_back_to_the_plan() -> None:
+    assert "  2\n" in module._size_line("HAL", signal(quantity=2), SimpleNamespace(quantity=None))
+    assert "  2\n" in module._size_line("HAL", signal(quantity=2), None)
+
+
 @pytest.mark.asyncio
 async def test_a_market_entry_is_left_uncapped(wiring) -> None:
     """MARKET has no price to cap, and the catalogue entry says so rather than
