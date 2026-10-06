@@ -85,6 +85,54 @@ async def test_the_overview_carries_the_brokers_own_period_total():
     assert result.broker_net_pnl == Decimal("129.2800")
 
 
+async def test_the_daily_list_shows_a_day_that_exists_only_at_the_broker():
+    """After a history purge this is the only thing left of a session. A
+    calendar that showed nothing would be reporting that nothing was traded."""
+    await record_broker(realized="166.93", charges="37.65", trade_count=2)
+    async with SessionLocal() as session:
+        rows = await routes.daily(session, OPERATOR, SESSION_DATE, SESSION_DATE, "LIVE", "UPSTOX")
+    assert len(rows) == 1
+    assert rows[0].reconstructed is True
+    assert rows[0].reconciliation == trade_history.RECONSTRUCTED
+    assert rows[0].reconciliation_label == "Reconstructed from broker"
+    assert rows[0].broker_net_pnl == Decimal("129.2800")
+
+
+async def test_the_paper_view_of_the_daily_list_shows_no_broker_day():
+    await record_broker(realized="166.93", charges="37.65", trade_count=2)
+    async with SessionLocal() as session:
+        rows = await routes.daily(session, OPERATOR, SESSION_DATE, SESSION_DATE, "PAPER", None)
+    assert rows == []
+
+
+async def test_the_broker_trade_list_reads_the_rows_already_stored():
+    """No request reaches the broker here; this is a local read of a report
+    downloaded with the day figures."""
+    await record_broker(
+        realized="166.93",
+        charges="37.65",
+        trade_count=1,
+        rows=[
+            {
+                "scrip_name": "TATASTEEL",
+                "quantity": 67,
+                "buy_average": "183.63",
+                "sell_average": "180.97",
+                "buy_amount": "12303.21",
+                "sell_amount": "12124.99",
+            }
+        ],
+    )
+    async with SessionLocal() as session:
+        rows = await routes.broker_trade_rows(session, OPERATOR, SESSION_DATE, SESSION_DATE, "UPSTOX")
+    assert len(rows) == 1
+    assert rows[0].script_name == "TATASTEEL"
+    assert rows[0].quantity == 67
+    assert rows[0].buy_price == Decimal("183.63")
+    assert rows[0].gross_pnl == Decimal("-178.22")
+    assert rows[0].session_date == SESSION_DATE.isoformat()
+
+
 async def test_the_trade_list_can_be_pinned_to_one_session():
     await a_trade()
     async with SessionLocal() as session:

@@ -12,7 +12,7 @@ API container and shuts down cleanly.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -261,20 +261,82 @@ def _make_broker_figures_job(settings: Settings):
 
         client = UpstoxReportClient(settings, UpstoxSession(access_token=token))
         try:
-            figures = await broker_day_figures.fetch_upstox_day(client, session_date)
+            async with SessionLocal() as db:
+                report = await broker_day_figures.sync_days(db, client, session_date, session_date)
+                await db.commit()
         except UpstoxError as error:
             logger.warning("scheduler.broker_figures_failed", error=str(error))
             await _persist_audit("scheduler.broker_figures_failed", {"error": str(error)})
             return
 
-        async with SessionLocal() as db:
-            await broker_day_figures.record(db, session_date, figures)
-            await db.commit()
         logger.info(
             "scheduler.broker_figures_recorded",
             date=str(session_date),
-            trades=figures.trade_count,
-            realized=str(figures.realized_pnl),
+            recorded=report.recorded,
+            requests=report.requests,
+        )
+
+    return _job
+
+
+# Far enough back to cover a long weekend and a public holiday either side of
+# it, and no further. A day the broker has not settled within a week is a day
+# somebody has to look at; asking about it every morning forever is not a fix.
+SETTLEMENT_LOOKBACK_DAYS = 7
+
+
+def _make_settlement_catchup_job(settings: Settings):
+    """Pick up the charges the evening pass was too early to see.
+
+    Upstox publishes a session's charges after settlement, which is usually
+    after the 18:00 fetch has already run and been handed a zero. ``settled_
+    charges`` correctly refuses to record a zero as a cost, so without this the
+    day keeps the realised figure, never gets a cost, and stays that way for
+    good -- the broker's own screen and ours disagreeing forever over a number
+    that was available the next morning.
+
+    Runs before the open so it never competes with trading for the shared
+    per-user rate limit, and spends nothing at all unless something is actually
+    outstanding: no stored token, or no day in the window missing its charges,
+    and it makes no request.
+    """
+
+    async def _job() -> None:
+        from app.db.session import SessionLocal
+        from app.services import broker_day_figures
+        from app.services.upstox_oauth import load_access_token
+        from app.services.upstox_orders import UpstoxError, UpstoxReportClient, UpstoxSession
+
+        today = datetime.now(UTC).astimezone(MARKET_TIMEZONE).date()
+        begin = today - timedelta(days=SETTLEMENT_LOOKBACK_DAYS)
+
+        async with SessionLocal() as db:
+            waiting = await broker_day_figures.dates_awaiting_charges(db, begin, today)
+        if not waiting:
+            logger.info("scheduler.settlement_catchup_skipped", reason="nothing outstanding")
+            return
+
+        token = await load_access_token(settings)
+        if not token:
+            logger.warning("scheduler.settlement_catchup_skipped", reason="no upstox access token")
+            return
+
+        client = UpstoxReportClient(settings, UpstoxSession(access_token=token))
+        try:
+            async with SessionLocal() as db:
+                report = await broker_day_figures.sync_days(db, client, begin, today)
+                await db.commit()
+        except UpstoxError as error:
+            logger.warning("scheduler.settlement_catchup_failed", error=str(error))
+            await _persist_audit("scheduler.settlement_catchup_failed", {"error": str(error)})
+            return
+
+        logger.info(
+            "scheduler.settlement_catchup_ran",
+            waiting=len(waiting),
+            recorded=report.recorded,
+            skipped=len(report.days_skipped),
+            requests=report.requests,
         )
 
     return _job
@@ -507,6 +569,18 @@ def init_upstox_scheduler(settings: Settings) -> AsyncIOScheduler | None:
         trigger=CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone="Asia/Kolkata"),
         id="broker_day_figures",
         name="Broker day figures (18:00 IST)",
+        replace_existing=True,
+        misfire_grace_time=7200,
+    )
+
+    # 08:40, after the 08:30 token renewal and before the 08:45 session open, so
+    # a catch-up never delays arming. It makes no request on a morning with
+    # nothing outstanding.
+    scheduler.add_job(
+        _make_settlement_catchup_job(settings),
+        trigger=CronTrigger(day_of_week="mon-fri", hour=8, minute=40, timezone="Asia/Kolkata"),
+        id="broker_settlement_catchup",
+        name="Broker settlement catch-up (08:40 IST)",
         replace_existing=True,
         misfire_grace_time=7200,
     )

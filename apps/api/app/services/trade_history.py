@@ -55,12 +55,20 @@ MATCHED = "MATCHED"
 ESTIMATED_CHARGES = "ESTIMATED_CHARGES"
 BROKER_DATA_PENDING = "BROKER_DATA_PENDING"
 MISMATCH = "MISMATCH"
+# A fifth, and a different kind of thing from the other four. They each say what
+# a comparison found; this one says there was nothing to compare. A day we hold
+# no local record of -- after a history purge, or on a deployment rebuilt from a
+# backup that did not include it -- exists only in the broker's report. Calling
+# that MATCHED would claim an agreement nobody tested, and calling it anything
+# else would send the operator looking for a local record that is not there.
+RECONSTRUCTED = "RECONSTRUCTED"
 
 STATUS_LABELS = {
     MATCHED: "Matched",
     ESTIMATED_CHARGES: "Estimated charges",
     BROKER_DATA_PENDING: "Broker data pending",
     MISMATCH: "Mismatch",
+    RECONSTRUCTED: "Reconstructed from broker",
 }
 
 # One rupee. Rounding differs between our rate card and the broker's — they round
@@ -180,6 +188,12 @@ class DaySummary:
     broker_charges: Decimal | None = None
     broker_fetched_at: datetime | None = None
     broker: str | None = None
+    # True when every figure on this day came from the broker because we hold no
+    # local record of it. The flag travels to the screen so the day can say so:
+    # a reconstructed day has no stop, no target and no strategy behind it, and
+    # reading one as though it were our own record would be reading an audit
+    # trail that does not exist.
+    reconstructed: bool = False
 
     @property
     def broker_net_pnl(self) -> Decimal | None:
@@ -621,12 +635,19 @@ async def summarise_days(
     to_date: date,
     *,
     broker: str | None = None,
+    execution_mode: str | None = None,
 ) -> list[DaySummary]:
     """One row per session date that had activity, newest first.
 
     ``broker`` picks which account's statement the days are read against, and
     must be the same one ``load_trades`` was given, or the two halves of the
     comparison describe different accounts.
+
+    ``execution_mode`` must also be the one ``load_trades`` was given. It is
+    used for one thing: deciding whether a day the broker reported and we hold
+    no record of belongs on the screen. It does in a live or unfiltered view,
+    because it is a day that really was traded; it does not in a paper view,
+    where nothing reached a broker by definition.
     """
     halts = {
         (row.session_date, row.mode): row
@@ -684,7 +705,62 @@ async def summarise_days(
             day.broker_realized_pnl = None if snapshot.realized_pnl is None else _money(snapshot.realized_pnl)
             day.broker_charges = None if snapshot.charges is None else _money(snapshot.charges)
 
+    if (execution_mode or "").upper() != PAPER:
+        for session_date, snapshot in snapshots.items():
+            if session_date in days or not (from_date <= session_date <= to_date):
+                continue
+            rebuilt = _reconstructed_day(session_date, snapshot)
+            if rebuilt is not None:
+                days[session_date] = rebuilt
+
     return sorted(days.values(), key=lambda item: item.session_date, reverse=True)
+
+
+def _reconstructed_day(session_date: date, snapshot: BrokerDaySnapshot) -> DaySummary | None:
+    """A day built from the broker's report alone, because nothing local remains.
+
+    Without this a purged history shows an empty calendar even with every
+    broker snapshot fetched back: days were only ever seeded from local
+    positions, and a broker snapshot was an annotation on a day that already
+    existed. A session that really happened then reads as a session that did
+    not, which is the one thing a trading record must never do.
+
+    Returns None for a snapshot that reported neither a realised figure nor
+    charges. That is a day the broker was asked about and said nothing useful
+    for, and drawing it as a ₹0 session would invent a flat day out of silence.
+    """
+    realised = None if snapshot.realized_pnl is None else _money(snapshot.realized_pnl)
+    charges = None if snapshot.charges is None else _money(snapshot.charges)
+    if realised is None and charges is None:
+        return None
+
+    gross = realised or Decimal("0")
+    cost = charges or Decimal("0")
+    count = snapshot.trade_count or 0
+    return DaySummary(
+        session_date=session_date,
+        # The broker counts matched buy/sell pairs, which is its own notion of a
+        # trade and need not equal ours -- two entries in one scrip on one day
+        # can come back as a single pair. It is the only count that exists for
+        # this day, and it is the broker's, which is what the day is.
+        trades=count,
+        live_trades=count,
+        gross_pnl=gross,
+        charges=cost,
+        net_pnl=gross - cost,
+        reconstructed=True,
+        broker=snapshot.broker,
+        broker_fetched_at=snapshot.fetched_at,
+        broker_realized_pnl=realised,
+        broker_charges=charges,
+        reconciliation=RECONSTRUCTED,
+        reconciliation_note=(
+            f"Rebuilt from {snapshot.broker}'s own report. This system holds no local record of this "
+            "session, so there is nothing to reconcile against and no stop, target or strategy behind "
+            "the figures."
+            + ("" if charges is not None else f" {snapshot.broker} has not published this day's charges yet.")
+        ),
+    )
 
 
 def summarise_range(records: list[TradeRecord], days: list[DaySummary], from_date: date, to_date: date) -> Overview:

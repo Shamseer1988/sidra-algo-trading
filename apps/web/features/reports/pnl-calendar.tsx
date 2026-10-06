@@ -3,7 +3,7 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { api, type HistoryDay, type HistoryTrade } from "../../components/api";
+import { api, type BrokerTrade, type HistoryDay, type HistoryTrade } from "../../components/api";
 import { BrokerSelect } from "../orders/source-controls";
 import type { OrderSource } from "../orders/use-order-source";
 import { pnlTone, rupees, toNumber } from "../history/money";
@@ -99,6 +99,7 @@ export function PnlCalendar({
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState<string | null>(null);
   const [trades, setTrades] = useState<HistoryTrade[]>([]);
+  const [brokerRows, setBrokerRows] = useState<BrokerTrade[]>([]);
   const [tradesLoading, setTradesLoading] = useState(false);
 
   const load = useCallback(async () => {
@@ -124,22 +125,42 @@ export function PnlCalendar({
     void load();
   }, [load]);
 
+  const byDate = useMemo(() => new Map(days.map((day) => [day.session_date, day])), [days]);
+  // A day with no local record left: the only trades that exist for it are the
+  // broker's own, out of the report already stored. Asking /history/trades for
+  // one would correctly return nothing.
+  const rebuilt = open ? (byDate.get(open)?.reconstructed ?? false) : false;
+
   // The day's own trades, fetched only when a day is opened. A month of trades
   // up front would be a far larger request for a panel that is usually closed.
   useEffect(() => {
     if (!open) {
       setTrades([]);
+      setBrokerRows([]);
       return;
     }
     let current = true;
     setTradesLoading(true);
-    void api
-      .historyTrades({ from_date: open, to_date: open, mode, broker })
-      .then((rows) => {
-        if (current) setTrades(rows);
-      })
+    const range = { from_date: open, to_date: open, mode, broker };
+    const request = rebuilt
+      ? api.historyBrokerTrades(range).then((rows) => {
+          if (current) {
+            setBrokerRows(rows);
+            setTrades([]);
+          }
+        })
+      : api.historyTrades(range).then((rows) => {
+          if (current) {
+            setTrades(rows);
+            setBrokerRows([]);
+          }
+        });
+    void request
       .catch(() => {
-        if (current) setTrades([]);
+        if (current) {
+          setTrades([]);
+          setBrokerRows([]);
+        }
       })
       .finally(() => {
         if (current) setTradesLoading(false);
@@ -147,9 +168,7 @@ export function PnlCalendar({
     return () => {
       current = false;
     };
-  }, [open, mode, broker]);
-
-  const byDate = useMemo(() => new Map(days.map((day) => [day.session_date, day])), [days]);
+  }, [open, mode, broker, rebuilt]);
 
 
   function step(delta: number) {
@@ -255,11 +274,90 @@ export function PnlCalendar({
         </div>
       </article>
 
-      {detail && <DayDetail day={detail} trades={trades} loading={tradesLoading} preferBroker={preferBroker} />}
+      {detail && (
+        <DayDetail
+          day={detail}
+          trades={trades}
+          brokerRows={brokerRows}
+          loading={tradesLoading}
+          preferBroker={preferBroker}
+        />
+      )}
       {open && !detail && (
         <p className="mt-4 text-sm text-slate-500 dark:text-slate-400">Nothing was traded on {open}.</p>
       )}
     </section>
+  );
+}
+
+/**
+ * A rebuilt day's trades, as the broker reported them.
+ *
+ * Four of the eight columns the local table shows cannot be filled here, and
+ * they are drawn as an em dash rather than left to look like a figure. Target
+ * and stop were ours and died with the local record; charges have no per-trade
+ * figure at any broker; and net cannot exist without charges. A zero in any of
+ * those would be read as a fact about the trade.
+ */
+function BrokerRowTable({ day, rows, figure }: { day: HistoryDay; rows: BrokerTrade[]; figure: Reported }) {
+  if (!rows.length) {
+    return (
+      <p className="p-5 text-sm text-slate-500 dark:text-slate-400">
+        {day.broker ?? "The broker"} reported this day&apos;s totals but sent no individual trades with them. Re-run the
+        backfill for this date to fetch the rows.
+      </p>
+    );
+  }
+  return (
+    <div className="table-scroll">
+      <table className="terminal-table">
+        <thead>
+          <tr>
+            <th>Stock</th>
+            <th>Qty</th>
+            <th>Entry</th>
+            <th>Exit</th>
+            <th>Target</th>
+            <th>Gross</th>
+            <th>Charges</th>
+            <th>Net</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => (
+            <tr key={`${row.script_name}-${index}`}>
+              <td>
+                <strong className="block text-slate-900 dark:text-slate-100">{row.script_name}</strong>
+                <span className="text-[11px] opacity-75">
+                  {row.trade_type ? `${row.trade_type} · ` : ""}
+                  {row.broker}
+                </span>
+              </td>
+              <td className="numeric">{row.quantity ?? "—"}</td>
+              <td className="numeric">{rupees(row.buy_price)}</td>
+              <td className="numeric">{rupees(row.sell_price)}</td>
+              <td className="numeric opacity-50">—</td>
+              <td className={`numeric ${pnlTone(row.gross_pnl)}`}>{rupees(row.gross_pnl, { signed: true })}</td>
+              <td className="numeric opacity-50">—</td>
+              <td className="numeric opacity-50">—</td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr className="border-t border-slate-300 dark:border-slate-700 font-semibold">
+            <td colSpan={5}>
+              Day total
+              <span className="block text-[11px] font-normal opacity-75">as {day.broker ?? "the broker"} reports it</span>
+            </td>
+            <td className={`numeric ${pnlTone(figure.gross)}`}>{rupees(figure.gross, { signed: true })}</td>
+            <td className="numeric">{day.broker_charges === null ? "—" : rupees(day.broker_charges)}</td>
+            <td className={`numeric ${pnlTone(figure.net)}`}>
+              {day.broker_net_pnl === null ? "—" : rupees(day.broker_net_pnl, { signed: true })}
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
   );
 }
 
@@ -342,11 +440,13 @@ function DayCell({
 function DayDetail({
   day,
   trades,
+  brokerRows,
   loading,
   preferBroker,
 }: {
   day: HistoryDay;
   trades: HistoryTrade[];
+  brokerRows: BrokerTrade[];
   loading: boolean;
   preferBroker: boolean;
 }) {
@@ -370,6 +470,8 @@ function DayDetail({
             <div key={index} className="skeleton h-10" />
           ))}
         </div>
+      ) : day.reconstructed ? (
+        <BrokerRowTable day={day} rows={brokerRows} figure={figure} />
       ) : trades.length ? (
         <div className="table-scroll">
           <table className="terminal-table">
@@ -455,6 +557,7 @@ function DayDetail({
         </p>
       )}
 
+
       <div className="space-y-2 px-5 py-4 text-xs text-slate-500 dark:text-slate-400">
         {trades.some((trade) => trade.execution_mode === "LIVE" && trade.price_source === "MODEL") && (
           <p>
@@ -491,6 +594,14 @@ function DayDetail({
             {day.broker ?? "The broker"} has not published settled figures for this day yet, so the totals above are
             this system&apos;s own: fills as recorded and charges estimated from the published rate card. They will
             differ from the broker&apos;s app by the estimate&apos;s error until the statement is fetched.
+          </p>
+        )}
+        {day.reconstructed && (
+          <p>
+            This session was rebuilt from {day.broker ?? "the broker"}&apos;s own report because no local record of it
+            survives. The stop, the target, the risk and the strategy behind each trade were ours and are not in any
+            broker report, so those columns are blank — they are unknown, not zero. {day.broker ?? "The broker"} pairs
+            buys against sells per stock, so two entries in one stock on one day can come back as a single row.
           </p>
         )}
         {day.halt_reason && <p className="text-amber-600 dark:text-amber-300">Trading halted: {day.halt_reason}</p>}

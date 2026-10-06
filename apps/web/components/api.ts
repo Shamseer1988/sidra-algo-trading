@@ -90,7 +90,15 @@ export type IndicatorSettings = {
 // "ENVIRONMENT" means nobody has saved these through the UI yet, so the
 // deployment is still reading its .env. Worth showing rather than hiding.
 export type IndicatorCatalog = { settings: SettingSpec[]; source: "DATABASE" | "ENVIRONMENT" };
-export type ReconciliationStatus = "MATCHED" | "ESTIMATED_CHARGES" | "BROKER_DATA_PENDING" | "MISMATCH";
+export type ReconciliationStatus =
+  | "MATCHED"
+  | "ESTIMATED_CHARGES"
+  | "BROKER_DATA_PENDING"
+  | "MISMATCH"
+  // A day we hold no local record of, rebuilt from the broker's own report.
+  // The other four say what a comparison found; this one says there was
+  // nothing to compare.
+  | "RECONSTRUCTED";
 // Every money field arrives as a string because the API sends Decimals: a
 // rupee figure that round-trips through a JavaScript number is a rupee figure
 // that can come back a paisa short.
@@ -152,6 +160,25 @@ export type HistoryDay = {
    *  unless the broker reported both halves; never assembled in the browser. */
   broker_net_pnl: string | null;
   broker_fetched_at: string | null;
+  /** Every figure on this day came from the broker because no local record of
+   *  it survives. It carries no stop, target or strategy. */
+  reconstructed: boolean;
+};
+
+/** One matched buy/sell pair, as the broker reported it. No stop, no target
+ *  and no net: the first two are ours, and no broker publishes a per-trade
+ *  cost for the third. */
+export type BrokerTrade = {
+  session_date: string;
+  broker: string;
+  script_name: string;
+  isin: string | null;
+  trade_type: string | null;
+  quantity: number | null;
+  buy_price: string | null;
+  sell_price: string | null;
+  gross_pnl: string | null;
+  fetched_at: string | null;
 };
 export type HistoryOverview = {
   from_date: string;
@@ -382,6 +409,8 @@ export const api = {
 
   historyOverview: (range: HistoryRange) => request<HistoryOverview>(`/history/overview${historyQuery(range)}`),
   historyDaily: (range: HistoryRange) => request<HistoryDay[]>(`/history/daily${historyQuery(range)}`),
+  historyBrokerTrades: (range: HistoryRange) =>
+    request<BrokerTrade[]>(`/history/broker-trades${historyQuery(range)}`),
   historyTrades: (range: HistoryRange & { session_date?: string; instrument_token?: string; strategy_version?: string }) =>
     request<HistoryTrade[]>(`/history/trades${historyQuery(range)}`),
   historyTrade: (positionId: string) => request<HistoryTradeDetail>(`/history/trades/${encodeURIComponent(positionId)}`),

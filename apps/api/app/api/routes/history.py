@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import AuditLog, User, UserRole
-from app.services import broker_day_figures, trade_history
+from app.services import broker_day_figures, broker_trades, trade_history
 from app.services.trading_calendar import MARKET_TIMEZONE
 
 router = APIRouter(prefix="/history", tags=["History"])
@@ -109,6 +109,7 @@ class DayResponse(BaseModel):
     broker_charges: Decimal | None
     broker_net_pnl: Decimal | None
     broker_fetched_at: str | None
+    reconstructed: bool
 
 
 class OverviewResponse(BaseModel):
@@ -249,6 +250,7 @@ def _day(summary: trade_history.DaySummary) -> DayResponse:
         broker_charges=summary.broker_charges,
         broker_net_pnl=summary.broker_net_pnl,
         broker_fetched_at=_stamp(summary.broker_fetched_at),
+        reconstructed=summary.reconstructed,
     )
 
 
@@ -263,7 +265,7 @@ async def overview(
 ) -> OverviewResponse:
     begin, end = _range(from_date, to_date)
     records = await trade_history.load_trades(session, begin, end, execution_mode=mode, broker=broker)
-    days = await trade_history.summarise_days(session, records, begin, end, broker=broker)
+    days = await trade_history.summarise_days(session, records, begin, end, broker=broker, execution_mode=mode)
     totals = trade_history.summarise_range(records, days, begin, end)
     return OverviewResponse(
         from_date=totals.from_date.isoformat(),
@@ -310,8 +312,60 @@ async def daily(
 ) -> list[DayResponse]:
     begin, end = _range(from_date, to_date)
     records = await trade_history.load_trades(session, begin, end, execution_mode=mode, broker=broker)
+    summaries = await trade_history.summarise_days(session, records, begin, end, broker=broker, execution_mode=mode)
+    return [_day(summary) for summary in summaries]
+
+
+class BrokerTradeResponse(BaseModel):
+    """One matched buy/sell pair, as the broker reported it.
+
+    No stop, no target, no risk and no net: the first three are ours and are not
+    in any broker report, and the fourth cannot exist because no broker
+    publishes a per-trade cost. Absent rather than zero, as everywhere else.
+    """
+
+    session_date: str
+    broker: str
+    script_name: str
+    isin: str | None
+    trade_type: str | None
+    quantity: int | None
+    buy_price: Decimal | None
+    sell_price: Decimal | None
+    gross_pnl: Decimal | None
+    fetched_at: str | None
+
+
+@router.get("/broker-trades", response_model=list[BrokerTradeResponse])
+async def broker_trade_rows(
+    session: DbSession,
+    _: CurrentUser,
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    broker: str | None = Query(default=None, description="Narrow to one broker's account."),
+) -> list[BrokerTradeResponse]:
+    """The broker's own trades for a range, out of the reports already stored.
+
+    No request reaches the broker here. These rows were downloaded with the day
+    figures and kept; this reads them back, which is why it works for a session
+    whose local record no longer exists.
+    """
+    begin, end = _range(from_date, to_date)
+    rows = await broker_trades.load_broker_trades(session, begin, end, broker=broker)
     return [
-        _day(summary) for summary in await trade_history.summarise_days(session, records, begin, end, broker=broker)
+        BrokerTradeResponse(
+            session_date=row.session_date.isoformat(),
+            broker=row.broker,
+            script_name=row.script_name,
+            isin=row.isin,
+            trade_type=row.trade_type,
+            quantity=row.quantity,
+            buy_price=row.buy_price,
+            sell_price=row.sell_price,
+            gross_pnl=row.gross_pnl,
+            fetched_at=_stamp(row.fetched_at),
+        )
+        for row in rows
     ]
 
 
@@ -438,6 +492,7 @@ DAY_COLUMNS = (
     ("live_trades", "Live trades"),
     ("halt_reason", "Day ended by"),
     ("reconciliation_label", "Reconciliation"),
+    ("reconstructed", "Rebuilt from broker"),
     ("broker", "Broker"),
     ("broker_realized_pnl", "Broker realised"),
     ("broker_charges", "Broker charges"),

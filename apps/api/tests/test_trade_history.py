@@ -179,11 +179,27 @@ def test_a_live_trade_inherits_its_days_verdict():
 
 
 def test_every_status_has_a_label():
+    """The UI reads these labels off the server rather than inventing them, so a
+    status without one renders as a raw constant."""
     assert set(history.STATUS_LABELS) == {
         history.MATCHED,
         history.ESTIMATED_CHARGES,
         history.BROKER_DATA_PENDING,
         history.MISMATCH,
+        history.RECONSTRUCTED,
+    }
+
+
+def test_reconstructed_is_not_a_verdict_reconcile_day_can_reach():
+    """The other four say what a comparison found. This one says there was
+    nothing to compare, which is a fact about the record rather than about the
+    broker, so no amount of broker data can produce it."""
+    assert history.RECONSTRUCTED not in {
+        history.reconcile_day(live_trades=live, local_gross=Decimal("500"), local_charges=Decimal("40"), snapshot=snap)[
+            0
+        ]
+        for live in (0, 1)
+        for snap in (None, snapshot(), snapshot(realized="500", charges="40"), snapshot(realized="100"))
     }
 
 
@@ -315,7 +331,15 @@ async def record_fills(signal_id, *, side="LONG", entry=None, exit=None, quantit
         await session.commit()
 
 
-async def record_broker(realized=None, charges=None, broker="UPSTOX", fetched_at=None, session_date=SESSION_DATE):
+async def record_broker(
+    realized=None,
+    charges=None,
+    broker="UPSTOX",
+    fetched_at=None,
+    session_date=SESSION_DATE,
+    trade_count=None,
+    rows=None,
+):
     async with SessionLocal() as session:
         session.add(
             BrokerDaySnapshot(
@@ -324,7 +348,8 @@ async def record_broker(realized=None, charges=None, broker="UPSTOX", fetched_at
                 source="profit-loss/data",
                 realized_pnl=None if realized is None else Decimal(str(realized)),
                 charges=None if charges is None else Decimal(str(charges)),
-                payload={},
+                trade_count=trade_count,
+                payload={"rows": rows or []},
                 **({"fetched_at": fetched_at} if fetched_at else {}),
             )
         )
@@ -334,7 +359,7 @@ async def record_broker(realized=None, charges=None, broker="UPSTOX", fetched_at
 async def load(from_date=SESSION_DATE, to_date=SESSION_DATE, *, mode=None, broker=None):
     async with SessionLocal() as session:
         records = await history.load_trades(session, from_date, to_date, execution_mode=mode, broker=broker)
-        days = await history.summarise_days(session, records, from_date, to_date, broker=broker)
+        days = await history.summarise_days(session, records, from_date, to_date, broker=broker, execution_mode=mode)
         return records, days, history.summarise_range(records, days, from_date, to_date)
 
 
@@ -870,3 +895,92 @@ async def test_a_paper_period_is_not_waiting_on_any_broker():
 
     _, _, totals = await load(mode="PAPER")
     assert (totals.broker_days, totals.days_pending_broker) == (0, 0)
+
+
+# --- a day that exists only at the broker --------------------------------
+#
+# Days were only ever seeded from local positions, and a broker snapshot was an
+# annotation on a day that already existed. After the history tables were
+# purged the P&L calendar was empty even with every broker snapshot fetched
+# back: sessions that really happened read as sessions that did not, which is
+# the one thing a trading record must never do.
+
+
+async def test_a_day_the_broker_reported_and_we_hold_no_record_of_still_appears():
+    await record_broker(realized="166.93", charges="37.65", trade_count=2)
+
+    days = (await load(mode="LIVE", broker="UPSTOX"))[1]
+    assert [day.session_date for day in days] == [SESSION_DATE]
+    assert days[0].reconstructed is True
+
+
+async def test_a_rebuilt_day_carries_the_brokers_figures_as_its_own():
+    """There is no local figure to keep beside them. The broker's report is the
+    whole of what the day is."""
+    await record_broker(realized="166.93", charges="37.65", trade_count=2)
+
+    day = (await load(mode="LIVE", broker="UPSTOX"))[1][0]
+    assert (day.gross_pnl, day.charges, day.net_pnl) == (Decimal("166.9300"), Decimal("37.6500"), Decimal("129.2800"))
+    assert day.broker_net_pnl == Decimal("129.2800")
+    assert (day.trades, day.live_trades) == (2, 2)
+
+
+async def test_a_rebuilt_day_says_there_was_nothing_to_reconcile():
+    """MATCHED would claim an agreement nobody tested; the other three would
+    send the operator looking for a local record that is not there."""
+    await record_broker(realized="166.93", charges="37.65", trade_count=2)
+
+    day = (await load(mode="LIVE", broker="UPSTOX"))[1][0]
+    assert day.reconciliation == history.RECONSTRUCTED
+    assert "no local record" in day.reconciliation_note
+
+
+async def test_a_rebuilt_day_without_settled_charges_says_so():
+    await record_broker(realized="166.93", charges=None, trade_count=2)
+
+    day = (await load(mode="LIVE", broker="UPSTOX"))[1][0]
+    assert day.gross_pnl == Decimal("166.9300")
+    assert day.broker_net_pnl is None
+    assert "charges" in day.reconciliation_note
+
+
+async def test_a_snapshot_that_reported_nothing_does_not_invent_a_flat_day():
+    """Drawing a ₹0 session out of silence is the same error as treating ₹0
+    charges as a cost, one level up."""
+    await record_broker(realized=None, charges=None, trade_count=0)
+    assert (await load(mode="LIVE", broker="UPSTOX"))[1] == []
+
+
+async def test_the_paper_view_is_not_offered_a_broker_day():
+    """Nothing reached a broker in a paper view by definition."""
+    await record_broker(realized="166.93", charges="37.65", trade_count=2)
+    assert (await load(mode="PAPER"))[1] == []
+
+
+async def test_a_day_we_do_hold_a_record_of_is_not_rebuilt_over():
+    """Our record and the broker's report are two sides of one day. Replacing
+    the day wholesale would discard the side that carries the stop, the target
+    and the strategy."""
+    await a_trade(gross="172.27", charges="25.94", live=True)
+    await record_broker(realized="166.93", charges="37.65", trade_count=2)
+
+    day = (await load(mode="LIVE", broker="UPSTOX"))[1][0]
+    assert day.reconstructed is False
+    assert day.gross_pnl == Decimal("172.2700")
+    assert day.broker_realized_pnl == Decimal("166.9300")
+
+
+async def test_a_rebuilt_day_outside_the_range_is_not_loaded():
+    await record_broker(realized="166.93", charges="37.65", session_date=NEXT_DATE)
+    assert (await load(SESSION_DATE, SESSION_DATE, mode="LIVE", broker="UPSTOX"))[1] == []
+
+
+async def test_rebuilt_days_total_into_the_range_like_any_other():
+    await record_broker(realized="166.93", charges="37.65", trade_count=2, session_date=SESSION_DATE)
+    await record_broker(realized="-20.00", charges="12.00", trade_count=1, session_date=NEXT_DATE)
+
+    _, days, totals = await load(SESSION_DATE, NEXT_DATE, mode="LIVE", broker="UPSTOX")
+    assert len(days) == 2
+    assert totals.trading_days == 2
+    assert totals.broker_days == 2
+    assert totals.broker_net_pnl == Decimal("97.2800")

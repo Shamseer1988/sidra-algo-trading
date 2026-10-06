@@ -840,6 +840,7 @@ const MOCK_HISTORY_DAYS = [
     broker_charges: "75.00",
     broker_net_pnl: "305.00",
     broker_fetched_at: new Date().toISOString(),
+    reconstructed: false,
   },
   {
     session_date: "2026-09-23",
@@ -865,6 +866,7 @@ const MOCK_HISTORY_DAYS = [
     broker_charges: null,
     broker_net_pnl: null,
     broker_fetched_at: null,
+    reconstructed: false,
   },
 ];
 
@@ -1794,6 +1796,68 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(cell).toBeVisible();
     await expect(cell).toContainText("est.");
     await expect(page.getByText(/still on this system's estimate/)).toBeVisible();
+  });
+
+  test("8n. Reports: a day rebuilt from the broker is shown, not reported as untraded", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    // After a history purge this is the only thing left of a session. The
+    // calendar used to seed its days from local positions alone, so a day that
+    // really happened read as a day on which nothing was traded.
+    await page.route("**/api/v1/history/daily*", async (route: Route) => {
+      await route.fulfill({
+        json: [
+          calendarDay(2, "129.28", {
+            gross_pnl: "166.93",
+            charges: "37.65",
+            trades: 2,
+            live_trades: 2,
+            reconstructed: true,
+            reconciliation: "RECONSTRUCTED",
+            reconciliation_label: "Reconstructed from broker",
+            reconciliation_note: "Rebuilt from UPSTOX's own report.",
+            broker: "UPSTOX",
+            broker_realized_pnl: "166.93",
+            broker_charges: "37.65",
+            broker_net_pnl: "129.28",
+          }),
+        ],
+      });
+    });
+    await page.route("**/api/v1/history/broker-trades*", async (route: Route) => {
+      await route.fulfill({
+        json: [
+          {
+            session_date: dayInThisMonth(2),
+            broker: "UPSTOX",
+            script_name: "TATASTEEL",
+            isin: "INE081A01020",
+            trade_type: "INTRADAY",
+            quantity: 67,
+            buy_price: "183.63",
+            sell_price: "180.97",
+            gross_pnl: "-178.22",
+            fetched_at: new Date().toISOString(),
+          },
+        ],
+      });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports");
+    await page.getByRole("button", { name: "Broker", exact: true }).click();
+
+    const cell = page.getByRole("button", { name: new RegExp(`${dayInThisMonth(2)}: \\+₹129.28`) });
+    await expect(cell).toBeVisible();
+    await cell.click();
+
+    // The broker's own row, and the four columns it cannot fill drawn as
+    // dashes rather than left to look like figures.
+    const row = page.getByRole("row").filter({ hasText: "TATASTEEL" });
+    await expect(row).toContainText("67");
+    await expect(row).toContainText("₹183.63");
+    await expect(row).toContainText("₹180.97");
+    await expect(row).toContainText("−₹178.22");
+    await expect(page.getByText(/they are unknown, not zero/)).toBeVisible();
   });
 
   test("8i. Reports: realised and unrealised are two figures, never one", async ({ page }) => {

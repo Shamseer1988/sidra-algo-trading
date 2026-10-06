@@ -217,7 +217,12 @@ async def test_the_whole_response_is_kept_for_investigating_a_disagreement():
 
 async def clean() -> None:
     async with SessionLocal() as session:
-        await session.execute(delete(BrokerDaySnapshot).where(BrokerDaySnapshot.session_date == SESSION_DATE))
+        await session.execute(
+            delete(BrokerDaySnapshot).where(
+                BrokerDaySnapshot.session_date >= date(2026, 3, 1),
+                BrokerDaySnapshot.session_date <= date(2026, 10, 31),
+            )
+        )
         await session.commit()
 
 
@@ -287,3 +292,215 @@ async def test_an_unreported_figure_is_stored_as_absent_not_zero():
         row = await session.scalar(select(BrokerDaySnapshot).where(BrokerDaySnapshot.session_date == SESSION_DATE))
     assert row.realized_pnl is None
     assert row.charges == Decimal("40.0000")
+
+
+# --- which session a row belongs to --------------------------------------
+#
+# Upstox sends dates as strings and does not say which layout. Read the wrong
+# way round, "01-10-2026" is a real date in January -- a trade filed under the
+# wrong month, on a screen that gives no hint anything went wrong.
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["2026-10-01", "01-10-2026", "01/10/2026", "2026/10/01", "2026-10-01T09:30:00+05:30", "2026-10-01 09:30:00"],
+)
+def test_a_row_date_is_read_whatever_layout_it_arrives_in(value):
+    assert figures.row_date(value) == date(2026, 10, 1)
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", "not a date", 12345, {}])
+def test_an_unreadable_row_date_is_none_rather_than_a_guess(value):
+    assert figures.row_date(value) is None
+
+
+def test_a_row_is_filed_under_the_day_it_closed_on():
+    grouped, unfiled = figures.group_by_session(
+        [
+            {"buy_date": "01-10-2026", "sell_date": "01-10-2026", "sell_amount": "100"},
+            {"buy_date": "05-10-2026", "sell_date": "05-10-2026", "sell_amount": "200"},
+            {"buy_date": "05-10-2026", "sell_date": "05-10-2026", "sell_amount": "300"},
+        ]
+    )
+    assert sorted(grouped) == [date(2026, 10, 1), date(2026, 10, 5)]
+    assert len(grouped[date(2026, 10, 5)]) == 2
+    assert unfiled == []
+
+
+def test_a_carried_position_is_filed_under_the_day_the_money_was_realised():
+    grouped, _ = figures.group_by_session([{"buy_date": "29-09-2026", "sell_date": "01-10-2026"}])
+    assert list(grouped) == [date(2026, 10, 1)]
+
+
+def test_a_row_with_no_sell_date_falls_back_to_the_buy_date():
+    grouped, _ = figures.group_by_session([{"buy_date": "01-10-2026", "sell_date": None}])
+    assert list(grouped) == [date(2026, 10, 1)]
+
+
+def test_an_unfilable_row_is_reported_rather_than_dropped():
+    """A row silently discarded is a day that quietly disagrees with the
+    broker's own screen, which is the disagreement this whole path exists to
+    surface."""
+    grouped, unfiled = figures.group_by_session([{"scrip_name": "RELIANCE", "sell_amount": "100"}])
+    assert grouped == {}
+    assert len(unfiled) == 1
+
+
+# --- the financial year boundary -----------------------------------------
+
+
+def test_a_range_inside_one_financial_year_is_one_request():
+    assert figures.financial_year_spans(date(2026, 9, 1), date(2026, 10, 6)) == [
+        ("2627", date(2026, 9, 1), date(2026, 10, 6))
+    ]
+
+
+def test_a_range_crossing_the_april_boundary_is_split():
+    """Asking with one year for both halves returns an empty report for the half
+    that does not belong to it -- no error, just months that look untraded."""
+    assert figures.financial_year_spans(date(2026, 3, 20), date(2026, 4, 10)) == [
+        ("2526", date(2026, 3, 20), date(2026, 3, 31)),
+        ("2627", date(2026, 4, 1), date(2026, 4, 10)),
+    ]
+
+
+def test_a_multi_year_range_is_split_into_one_span_per_year():
+    spans = figures.financial_year_spans(date(2025, 1, 1), date(2026, 10, 6))
+    assert [year for year, _, _ in spans] == ["2425", "2526", "2627"]
+
+
+def test_a_single_day_is_a_single_span():
+    assert figures.financial_year_spans(SESSION_DATE, SESSION_DATE) == [("2627", SESSION_DATE, SESSION_DATE)]
+
+
+# --- the sync, which the backfill and both scheduled jobs all run ---------
+
+
+class FakeRangeClient:
+    """Answers a range request with whatever rows are given, by date."""
+
+    def __init__(self, rows: list[dict], charges: dict | None = None):
+        self.rows = rows
+        self.charges_body = charges if charges is not None else {"charges_breakdown": {"total": "37.65"}}
+        self.range_calls: list[dict] = []
+        self.charge_calls: list[date] = []
+
+    async def trade_profit_loss(self, **kwargs):
+        if kwargs["page_number"] > 1:
+            return []
+        self.range_calls.append(kwargs)
+        return self.rows
+
+    async def trade_charges(self, **kwargs):
+        self.charge_calls.append(kwargs["from_date"])
+        return self.charges_body
+
+
+def two_days() -> list[dict]:
+    return [
+        {"buy_date": "01-10-2026", "sell_date": "01-10-2026", "buy_amount": "1000", "sell_amount": "1166.93"},
+        {"buy_date": "05-10-2026", "sell_date": "05-10-2026", "buy_amount": "900", "sell_amount": "880"},
+    ]
+
+
+async def test_the_sync_records_one_day_per_session_the_broker_reported():
+    client = FakeRangeClient(two_days())
+    async with SessionLocal() as session:
+        report = await figures.sync_days(session, client, date(2026, 10, 1), date(2026, 10, 6))
+        await session.commit()
+        stored = await latest_broker_snapshots(session, date(2026, 10, 1), date(2026, 10, 6))
+
+    assert report.days_recorded == [date(2026, 10, 1), date(2026, 10, 5)]
+    assert sorted(stored) == [date(2026, 10, 1), date(2026, 10, 5)]
+    assert stored[date(2026, 10, 1)].realized_pnl == Decimal("166.9300")
+
+
+async def test_the_trades_come_back_in_one_request_for_the_whole_range():
+    """The shape is the cost control: a month of sessions is one request for the
+    trades, and only the charges are asked for a day at a time."""
+    client = FakeRangeClient(two_days())
+    async with SessionLocal() as session:
+        report = await figures.sync_days(session, client, date(2026, 10, 1), date(2026, 10, 6))
+        await session.commit()
+
+    assert len(client.range_calls) == 1
+    assert client.charge_calls == [date(2026, 10, 1), date(2026, 10, 5)]
+    assert report.requests == 3
+
+
+async def test_a_day_whose_charges_have_settled_is_never_asked_about_again():
+    client = FakeRangeClient(two_days())
+    async with SessionLocal() as session:
+        await figures.sync_days(session, client, date(2026, 10, 1), date(2026, 10, 6))
+        await session.commit()
+
+    again = FakeRangeClient(two_days())
+    async with SessionLocal() as session:
+        report = await figures.sync_days(session, again, date(2026, 10, 1), date(2026, 10, 6))
+        await session.commit()
+
+    assert again.charge_calls == []
+    assert report.days_recorded == []
+    assert report.days_skipped == [date(2026, 10, 1), date(2026, 10, 5)]
+    assert report.requests == 1
+
+
+async def test_an_unsettled_day_is_asked_about_again():
+    """The whole point of the morning pass: a day fetched before settlement kept
+    its realised figure and no cost, and nothing ever asked again."""
+    unsettled = FakeRangeClient(two_days(), charges={"charges_breakdown": {"total": "0"}})
+    async with SessionLocal() as session:
+        await figures.sync_days(session, unsettled, date(2026, 10, 1), date(2026, 10, 6))
+        await session.commit()
+        waiting = await figures.dates_awaiting_charges(session, date(2026, 10, 1), date(2026, 10, 6))
+
+    assert waiting == {date(2026, 10, 1), date(2026, 10, 5)}
+
+    settled = FakeRangeClient(two_days())
+    async with SessionLocal() as session:
+        report = await figures.sync_days(session, settled, date(2026, 10, 1), date(2026, 10, 6))
+        await session.commit()
+        stored = await latest_broker_snapshots(session, date(2026, 10, 1), date(2026, 10, 6))
+        still_waiting = await figures.dates_awaiting_charges(session, date(2026, 10, 1), date(2026, 10, 6))
+
+    assert report.days_recorded == [date(2026, 10, 1), date(2026, 10, 5)]
+    assert stored[date(2026, 10, 1)].charges == Decimal("37.6500")
+    assert still_waiting == set()
+
+
+async def test_force_re_asks_a_settled_day():
+    client = FakeRangeClient(two_days())
+    async with SessionLocal() as session:
+        await figures.sync_days(session, client, date(2026, 10, 1), date(2026, 10, 6))
+        await session.commit()
+
+    again = FakeRangeClient(two_days())
+    async with SessionLocal() as session:
+        report = await figures.sync_days(session, again, date(2026, 10, 1), date(2026, 10, 6), force=True)
+        await session.commit()
+
+    assert len(again.charge_calls) == 2
+    assert report.days_skipped == []
+
+
+async def test_a_row_outside_the_range_asked_for_is_not_filed():
+    """A snapshot built from part of a day's trades would be worse than none:
+    it reads as a settled figure and disagrees with the broker's own screen."""
+    rows = two_days() + [{"buy_date": "20-09-2026", "sell_date": "20-09-2026", "buy_amount": "10", "sell_amount": "20"}]
+    client = FakeRangeClient(rows)
+    async with SessionLocal() as session:
+        report = await figures.sync_days(session, client, date(2026, 10, 1), date(2026, 10, 6))
+        await session.commit()
+
+    assert date(2026, 9, 20) not in report.days_seen
+
+
+async def test_a_range_with_no_trades_costs_one_request_and_records_nothing():
+    client = FakeRangeClient([])
+    async with SessionLocal() as session:
+        report = await figures.sync_days(session, client, date(2026, 10, 1), date(2026, 10, 6))
+        await session.commit()
+
+    assert report.requests == 1
+    assert report.days_recorded == []
+    assert client.charge_calls == []
