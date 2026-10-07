@@ -260,19 +260,43 @@ async def main(args) -> int:
         from redis.asyncio import Redis
 
         redis = Redis.from_url(str(settings.redis_url), decode_responses=True)
-        tracking = await redis.get("safety:paper_tracking_enabled")
-        stop = await redis.hgetall("safety:emergency_stop")
-        state = await redis.get("scanner:worker_state")
+        await redis.ping()
         print(f"  {OK} Redis reachable.")
-        print(f"  paper tracking         : {'off' if tracking == 'false' else 'on'}")
+
+        # Every key is read on its own. Reading the worker state -- a hash --
+        # with GET raised WRONGTYPE and took the emergency stop and the master
+        # switch down with it, reporting "Redis unreachable" about a Redis that
+        # was answering fine. A diagnostic that loses three facts to one bad
+        # assumption is worse than no diagnostic.
+        async def read(label: str, getter) -> object:  # noqa: ANN001
+            try:
+                return await getter()
+            except Exception as error:  # noqa: BLE001 - one key must not sink the rest
+                print(f"  {WARN} {label} could not be read: {type(error).__name__}: {error}")
+                return None
+
+        tracking = await read("paper tracking", lambda: redis.get("safety:paper_tracking_enabled"))
+        stop = await read("emergency stop", lambda: redis.hgetall("safety:emergency_stop")) or {}
+        worker = await read("scanner worker state", lambda: redis.hgetall("scanner:worker_state")) or {}
+
+        # "unknown" rather than "on" when the read failed. A master switch
+        # reported as on because nothing could be read is the worst of the
+        # three possible answers.
+        print(f"  paper tracking         : {'unknown' if tracking is None else 'off' if tracking == 'false' else 'on'}")
         print(f"  emergency stop         : {'ACTIVE' if stop.get('active') == 'true' else 'clear'}")
-        print(f"  scanner worker state   : {state or 'unknown'}")
+        print(f"  scanner worker state   : {worker.get('status') or 'unknown'}")
+        if worker.get("detail"):
+            print(f"  worker said            : {worker['detail']}")
+        if worker.get("updated_at"):
+            print(f"  worker last spoke      : {worker['updated_at']}")
         if tracking == "false":
             problems += 1
             print(f"  {BAD} Paper tracking is off. It is the scanner's master switch: no signals, no live orders.")
         if stop.get("active") == "true":
             problems += 1
             print(f"  {BAD} Emergency stop is active. Nothing will be traded until it is cleared.")
+            if stop.get("reason"):
+                print(f"        reason: {stop['reason']}")
         await redis.aclose()
     except Exception as error:  # noqa: BLE001 - reporting tool
         problems += 1
