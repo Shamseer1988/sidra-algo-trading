@@ -44,9 +44,17 @@ from app.core.config import Settings
 from app.db.models import LiveOrderSubmission, MarketCandle, PaperSignal
 from app.db.session import SessionLocal
 from app.services.broker_adapter import BUY, INTRADAY, OPEN_STATUSES, SELL, BrokerAdapter
+from app.services.exit_rules import (
+    BREAKEVEN_AT_R,
+    NO_TRAIL,
+    minutes_until_square_off,
+    time_exit_due,
+    trail_to,
+    under_account_deadline,
+)
 from app.services.exit_rules import from_controls as exit_rules_from
-from app.services.exit_rules import minutes_until_square_off, time_exit_due, under_account_deadline
 from app.services.live_execution_gateway import BrokerNotSelectedError, live_order_adapter
+from app.services.live_fills import fills_by_signal
 from app.services.live_orders import (
     ACCEPTED,
     UNKNOWN,
@@ -58,6 +66,7 @@ from app.services.live_orders import (
     send_prepared_order,
 )
 from app.services.live_protection import protect_position
+from app.services.price_ticks import round_to_tick
 from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
 from app.services.trading_calendar import MARKET_TIMEZONE, MarketPhase, TradingCalendar
 
@@ -107,7 +116,8 @@ class ExitSweepOutcome:
         return [
             item
             for item in self.exits
-            if item.acted or item.step in {"cancel_failed", "orphaned", "no_signal", "stale_price"}
+            if item.acted
+            or item.step in {"cancel_failed", "orphaned", "no_signal", "stale_price", "trail_blocked", "trail_failed"}
         ]
 
 
@@ -123,24 +133,36 @@ def target_reached(*, long: bool, close: Decimal, target: Decimal) -> bool:
     return close >= target if long else close <= target
 
 
-async def _latest_close(session: AsyncSession, instrument_token: str) -> tuple[Decimal | None, datetime | None]:
-    """The newest completed candle's close, and when that candle closed.
+async def _latest_candle(session: AsyncSession, instrument_token: str) -> MarketCandle | None:
+    """The newest completed candle, whole.
 
-    The timestamp travels with the price because the price alone cannot say
-    whether it is still true. This read had no freshness check at all: a feed
-    that stopped at 11:00 left the 14:30 target measured against an 11:00 close,
-    which is how a target is missed on a trade that reached it or hit on one
-    that did not.
+    Whole rather than just the close, because the close alone cannot say
+    whether it is still true and a trail needs the candle's extreme as well.
+    This read had no freshness check at all: a feed that stopped at 11:00 left
+    the 14:30 target measured against an 11:00 close, which is how a target is
+    missed on a trade that reached it or hit on one that did not.
     """
-    candle = await session.scalar(
+    return await session.scalar(
         select(MarketCandle)
         .where(MarketCandle.instrument_token == instrument_token)
         .order_by(MarketCandle.closed_at.desc())
         .limit(1)
     )
-    if candle is None:
-        return None, None
-    return _decimal(candle.close), candle.closed_at
+
+
+async def _entry_fill(session: AsyncSession, signal: PaperSignal, side: str) -> Decimal | None:
+    """What the broker actually paid to open this trade, or None.
+
+    The real fill, not the signal's intended price. Break-even means the price
+    paid: a long filled at ₹4,788.80 on a signal that said ₹4,780 and then
+    "moved to break-even" at ₹4,780 would have its stop ₹8.80 *below* cost, and
+    a trade stopped there is a loser wearing the name of a scratch.
+    """
+    fills = await fills_by_signal(session, {signal.id})
+    recorded = fills.get(signal.id)
+    if recorded is None:
+        return None
+    return recorded.entry(side).price
 
 
 def price_refusal(closed_at: datetime | None, now: datetime) -> str | None:
@@ -466,6 +488,7 @@ async def _hold_or_protect(
     book: list | None,
     rules=None,  # noqa: ANN001 - ExitRules; already resolved against the account deadline
     now: datetime | None = None,
+    candle: MarketCandle | None = None,
 ) -> PositionExit:
     """Holding is only safe if something is behind the position.
 
@@ -498,7 +521,12 @@ async def _hold_or_protect(
     # leaves -- read as protected, once a minute, all day.
     covered = sum(int(stop.quantity or 0) for stop in working)
     if covered >= quantity:
-        return holding
+        # Protected. The only thing left to ask is whether the stop should now
+        # be somewhere better than it is.
+        moved = await _trail_stop(
+            session, adapter, position, signal, net, symbol, quantity, candle, working, book, rules
+        )
+        return moved if moved is not None else holding
 
     logger.warning(
         "live_exit_manager.position_unprotected symbol=%s qty=%s covered=%s stops_recorded=%s",
@@ -577,6 +605,153 @@ async def _hold_or_protect(
     )
 
 
+def _resting_trigger(working: list[LiveOrderSubmission], book: list | None) -> Decimal | None:
+    """Where the one working stop sits, as the broker has it.
+
+    The broker's book, not our record: our row says where the stop was placed,
+    and the whole point of a trail is that it no longer is. Returns None when
+    there is more than one working stop or the trigger cannot be read, because
+    a trail that guesses the current level either moves a stop backwards or
+    cancels and replaces an unchanged one every minute for the rest of the day.
+    """
+    if book is None or len(working) != 1:
+        return None
+    numbers = {str(number) for number in (working[0].broker_order_numbers or []) if number}
+    triggers = [
+        order.trigger_price
+        for order in book
+        if str(order.broker_order_id) in numbers and order.status in OPEN_STATUSES and order.trigger_price is not None
+    ]
+    return triggers[0] if len(triggers) == 1 else None
+
+
+async def _trail_stop(
+    session: AsyncSession,
+    adapter: BrokerAdapter,
+    position,  # noqa: ANN001 - BrokerPositionRecord
+    signal: PaperSignal,
+    net: Decimal,
+    symbol: str,
+    quantity: int,
+    candle: MarketCandle | None,
+    working: list[LiveOrderSubmission],
+    book: list | None,
+    rules,  # noqa: ANN001 - ExitRules
+) -> PositionExit | None:
+    """Move the stop up behind a trade that is far enough ahead, or leave it.
+
+    Trailing existed only in the paper engine. The rule was configurable, the
+    screen described it, the journal showed trades exiting at the trailed level
+    -- and the broker's stop never moved. An operator who turned break-even on
+    was measuring one system and trading another.
+
+    **Only break-even is applied live.** ``trail_to`` also offers an ATR trail,
+    and that one is deliberately left to paper and backtesting until a stop can
+    be modified in place at the broker. Moving a stop here means cancelling the
+    resting one and placing another, so a rule that moves the level most
+    minutes of the day would spend the session repeatedly leaving the position
+    unprotected for the length of a round trip. Break-even moves once per trade.
+
+    Nothing is moved unless the position is already protected, the book says
+    exactly where the stop is, and the candle is fresh. Each of those is a way
+    of turning a protective order into a worse one.
+    """
+    if rules is None or rules.trailing_rule == NO_TRAIL or candle is None:
+        return None
+    if rules.trailing_rule != BREAKEVEN_AT_R:
+        # Said in the log rather than to the operator every minute. The place
+        # this has to be visible is the strategy screen, where the rule is
+        # chosen, and it says so there.
+        logger.info("live_exit_manager.trail_not_applied_live symbol=%s rule=%s", symbol, rules.trailing_rule)
+        return None
+
+    current = _resting_trigger(working, book)
+    if current is None:
+        return None
+
+    long = net > 0
+    side = "LONG" if long else "SHORT"
+    planned, planned_stop = _decimal(signal.entry_price), _decimal(signal.stop_price)
+    if planned is None or planned_stop is None:
+        return None
+    # The risk the trade was sized on, from the signal rather than from the stop
+    # as it stands: once the stop has moved, the distance to it is no longer the
+    # R that "one R ahead" refers to. The paper engine measures it the same way,
+    # and the two have to agree or the journal stops describing the account.
+    risk = abs(planned - planned_stop)
+    entry = await _entry_fill(session, signal, side)
+    if entry is None:
+        entry = planned
+    if risk <= 0 or entry <= 0:
+        return None
+
+    moved = trail_to(
+        side=side,
+        entry=entry,
+        current_stop=current,
+        risk_per_unit=risk,
+        candle_close=_decimal(candle.close),
+        candle_extreme=_decimal(candle.high if long else candle.low),
+        atr=None,
+        rules=rules,
+    )
+    if moved is None:
+        return None
+
+    exit_side = SELL if long else BUY
+    level = round_to_tick(moved, exit_side)
+    if level is None or level == current:
+        # The tick grid put it back where it already is. Cancelling and
+        # replacing an identical stop is a naked moment bought for nothing.
+        return None
+    # Rounding can push a level through the price that trail_to had just cleared.
+    # A stop already through the close is filled on the next tick at a price
+    # nobody chose.
+    close = _decimal(candle.close)
+    if close is not None and (level >= close if long else level <= close):
+        return None
+
+    # Cancel first, always. Placing the new stop while the old one rests leaves
+    # two live stops behind one position, and when one fills the other opens a
+    # reversed one.
+    cleared, problem = await _cancel_orders(adapter, _ids_to_clear(position, working, book))
+    if not cleared:
+        return PositionExit(
+            symbol,
+            False,
+            "trail_blocked",
+            f"The stop for {symbol} should move from {current} to {level}, but the resting one could not be "
+            f"cancelled ({problem}). It stands where it was; the position is still protected.",
+            quantity=quantity,
+        )
+
+    outcome = await protect_position(
+        session,
+        adapter,
+        signal=signal,
+        net=net,
+        product=(working[0].canonical_product if working else None) or INTRADAY,
+        symbol=symbol,
+        stop_price=level,
+    )
+    if outcome.protected:
+        logger.info("live_exit_manager.stop_trailed symbol=%s from=%s to=%s", symbol, current, level)
+        return PositionExit(
+            symbol,
+            True,
+            "trailed",
+            f"Stop moved from {current} to {level} — entry was {entry}, so this trade can no longer lose.",
+            quantity=quantity,
+        )
+    return PositionExit(
+        symbol,
+        outcome.flattened,
+        "trail_failed",
+        f"The stop for {symbol} was cancelled to move it to {level} and the replacement did not rest. {outcome.detail}",
+        quantity=quantity,
+    )
+
+
 async def _consider(
     session: AsyncSession,
     adapter: BrokerAdapter,
@@ -608,11 +783,20 @@ async def _consider(
     reason = time_exit_due(opened_at=signal.created_at, now=now, rules=rules)
 
     if reason is None:
-        close, closed_at = await _latest_close(session, signal.instrument_token)
+        candle = await _latest_candle(session, signal.instrument_token)
+        close = _decimal(candle.close) if candle is not None else None
         target = _decimal(signal.target_price)
-        unusable = price_refusal(closed_at, now) if close is not None else "there is no completed candle for it"
+        unusable = (
+            price_refusal(candle.closed_at if candle else None, now)
+            if close is not None
+            else ("there is no completed candle for it")
+        )
         if target is None:
             unusable = "the trade carries no target"
+        # Nothing downstream may read a candle this old. A target judged on it
+        # is wrong, and a stop moved on it is worse -- the trail would set a
+        # level from a price the market left behind.
+        usable_candle = None if unusable is not None else candle
 
         if unusable is not None:
             # The target cannot be judged. The stop still can, and must: this
@@ -634,6 +818,7 @@ async def _consider(
                 book,
                 rules,
                 now,
+                usable_candle,
             )
             if outcome.step != "holding":
                 return outcome
@@ -664,6 +849,7 @@ async def _consider(
                 book,
                 rules,
                 now,
+                usable_candle,
             )
         reason = f"Target reached at {close}"
 

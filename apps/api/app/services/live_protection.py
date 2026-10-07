@@ -346,6 +346,7 @@ async def protect_position(
     net: Decimal,
     product: str,
     symbol: str | None = None,
+    stop_price: Decimal | None = None,
 ) -> ProtectionOutcome:
     """Put a stop behind a held position, or close it if one cannot be placed.
 
@@ -359,6 +360,11 @@ async def protect_position(
 
     ``net`` is the broker's signed quantity, so the side and size come from what
     is actually held rather than from what was ordered.
+
+    ``stop_price`` overrides the signal's level, for a stop that has since been
+    moved. It defaults to the signal's, which is where a trade's first stop
+    goes; a trail passes the level it worked out, because re-reading the signal
+    would put a moved stop back where it started every time this ran.
     """
     quantity = int(abs(net))
     exit_side = _exit_side(net > 0)
@@ -367,7 +373,7 @@ async def protect_position(
     # normalises it anyway, but a number announced to the operator that the
     # broker never saw is its own small lie -- and this path announced
     # "Stop at 977.9632" on a day the broker rejected exactly that price.
-    stop_price = round_to_tick(Decimal(str(signal.stop_price)), exit_side)
+    stop_price = round_to_tick(Decimal(str(stop_price if stop_price is not None else signal.stop_price)), exit_side)
 
     for attempt in range(STOP_PLACE_ATTEMPTS):
         status, ids, detail = await _place_exit(

@@ -18,7 +18,7 @@ import type { ExitRules } from "../../components/api";
 const TRAILING_LABELS: Record<ExitRules["trailing_rule"], string> = {
   NONE: "None — the stop stays where it was placed",
   BREAKEVEN_AT_R: "Move to entry once ahead",
-  ATR_TRAIL: "Follow price at an ATR distance",
+  ATR_TRAIL: "Follow price at an ATR distance (paper only)",
 };
 
 const TARGET_LABELS: Record<ExitRules["target_rule"], string> = {
@@ -132,6 +132,12 @@ export function ExitRulesFields({
             />
           </label>
         )}
+        {rules.trailing_rule === "BREAKEVEN_AT_R" && (
+          <p className="field-label text-[11px] font-normal opacity-75 sm:col-span-2">
+            Applied live: once the trade is this far ahead, the stop resting at the broker is moved to the price
+            actually paid. Break-even on price, not on money — both legs are charged either way.
+          </p>
+        )}
         {rules.trailing_rule === "ATR_TRAIL" && (
           <label className="field-label">
             Trail distance (× ATR)
@@ -146,6 +152,17 @@ export function ExitRulesFields({
               onChange={(event) => set("trailing_atr_multiple", Number(event.target.value))}
             />
           </label>
+        )}
+        {rules.trailing_rule === "ATR_TRAIL" && (
+          /* Said here, where the rule is chosen, because this is where the trap
+             is set: the journal would show trades exiting at the trailed level
+             while the broker's stop had never moved. */
+          <p className="field-label text-[11px] font-normal text-amber-600 dark:text-amber-300 sm:col-span-2">
+            Not applied live — paper and backtesting only. Moving a stop at the broker means cancelling the resting
+            one and placing another, and a rule that moves the level most minutes of the day would leave the position
+            unprotected for the length of a round trip each time. Live trades on this strategy keep the stop they were
+            given.
+          </p>
         )}
         <label className="field-label">
           Close after (minutes, blank = never)

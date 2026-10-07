@@ -2179,6 +2179,14 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
 
     await page.getByLabel("Trailing").selectOption("BREAKEVEN_AT_R");
     await expect(page.getByLabel("Move at (R ahead)")).toBeVisible();
+    // The form says which side of the system a rule reaches. Break-even moves
+    // the stop resting at the broker; the ATR trail does not, and the journal
+    // showing trades exiting at a level the account never had is exactly the
+    // trap this line exists to close.
+    await expect(page.getByText(/the stop resting at the broker is moved/)).toBeVisible();
+
+    await page.getByLabel("Trailing").selectOption("ATR_TRAIL");
+    await expect(page.getByText(/Not applied live — paper and backtesting only/)).toBeVisible();
   });
   test("11. History: the broker figures can be fetched, and only where there is a broker", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");

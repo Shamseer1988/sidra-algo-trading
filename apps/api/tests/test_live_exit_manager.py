@@ -62,7 +62,7 @@ class FakeAdapter:
         return self._submit
 
 
-def book_order(broker_order_id: str = "stop-1", status: str = "OPEN"):
+def book_order(broker_order_id: str = "stop-1", status: str = "OPEN", trigger: str | None = "2950.00"):
     """A real BrokerOrderRecord, not a stand-in.
 
     The sweep reads ``status`` and ``broker_order_id`` off these, and a
@@ -80,6 +80,10 @@ def book_order(broker_order_id: str = "stop-1", status: str = "OPEN"):
         order_type="SL-M",
         quantity=143,
         filled_quantity=0,
+        # Where the stop sits, as the broker has it. The trail reads this rather
+        # than our own record, because the whole point of a trail is that the
+        # level we placed is no longer the level that is working.
+        trigger_price=None if trigger is None else Decimal(trigger),
     )
 
 
@@ -112,14 +116,30 @@ def settings(*, mode: str = "LIVE", enabled: bool = True):
     return SimpleNamespace(application_mode=mode, live_trading_enabled=enabled)
 
 
-def signal(*, target: str = "2850.00", square_off: str | None = None, minutes_ago: int = 30):
-    controls = {"exit_rules": {"square_off_time": square_off}} if square_off else {}
+def signal(
+    *,
+    target: str = "2850.00",
+    square_off: str | None = None,
+    minutes_ago: int = 30,
+    entry: str = "2900.00",
+    stop: str = "2950.00",
+    trailing: str | None = None,
+    trigger_r: float = 1.0,
+):
+    rules: dict = {}
+    if square_off:
+        rules["square_off_time"] = square_off
+    if trailing:
+        rules["trailing_rule"] = trailing
+        rules["trailing_trigger_r"] = trigger_r
     return SimpleNamespace(
         id=uuid4(),
         instrument_token="NSE_EQ|INE415G01027",
+        entry_price=Decimal(entry),
+        stop_price=Decimal(stop),
         target_price=Decimal(target),
         created_at=datetime.now(UTC) - timedelta(minutes=minutes_ago),
-        strategy_snapshot={"effective_controls": controls},
+        strategy_snapshot={"effective_controls": {"exit_rules": rules} if rules else {}},
     )
 
 
@@ -203,6 +223,12 @@ def wiring(monkeypatch: pytest.MonkeyPatch):
         # How old the last completed candle is. Fresh by default; the target is
         # only measured against a price recent enough to still be true.
         close_age_minutes=1.0,
+        # The best price the trade has seen on this candle: the high for a long
+        # and the low for a short. Only a trail reads it.
+        extreme=None,
+        # What the broker actually filled the entry at. Empty by default, which
+        # falls the trail back to the signal's intended price.
+        fills={},
         stops=[stop_row()],
         deadline=None,
     )
@@ -219,10 +245,32 @@ def wiring(monkeypatch: pytest.MonkeyPatch):
     async def find_signal(_session, _symbol, _start, _end):
         return state.signal
 
-    async def latest_close(_session, _token):
+    async def latest_candle(_session, token):
+        """A real MarketCandle, for the reason every other fake here is real.
+
+        The trail reads the candle's extreme and the ATR query reads its
+        session date and opening time; a SimpleNamespace would answer for all
+        of them whether or not the column exists.
+        """
         if state.close is None:
-            return None, None
-        return state.close, module.datetime.now(UTC) - timedelta(minutes=state.close_age_minutes)
+            return None
+        from app.db.models import MarketCandle
+
+        closed = module.datetime.now(UTC) - timedelta(minutes=state.close_age_minutes)
+        extreme = state.extreme if state.extreme is not None else state.close
+        return MarketCandle(
+            instrument_token=token,
+            timeframe_seconds=60,
+            session_date=closed.date(),
+            opened_at=closed - timedelta(minutes=1),
+            closed_at=closed,
+            open=state.close,
+            high=max(state.close, extreme),
+            low=min(state.close, extreme),
+            close=state.close,
+            volume=1000,
+            tick_count=10,
+        )
 
     async def resting(_session, _signal_id, _start, _end):
         return state.stops
@@ -233,10 +281,14 @@ def wiring(monkeypatch: pytest.MonkeyPatch):
     async def deadline(_session):
         return state.deadline
 
+    async def fills(_session, _ids):
+        return state.fills
+
     monkeypatch.setattr(module, "_account_deadline", deadline)
+    monkeypatch.setattr(module, "fills_by_signal", fills)
     monkeypatch.setattr(module, "live_order_adapter", adapter_for)
     monkeypatch.setattr(module, "_signal_for", find_signal)
-    monkeypatch.setattr(module, "_latest_close", latest_close)
+    monkeypatch.setattr(module, "_latest_candle", latest_candle)
     monkeypatch.setattr(module, "_recorded_stops", resting)
     monkeypatch.setattr(module, "prepare_submission", prepare)
     monkeypatch.setattr(module, "apply_outcome", lambda *_a, **_k: None)
@@ -1043,3 +1095,182 @@ async def test_a_stale_price_is_reported_rather_than_left_in_the_quiet_pile(wiri
     result = await sweep(wiring)
 
     assert [item.step for item in result.noteworthy] == ["stale_price"]
+
+
+# --- break-even at 1R, at the broker ----------------------------------------
+#
+# Trailing existed only in the paper engine. The rule was configurable, the
+# strategy screen described it, the journal showed trades exiting at the trailed
+# level -- and the broker's stop never moved. An operator who turned break-even
+# on was measuring one system and trading another.
+
+
+def ahead(**overrides):
+    """A short far enough past its entry to have earned break-even.
+
+    Entry 2900, stop 2950, so one R is ₹50. A low of 2840 is ₹60 ahead. The
+    target is out at 2700 so the trade is not closed before the stop can move.
+    """
+    base = {"target": "2700", "entry": "2900", "stop": "2950", "trailing": "BREAKEVEN_AT_R"}
+    base.update(overrides)
+    return signal(**base)
+
+
+@pytest.fixture
+def trailing(wiring, monkeypatch):
+    moves = []
+
+    async def spy(_session, _adapter, **kwargs):
+        moves.append(kwargs)
+        return SimpleNamespace(protected=True, flattened=False, detail=f"Stop at {kwargs.get('stop_price')}.")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.moves = moves
+    wiring.signal = ahead()
+    wiring.close = Decimal("2845")
+    wiring.extreme = Decimal("2840")
+    wiring.adapter = FakeAdapter([position(Decimal("-143"))])
+    return wiring
+
+
+@pytest.mark.asyncio
+async def test_a_short_one_r_ahead_has_its_stop_moved_to_break_even(trailing) -> None:
+    result = await sweep(trailing)
+
+    assert trailing.adapter.cancelled == ["stop-1"]
+    assert trailing.moves[0]["stop_price"] == Decimal("2900.00")
+    assert result.exits[0].step == "trailed"
+    assert result.exits[0].acted is True
+    assert "can no longer lose" in result.exits[0].detail
+
+
+@pytest.mark.asyncio
+async def test_a_long_one_r_ahead_has_its_stop_moved_up(trailing) -> None:
+    trailing.signal = ahead(entry="2900", stop="2850", target="3300")
+    trailing.close = Decimal("2960")
+    trailing.extreme = Decimal("2960")
+    trailing.adapter = FakeAdapter([position(Decimal("143"))], orders=[book_order(trigger="2850.00")])
+
+    await sweep(trailing)
+    assert trailing.moves[0]["stop_price"] == Decimal("2900.00")
+
+
+@pytest.mark.asyncio
+async def test_break_even_is_the_price_the_broker_actually_filled(trailing) -> None:
+    """A long filled at ₹4,788.80 on a signal that said ₹4,780, moved to
+    "break-even" at ₹4,780, has its stop below cost. A trade stopped there is a
+    loser wearing the name of a scratch."""
+    from app.services.live_fills import FillSide, SignalFills
+
+    trailing.fills = {trailing.signal.id: SignalFills(sell=FillSide(quantity=143, price=Decimal("2890.00")))}
+
+    await sweep(trailing)
+    assert trailing.moves[0]["stop_price"] == Decimal("2890.00")
+
+
+@pytest.mark.asyncio
+async def test_a_trade_not_yet_one_r_ahead_keeps_its_stop(trailing) -> None:
+    trailing.close = Decimal("2880")
+    trailing.extreme = Decimal("2875")  # ₹25 ahead of a ₹50 R
+
+    result = await sweep(trailing)
+
+    assert trailing.moves == []
+    assert trailing.adapter.cancelled == []
+    assert result.exits[0].step == "holding"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_already_at_break_even_is_left_where_it_is(trailing) -> None:
+    """Cancelling and replacing an identical stop is a naked moment bought for
+    nothing, once a minute for the rest of the day."""
+    trailing.adapter = FakeAdapter([position(Decimal("-143"))], orders=[book_order(trigger="2900.00")])
+
+    result = await sweep(trailing)
+
+    assert trailing.moves == []
+    assert trailing.adapter.cancelled == []
+    assert result.exits[0].step == "holding"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_candle_moves_no_stop(trailing) -> None:
+    """A stop moved on a price the market left behind is worse than one that
+    did not move."""
+    trailing.close_age_minutes = 45.0
+
+    result = await sweep(trailing)
+
+    assert trailing.moves == []
+    assert result.exits[0].step == "stale_price"
+
+
+@pytest.mark.asyncio
+async def test_an_atr_trail_is_not_applied_live(trailing) -> None:
+    """Moving a stop here means cancelling the resting one and placing another.
+    A rule that moves the level most minutes of the day would spend the session
+    repeatedly leaving the position unprotected for the length of a round trip."""
+    trailing.signal = ahead(trailing="ATR_TRAIL")
+
+    result = await sweep(trailing)
+
+    assert trailing.moves == []
+    assert trailing.adapter.cancelled == []
+    assert result.exits[0].step == "holding"
+
+
+@pytest.mark.asyncio
+async def test_a_strategy_with_no_trail_moves_nothing(trailing) -> None:
+    trailing.signal = ahead(trailing=None)
+    result = await sweep(trailing)
+    assert trailing.moves == []
+    assert result.exits[0].step == "holding"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_whose_level_cannot_be_read_is_not_moved(trailing) -> None:
+    """A trail that guesses the current level either moves a stop backwards or
+    cancels and replaces an unchanged one every minute."""
+    trailing.adapter = FakeAdapter([position(Decimal("-143"))], orders=[book_order(trigger=None)])
+
+    await sweep(trailing)
+    assert trailing.moves == []
+    assert trailing.adapter.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_a_trail_that_cannot_cancel_leaves_the_stop_working(trailing) -> None:
+    """Placing the new stop while the old one rests leaves two live stops behind
+    one position, and when one fills the other opens a reversed one."""
+    trailing.adapter = FakeAdapter([position(Decimal("-143"))], cancel_ok=False)
+
+    result = await sweep(trailing)
+
+    assert trailing.moves == []
+    assert result.exits[0].step == "trail_blocked"
+    assert "stands where it was" in result.exits[0].detail
+
+
+@pytest.mark.asyncio
+async def test_a_replacement_that_does_not_rest_is_escalated(trailing, monkeypatch) -> None:
+    async def refuses(_session, _adapter, **_kwargs):
+        return SimpleNamespace(protected=False, flattened=False, detail="The stop could not be placed.")
+
+    monkeypatch.setattr(module, "protect_position", refuses)
+
+    result = await sweep(trailing)
+
+    assert result.exits[0].step == "trail_failed"
+    assert result.exits[0] in result.noteworthy
+
+
+@pytest.mark.asyncio
+async def test_an_unprotected_position_is_protected_before_it_is_trailed(trailing) -> None:
+    """Nothing is moved unless there is something to move."""
+    trailing.adapter = FakeAdapter([position(Decimal("-143"))], orders=[])
+
+    result = await sweep(trailing)
+
+    assert result.exits[0].step == "unprotected"
+    # The protection call, not a trail: the level is the signal's, untouched.
+    assert "stop_price" not in trailing.moves[0]

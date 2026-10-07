@@ -180,12 +180,17 @@ def describe_exit(rules: ExitRules, *, minimum_rr: float, account_atr: float, ac
     elif rules.trailing_rule == BREAKEVEN_AT_R:
         lines.append(
             f"Trailing: once the trade is {rules.trailing_trigger_r}R ahead, the stop moves to the price "
-            "actually paid. That is break-even on price, not on money — both legs are charged either way."
+            "actually paid. That is break-even on price, not on money — both legs are charged either way. "
+            "Applied live: the resting stop at the broker is moved too."
         )
     elif rules.trailing_rule == ATR_TRAIL:
         lines.append(
             f"Trailing: the stop follows price at {rules.trailing_atr_multiple}× ATR and never moves "
-            "backwards. It is refused if it would land through the current price."
+            "backwards. It is refused if it would land through the current price. "
+            "Not applied live — paper and backtesting only. Moving a stop at the broker means cancelling "
+            "the resting one and placing another, and a rule that moves the level most minutes of the day "
+            "would leave the position unprotected for the length of a round trip each time. Live trades on "
+            "this strategy keep the stop they were given."
         )
 
     if rules.time_exit_minutes is None and rules.square_off_time is None:
