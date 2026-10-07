@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal
 
 from app.services.broker_adapter import BUY
-from app.services.price_ticks import round_to_tick
+from app.services.price_ticks import TICK, round_to_tick
 
 # Percent of the signal's entry price. Small on purpose: the number is not a
 # slippage *tolerance* so much as a statement about when the trade stops being
@@ -91,6 +91,7 @@ def plan_entry(
     risk_budget: Decimal,
     cap_percent: Decimal = DEFAULT_CAP_PERCENT,
     cap_r: Decimal = DEFAULT_CAP_R,
+    tick: Decimal = TICK,
 ) -> EntryPlan:
     """Price and size an entry so that filling at the worst allowed price still
     risks no more than ``risk_budget``.
@@ -127,7 +128,7 @@ def plan_entry(
     cap = entry + drift if buying else entry - drift
     # Rounded by the same rule the order itself uses, so the price planned here
     # and the price sent are the same number rather than two that nearly agree.
-    limit = round_to_tick(cap, side) or entry
+    limit = round_to_tick(cap, side, tick=tick) or entry
 
     # The stop has to stay on the far side of the limit, or the "risk" is a
     # negative number and the sizing below would hand back an enormous quantity.

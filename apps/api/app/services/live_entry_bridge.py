@@ -62,6 +62,8 @@ from app.services.live_orders import LiveOrderRequest
 from app.services.live_protection import protect_after_fill
 from app.services.live_readiness import inspect_live_readiness
 from app.services.live_shadow import product_for, transaction_type_for
+from app.services.price_ticks import TICK
+from app.services.trading_symbols import instrument_tick_size
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +168,7 @@ async def _already_handled(session: AsyncSession, signal_id: Any) -> bool:
     return submission is not None
 
 
-def _order_request(signal: PaperSignal, controls: Any) -> LiveOrderRequest:
+def _order_request(signal: PaperSignal, controls: Any, tick: Decimal) -> LiveOrderRequest:
     """The signal, in the canonical order vocabulary, priced and sized to the cap.
 
     The entry price is carried even for a MARKET order. The broker ignores it,
@@ -192,6 +194,7 @@ def _order_request(signal: PaperSignal, controls: Any) -> LiveOrderRequest:
             order_type=controls.live_entry_order_type,
             product=product_for(bool(controls.intraday_leverage_enabled)),
             price=Decimal(str(signal.entry_price)),
+            tick=tick,
         )
 
     plan = plan_entry(
@@ -202,6 +205,7 @@ def _order_request(signal: PaperSignal, controls: Any) -> LiveOrderRequest:
         risk_budget=Decimal(str(signal.risk_amount)),
         cap_percent=Decimal(str(getattr(controls, "entry_slippage_cap_percent", DEFAULT_CAP_PERCENT))),
         cap_r=Decimal(str(getattr(controls, "entry_slippage_cap_r", DEFAULT_CAP_R))),
+        tick=tick,
     )
     if plan.refusal:
         # Raised rather than returned: the caller already turns a ValueError here
@@ -216,6 +220,7 @@ def _order_request(signal: PaperSignal, controls: Any) -> LiveOrderRequest:
         order_type="LIMIT",
         product=product_for(bool(controls.intraday_leverage_enabled)),
         price=plan.limit_price,
+        tick=tick,
     )
 
 
@@ -482,8 +487,13 @@ async def _offer(
         blocking = ", ".join(gate.key for gate in report.gates if not gate.passed)
         return BridgeOutcome(False, "gates", f"Live readiness gates not satisfied: {blocking}")
 
+    # The exchange's grid for this instrument, before anything is priced. A
+    # price on the wrong grid is refused outright: on 7 October a PAYTM entry at
+    # ₹1,749.95 was rejected for it while an IRCTC entry at ₹449.75 filled, both
+    # multiples of the ₹0.05 this system used to assume for everything.
+    tick = await instrument_tick_size(session, signal.instrument_token) or TICK
     try:
-        request = _order_request(signal, controls)
+        request = _order_request(signal, controls, tick)
     except ValueError as exc:
         return BridgeOutcome(False, "signal", str(exc))
 

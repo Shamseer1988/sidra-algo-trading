@@ -53,7 +53,8 @@ from app.services.live_orders import (
     prepare_submission,
     send_prepared_order,
 )
-from app.services.price_ticks import round_to_tick
+from app.services.price_ticks import TICK, round_to_tick
+from app.services.trading_symbols import instrument_tick_size
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,7 @@ async def _place_exit(
     order_type: str,
     trigger_price: Decimal,
     paper_signal_id: Any,
+    tick: Decimal = TICK,
 ) -> tuple[str, list[str], str]:
     """Write the exit down, commit, then send it. Returns (status, ids, detail).
 
@@ -147,6 +149,7 @@ async def _place_exit(
         # too; the trigger is what the broker acts on.
         price=Decimal("0"),
         trigger_price=trigger_price,
+        tick=tick,
     )
     client_order_id = new_client_order_id()
     description = await adapter.describe(request.to_broker_order(client_order_id))
@@ -411,11 +414,17 @@ async def protect_position(
     quantity = int(abs(net))
     exit_side = _exit_side(net > 0)
     name = symbol or signal.instrument_token
+    # The instrument's own grid, not a segment-wide guess. A stop refused for an
+    # invalid trigger leaves a position with nothing behind it, which is the
+    # failure this whole module exists to prevent.
+    tick = await instrument_tick_size(session, signal.instrument_token) or TICK
     # On the exchange's tick grid before anything is said about it. The request
     # normalises it anyway, but a number announced to the operator that the
     # broker never saw is its own small lie -- and this path announced
     # "Stop at 977.9632" on a day the broker rejected exactly that price.
-    stop_price = round_to_tick(Decimal(str(stop_price if stop_price is not None else signal.stop_price)), exit_side)
+    stop_price = round_to_tick(
+        Decimal(str(stop_price if stop_price is not None else signal.stop_price)), exit_side, tick=tick
+    )
 
     for attempt in range(STOP_PLACE_ATTEMPTS):
         status, ids, detail = await _place_exit(
@@ -428,6 +437,7 @@ async def protect_position(
             order_type=STOP_MARKET,
             trigger_price=stop_price,
             paper_signal_id=signal.id,
+            tick=tick,
         )
         if status == ACCEPTED:
             logger.info(
@@ -465,6 +475,7 @@ async def protect_position(
         order_type=MARKET,
         trigger_price=Decimal("0"),
         paper_signal_id=signal.id,
+        tick=tick,
     )
     if close_status == ACCEPTED:
         return ProtectionOutcome(

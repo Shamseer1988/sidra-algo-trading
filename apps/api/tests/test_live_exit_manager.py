@@ -207,6 +207,14 @@ class FakeSession:
     async def commit(self):
         self.commits += 1
 
+    async def scalar(self, _statement):
+        """The instrument master, as instrument_tick_size reads it.
+
+        None falls the trail back to the segment default, which is what every
+        test here was written against.
+        """
+        return None
+
     async def refresh(self, _v):
         return None
 

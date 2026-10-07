@@ -40,7 +40,14 @@ async def refresh_upstox_instruments(settings: Settings) -> InstrumentMasterRefr
     selected = {
         key: {
             field: by_key[key].get(field)
-            for field in ("instrument_key", "trading_symbol", "segment", "instrument_type", "isin")
+            # tick_size is the field this master was being downloaded and
+            # discarded for. NSE's cash tick is not one number: 7,973 equities
+            # trade on ₹0.01, 1,349 on ₹0.05 and 461 on ₹0.10 or coarser. An
+            # order priced on the wrong grid is refused outright, which is how
+            # a PAYTM entry at ₹1,749.95 was rejected on 7 October while an
+            # IRCTC entry at ₹449.75 filled: both are multiples of ₹0.05, and
+            # only one of those shares trades on a ₹0.05 grid.
+            for field in ("instrument_key", "trading_symbol", "segment", "instrument_type", "isin", "tick_size")
         }
         for key in configured
         if key in by_key

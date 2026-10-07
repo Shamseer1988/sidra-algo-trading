@@ -165,3 +165,42 @@ def test_the_protective_stop_path_announces_what_it_sent():
         if token.type not in (tokenize.COMMENT, tokenize.STRING)
     )
     assert "round_to_tick" in code, "live_protection no longer rounds its stop before announcing it"
+
+
+# --- the grid is per instrument, and assuming one was wrong ------------------
+#
+# This module was built on "a multiple of ₹0.05 is also a multiple of ₹0.01, so
+# ₹0.05 is valid everywhere". The premise holds only if nothing trades on a
+# grid coarser than ₹0.05, and 461 NSE equities do. On 7 October a PAYTM entry
+# at ₹1,749.95 was rejected -- "place an order with the price in multiples of
+# the tick size" -- while an IRCTC entry at ₹449.75 filled the same morning.
+# Both are multiples of ₹0.05. PAYTM trades on ₹0.10.
+
+
+def test_the_paytm_price_that_was_rejected_is_refused_by_its_own_grid():
+    """₹1,749.95 is a valid ₹0.05 price and an invalid ₹0.10 one."""
+    assert is_on_tick(Decimal("1749.95"), tick=Decimal("0.05")) is True
+    assert is_on_tick(Decimal("1749.95"), tick=Decimal("0.10")) is False
+
+
+def test_a_buy_on_a_ten_paise_grid_rounds_down_to_a_price_the_exchange_takes():
+    # The cap wanted ₹1,746.996; ₹0.05 gave ₹1,746.95, which PAYTM cannot trade.
+    assert round_to_tick(Decimal("1746.996"), "BUY", tick=Decimal("0.10")) == Decimal("1746.90")
+    assert is_on_tick(round_to_tick(Decimal("1746.996"), "BUY", tick=Decimal("0.10")), tick=Decimal("0.10"))
+
+
+def test_a_sell_stop_on_a_ten_paise_grid_still_rounds_toward_the_entry():
+    """The asymmetry has to survive the coarser grid: a short's stop is a BUY
+    above entry and rounds down, so the rounding can only reduce the loss."""
+    assert round_to_tick(Decimal("454.461"), "BUY", tick=Decimal("0.10")) == Decimal("454.40")
+    assert round_to_tick(Decimal("454.461"), "SELL", tick=Decimal("0.10")) == Decimal("454.50")
+
+
+@pytest.mark.parametrize("tick", [Decimal("0.01"), Decimal("0.05"), Decimal("0.10"), Decimal("0.50"), Decimal("5.00")])
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_every_grid_nse_actually_uses_produces_a_sendable_price(tick, side):
+    """The six grids in the instrument master: 7,973 equities on ₹0.01, 1,349 on
+    ₹0.05, 392 on ₹0.10, and the rest on ₹0.50, ₹1 or ₹5."""
+    for raw in ("977.9632", "1749.9641", "450.8512", "1818.004", "99.999"):
+        rounded = round_to_tick(Decimal(raw), side, tick=tick)
+        assert is_on_tick(rounded, tick=tick), f"{rounded} is not on a {tick} grid"

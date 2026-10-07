@@ -12,13 +12,25 @@ asked to be a price anyone could actually trade at. The position was left
 unprotected -- the fifth time the protection path has failed live, and the
 first time for a reason that has nothing to do with broker vocabularies.
 
-**One tick, ₹0.05, for everything.** NSE's cash-market tick is ₹0.05, except
-for low-priced securities where it is finer. Rounding every price to ₹0.05 is
-therefore valid everywhere in the segment, because a multiple of ₹0.05 is also
-a multiple of ₹0.01 -- the coarser grid is a subset of the finer one. That
-property is why this file needs no per-instrument data and cannot be wrong
-about a scrip it has never seen. The cost is that a stop on a sub-₹250 share
-may sit up to four paise from where the model put it.
+**The tick is per instrument, and assuming one was wrong.** This module was
+built on the belief that ₹0.05 is valid everywhere in the cash segment, because
+a multiple of ₹0.05 is also a multiple of ₹0.01. The premise holds only if no
+share trades on a grid *coarser* than ₹0.05, and 461 of them do: NSE's own
+instrument master lists 7,973 equities on ₹0.01, 1,349 on ₹0.05, 392 on ₹0.10,
+and the rest on ₹0.50, ₹1 or ₹5.
+
+On 7 October a PAYTM entry priced at ₹1,749.95 was rejected — "place an order
+with the price in multiples of the tick size" — while an IRCTC entry at ₹449.75
+filled the same morning. Both are multiples of ₹0.05. PAYTM trades on ₹0.10.
+The trade was simply lost, and on a ₹0.10 share roughly half of all prices this
+module produced were unsendable.
+
+So the grid now comes from the broker's instrument master, which was already
+being downloaded for every subscribed instrument and having this one field
+thrown away. ``TICK`` below remains as the fallback for an instrument whose
+grid we do not know, and it is a fallback rather than a constant: being wrong
+that way costs a refused order, which is a lost trade and never a lost
+position.
 
 **BUY rounds down, SELL rounds up.** One rule, and it is conservative in both
 of the places a price is used:
@@ -41,6 +53,9 @@ from app.services.broker_adapter import BUY
 
 # NSE cash market. See the module docstring for why one value is safe for every
 # instrument in the segment rather than a per-scrip lookup.
+# The grid to use when the instrument master has not told us the real one.
+# ₹0.05 is valid for the great majority of the segment and fails closed on the
+# rest: a price on the wrong grid is refused, not filled badly.
 TICK = Decimal("0.05")
 
 # Two paise is below any tick the exchange uses, so a price already on the grid

@@ -118,13 +118,34 @@ def position(net, symbol: str = "RVNL", token: str | None = "NSE_EQ|INE415G01027
 
 
 class FakeSession:
-    def __init__(self, signal) -> None:
+    def __init__(self, signal, tick_paise: float | None = None) -> None:
         self._signal = signal
+        self._tick_paise = tick_paise
         self.added: list = []
         self.commits = 0
 
     async def get(self, _model, _pk):
         return self._signal
+
+    async def scalar(self, _statement):
+        """The instrument master, as instrument_tick_size reads it.
+
+        None means no master has been fetched, which falls the caller back to
+        the segment default -- the behaviour every test below was written
+        against.
+        """
+        if self._tick_paise is None:
+            return None
+        from app.db.models import InstrumentMasterRefresh
+
+        return InstrumentMasterRefresh(
+            provider="UPSTOX",
+            source_url="test",
+            payload_sha256="x",
+            instrument_count=1,
+            configured_keys={self._signal.instrument_token: {"tick_size": self._tick_paise}},
+            missing_keys=[],
+        )
 
     def add(self, value) -> None:
         self.added.append(value)

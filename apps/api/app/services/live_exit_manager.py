@@ -66,9 +66,10 @@ from app.services.live_orders import (
     send_prepared_order,
 )
 from app.services.live_protection import protect_position
-from app.services.price_ticks import round_to_tick
+from app.services.price_ticks import TICK, round_to_tick
 from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
 from app.services.trading_calendar import MARKET_TIMEZONE, MarketPhase, TradingCalendar
+from app.services.trading_symbols import instrument_tick_size
 
 logger = logging.getLogger(__name__)
 
@@ -743,7 +744,7 @@ async def _trail_stop(
         return None
 
     exit_side = SELL if long else BUY
-    level = round_to_tick(moved, exit_side)
+    level = round_to_tick(moved, exit_side, tick=await instrument_tick_size(session, signal.instrument_token) or TICK)
     if level is None or level == current:
         # The tick grid put it back where it already is. Cancelling and
         # replacing an identical stop is a naked moment bought for nothing.

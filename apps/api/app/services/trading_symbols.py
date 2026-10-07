@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from decimal import Decimal
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -138,3 +139,31 @@ async def display_symbol(session: AsyncSession, instrument_token: str, fallback:
     if name and name != instrument_token:
         return name
     return fallback or instrument_token
+
+
+# Upstox reports tick_size in paise: 5.0 means ₹0.05, 10.0 means ₹0.10.
+PAISE = Decimal("100")
+
+
+async def instrument_tick_size(session: AsyncSession, instrument_token: str) -> Decimal | None:
+    """The exchange's price grid for one instrument, or None if we do not know it.
+
+    None rather than a default, so the caller decides what an unknown tick
+    means. Guessing here would reproduce the defect this function exists to
+    end: a single assumed tick that is right for most shares and silently wrong
+    for the rest.
+    """
+    row = await session.scalar(
+        select(InstrumentMasterRefresh).order_by(desc(InstrumentMasterRefresh.fetched_at)).limit(1)
+    )
+    if row is None:
+        return None
+    entry = (row.configured_keys or {}).get(instrument_token)
+    value = entry.get("tick_size") if isinstance(entry, dict) else None
+    try:
+        paise = Decimal(str(value)) if value is not None else None
+    except (ArithmeticError, TypeError, ValueError):
+        return None
+    if paise is None or paise <= 0:
+        return None
+    return (paise / PAISE).quantize(Decimal("0.0001"))

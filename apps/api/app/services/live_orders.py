@@ -62,7 +62,7 @@ from app.services.broker_adapter import (
     BrokerOrder,
     BrokerOrderDescription,
 )
-from app.services.price_ticks import round_to_tick
+from app.services.price_ticks import TICK, round_to_tick
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,13 @@ class LiveOrderRequest:
     price: Decimal
     trigger_price: Decimal = Decimal("0")
     validity: str = "DAY"
+    # The exchange's price grid for this instrument, which is not one number
+    # across the segment: NSE lists equities on ₹0.01, ₹0.05, ₹0.10 and coarser.
+    # Resolved by the caller from the broker's instrument master and carried
+    # here so that the record, the approval message and the order itself are
+    # rounded on the same grid. Defaults to the fallback for a caller that
+    # cannot resolve it, which fails closed -- a refused order, never a bad fill.
+    tick: Decimal = TICK
 
     def __post_init__(self) -> None:
         """Put both prices on the exchange's tick grid, at birth.
@@ -111,8 +118,8 @@ class LiveOrderRequest:
         for not being a multiple of the tick size. The long it was meant to
         protect was left open with nothing behind it.
         """
-        object.__setattr__(self, "price", round_to_tick(self.price, self.side))
-        object.__setattr__(self, "trigger_price", round_to_tick(self.trigger_price, self.side))
+        object.__setattr__(self, "price", round_to_tick(self.price, self.side, tick=self.tick))
+        object.__setattr__(self, "trigger_price", round_to_tick(self.trigger_price, self.side, tick=self.tick))
 
     def to_broker_order(self, client_order_id: str) -> BrokerOrder:
         return BrokerOrder(
