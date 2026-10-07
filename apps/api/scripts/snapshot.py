@@ -240,13 +240,20 @@ async def main(args) -> int:
         if latest is None:
             print(f"  {WARN} No live reconciliation has ever run; arming will be refused.")
         else:
-            age = (
-                datetime.now(UTC) - latest.created_at.replace(tzinfo=latest.created_at.tzinfo or UTC)
-            ).total_seconds()
-            mark = OK if latest.safe_to_trade and age < 900 else WARN
+            stamped = latest.created_at if latest.created_at.tzinfo else latest.created_at.replace(tzinfo=UTC)
+            age = (datetime.now(UTC) - stamped).total_seconds()
+            # Freshness only matters while the exchange is open: the refresh job
+            # runs 09:00-15:59, so every evening reading is "stale" and warning
+            # about it teaches an operator to ignore the line.
+            from app.services.trading_calendar import MarketPhase, TradingCalendar
+
+            status = TradingCalendar.from_settings(settings).status_at(datetime.now(UTC))
+            trading_now = status.trading_day and status.phase in {MarketPhase.OPEN, MarketPhase.PRE_OPEN}
+            mark = OK if latest.safe_to_trade and (age < 900 or not trading_now) else WARN
             print(
                 f"  {mark} Last live reconciliation {ist(latest.created_at)} "
                 f"({age / 60:.0f} min ago), safe_to_trade={yes(latest.safe_to_trade)}"
+                + ("" if trading_now else "   [exchange closed; it refreshes 09:00-15:59]")
             )
 
     try:

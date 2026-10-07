@@ -105,8 +105,15 @@ def plan_entry(
     fraction of the price and stays as a backstop for the case the first cannot
     see -- a stop so wide that a tenth of it is a large absolute move.
 
-    Either cap at zero means the limit sits exactly at the signal's entry price:
-    valid, and the strictest setting available, not a disabled one.
+    A cap of zero is **not applied**, which is what zero means on every other
+    bound in this system -- a zero share-price cap is no cap, a zero daily loss
+    limit is no limit. It used to mean the opposite here, the strictest setting
+    rather than an absent one, and that reading is how a live deployment set
+    ``entry_slippage_cap_percent`` to 0 to switch it off and silently switched
+    off the risk cap with it: the tighter of the two always wins, and nothing is
+    tighter than zero. With both at zero there is no cap to apply and the limit
+    sits at the signal's entry price, which is the honest degenerate case rather
+    than a setting anybody chose.
     """
     entry = Decimal(str(entry_price))
     stop = Decimal(str(stop_price))
@@ -122,9 +129,15 @@ def plan_entry(
     # the other cannot: one bounds the fraction of risk given away, the other
     # bounds the absolute move.
     planned_room = abs(stop - entry)
-    by_price = entry * Decimal(str(cap_percent)) / Decimal("100")
-    by_risk = planned_room * Decimal(str(cap_r))
-    drift = min(by_price, by_risk)
+    ceilings = [
+        value
+        for value in (
+            entry * Decimal(str(cap_percent)) / Decimal("100"),
+            planned_room * Decimal(str(cap_r)),
+        )
+        if value > 0
+    ]
+    drift = min(ceilings) if ceilings else Decimal("0")
     cap = entry + drift if buying else entry - drift
     # Rounded by the same rule the order itself uses, so the price planned here
     # and the price sent are the same number rather than two that nearly agree.

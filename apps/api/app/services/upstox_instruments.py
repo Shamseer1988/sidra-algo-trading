@@ -15,6 +15,11 @@ from app.services.upstox_market_data import configured_subscriptions
 
 NSE_INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
 
+# What every stored entry must carry. A record written before one of these
+# existed is stale however recently it was fetched, and asking for it again
+# costs one download the system already makes daily.
+REQUIRED_FIELDS = ("trading_symbol", "tick_size")
+
 
 class InstrumentRefreshError(RuntimeError):
     pass
@@ -77,4 +82,20 @@ async def refresh_is_due(settings: Settings) -> bool:
         )
     if latest is None:
         return True
+    if _missing_fields(latest):
+        # Stale in shape rather than in age. The master is re-read for every
+        # subscribed instrument, so widening what is stored leaves the existing
+        # record correct-looking and incomplete -- and on 7 October that meant a
+        # deployment carrying the per-instrument tick fix still priced every
+        # order on the fallback grid, because the last fetch was recent enough
+        # not to be due and had no tick sizes in it. Age alone could not see it.
+        return True
     return (datetime.now(UTC) - latest.fetched_at).total_seconds() >= settings.upstox_instrument_refresh_hours * 3600
+
+
+def _missing_fields(record: InstrumentMasterRefresh) -> bool:
+    """Does this stored master predate a field the system now needs?"""
+    entries = [value for value in (record.configured_keys or {}).values() if isinstance(value, dict)]
+    if not entries:
+        return False
+    return any(field not in entry for entry in entries for field in REQUIRED_FIELDS)

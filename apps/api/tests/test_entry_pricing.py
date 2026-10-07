@@ -107,8 +107,10 @@ def test_the_limit_is_a_price_the_exchange_accepts(side):
     assert is_on_tick(plan.limit_price)
 
 
-def test_a_zero_cap_is_the_strictest_setting_not_a_disabled_one():
-    plan = plan_entry(**{**BAJFINANCE, "cap_percent": Decimal("0")})
+def test_both_caps_at_zero_put_the_limit_at_the_signals_price():
+    """Zero is an absent cap, so with neither applied there is no drift to
+    allow. The limit sits where the plan said and buys what the plan asked."""
+    plan = plan_entry(**{**BAJFINANCE, "cap_percent": Decimal("0"), "cap_r": Decimal("0")})
     assert plan.limit_price == Decimal("985.85")
     assert plan.refusal is None
 
@@ -229,6 +231,7 @@ def test_the_plan_never_rounds_a_share_up():
         quantity=100,
         risk_budget=Decimal("99"),
         cap_percent=Decimal("0"),
+        cap_r=Decimal("0"),
     )
     assert plan.quantity == 9  # 99 / 10 = 9.9
     assert plan.worst_case_risk == Decimal("90.00")
@@ -296,9 +299,48 @@ def test_the_tighter_of_the_two_caps_is_the_one_applied():
     assert plan_entry(**IRCTC).limit_price == Decimal("450.50")
 
 
-def test_a_zero_risk_cap_buys_the_quantity_the_strategy_planned():
+def test_no_cap_at_all_buys_the_quantity_the_strategy_planned():
     """The strictest setting, and the one that makes live match paper exactly
     when the limit fills at all."""
-    plan = plan_entry(**IRCTC, cap_r=Decimal("0"))
+    plan = plan_entry(**IRCTC, cap_percent=Decimal("0"), cap_r=Decimal("0"))
     assert plan.limit_price == Decimal("450.85")
     assert plan.quantity == 27
+
+
+# --- a cap of zero is an absent cap, not the strictest one -------------------
+#
+# On 7 October a live deployment ran with entry_slippage_cap_percent = 0 and
+# entry_slippage_cap_r = 0.1. Zero used to mean "the limit sits exactly at the
+# signal's entry price", and the tighter of the two caps always wins, so an
+# operator switching one cap off silently switched the other off with it. Every
+# other bound in this system reads zero as no bound.
+
+
+def test_switching_the_percent_cap_off_leaves_the_risk_cap_working():
+    plan = plan_entry(**IRCTC, cap_percent=Decimal("0"), cap_r=Decimal("0.1"))
+    assert plan.limit_price == Decimal("450.50")
+    assert plan.quantity == 25
+
+
+def test_switching_the_risk_cap_off_leaves_the_percent_cap_working():
+    plan = plan_entry(**IRCTC, cap_percent=Decimal("0.25"), cap_r=Decimal("0"))
+    assert plan.limit_price == Decimal("449.75")
+    assert plan.quantity == 21
+
+
+def test_both_caps_off_puts_the_limit_at_the_signals_price():
+    """The honest degenerate case: no cap to apply, so no drift. It buys the
+    full planned quantity and fills only at the price the plan assumed."""
+    plan = plan_entry(**IRCTC, cap_percent=Decimal("0"), cap_r=Decimal("0"))
+    assert plan.limit_price == Decimal("450.85")
+    assert plan.quantity == 27
+
+
+def test_a_fill_at_either_cap_still_never_exceeds_the_budget():
+    for percent, risk in (
+        (Decimal("0"), Decimal("0.1")),
+        (Decimal("0.25"), Decimal("0")),
+        (Decimal("0"), Decimal("0")),
+    ):
+        plan = plan_entry(**IRCTC, cap_percent=percent, cap_r=risk)
+        assert abs(plan.limit_price - Decimal("454.46")) * plan.quantity <= Decimal("100")
