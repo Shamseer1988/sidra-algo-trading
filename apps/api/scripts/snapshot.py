@@ -44,6 +44,28 @@ from app.services.trading_calendar import MARKET_TIMEZONE  # noqa: E402
 RULE = "=" * 78
 OK, WARN, BAD = "[OK]  ", "[WARN]", "[BAD] "
 
+# Told apart from None, which Redis returns for a key that was never written.
+# An absent key and an unreadable one are different facts: the first is the
+# system's documented default, the second is a question.
+UNREADABLE = object()
+
+
+def tracking_line(value: object) -> str:
+    """How to report the scanner's master switch.
+
+    Three states, and conflating any two of them has already misled once. An
+    unset key is how a deployment that has never touched the switch looks, and
+    ``paper_tracking_enabled`` reads it as on -- so reporting it as "unknown"
+    raises a question about the most important switch in the system every
+    single run, which is how a reader learns to skip the line.
+    """
+    if value is UNREADABLE:
+        return "unknown — could not be read"
+    if value is None:
+        return "on (never set, which the scanner reads as on)"
+    return "off" if value == "false" else "on"
+
+
 # Which fixes are in this image. Each is a symbol that did not exist before the
 # change that introduced it, so importing the module answers "did that deploy
 # actually reach the container" without needing git inside it — and a container
@@ -273,22 +295,24 @@ async def main(args) -> int:
                 return await getter()
             except Exception as error:  # noqa: BLE001 - one key must not sink the rest
                 print(f"  {WARN} {label} could not be read: {type(error).__name__}: {error}")
-                return None
+                return UNREADABLE
 
         tracking = await read("paper tracking", lambda: redis.get("safety:paper_tracking_enabled"))
-        stop = await read("emergency stop", lambda: redis.hgetall("safety:emergency_stop")) or {}
-        worker = await read("scanner worker state", lambda: redis.hgetall("scanner:worker_state")) or {}
+        stop = await read("emergency stop", lambda: redis.hgetall("safety:emergency_stop"))
+        worker = await read("scanner worker state", lambda: redis.hgetall("scanner:worker_state"))
+        stop = stop if isinstance(stop, dict) else {}
+        worker = worker if isinstance(worker, dict) else {}
 
-        # "unknown" rather than "on" when the read failed. A master switch
-        # reported as on because nothing could be read is the worst of the
-        # three possible answers.
-        print(f"  paper tracking         : {'unknown' if tracking is None else 'off' if tracking == 'false' else 'on'}")
+        print(f"  paper tracking         : {tracking_line(tracking)}")
         print(f"  emergency stop         : {'ACTIVE' if stop.get('active') == 'true' else 'clear'}")
         print(f"  scanner worker state   : {worker.get('status') or 'unknown'}")
         if worker.get("detail"):
             print(f"  worker said            : {worker['detail']}")
         if worker.get("updated_at"):
             print(f"  worker last spoke      : {worker['updated_at']}")
+        if tracking is UNREADABLE:
+            problems += 1
+            print(f"  {BAD} The scanner's master switch could not be read; its state is unknown.")
         if tracking == "false":
             problems += 1
             print(f"  {BAD} Paper tracking is off. It is the scanner's master switch: no signals, no live orders.")

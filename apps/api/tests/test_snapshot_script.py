@@ -49,3 +49,42 @@ def test_no_credential_is_ever_printed():
         "telegram_bot_token",
     ):
         assert forbidden not in source, f"snapshot.py reads {forbidden}; it must only report configured yes/no"
+
+
+# --- the scanner's master switch, reported honestly --------------------------
+#
+# Three states, and conflating any two has already misled once. An unset key is
+# how a deployment that has never touched the switch looks, and the scanner
+# reads it as on; reporting that as "unknown" raises a question about the most
+# important switch in the system on every single run, which is how a reader
+# learns to skip the line. Reporting an unreadable key as "on" is worse: it
+# says everything is fine because nothing could be read.
+
+
+def test_an_unset_switch_reads_as_on_because_that_is_what_the_scanner_does():
+    line = snapshot.tracking_line(None)
+    assert line.startswith("on")
+    assert "unknown" not in line
+
+
+def test_an_explicit_false_reads_as_off():
+    assert snapshot.tracking_line("false") == "off"
+
+
+def test_an_explicit_true_reads_as_on():
+    assert snapshot.tracking_line("true") == "on"
+
+
+def test_a_key_that_could_not_be_read_is_never_reported_as_on():
+    line = snapshot.tracking_line(snapshot.UNREADABLE)
+    assert "unknown" in line
+    assert not line.startswith("on")
+
+
+def test_the_three_states_are_all_distinguishable():
+    readings = {
+        snapshot.tracking_line(None),
+        snapshot.tracking_line("false"),
+        snapshot.tracking_line(snapshot.UNREADABLE),
+    }
+    assert len(readings) == 3
