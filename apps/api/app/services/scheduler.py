@@ -617,8 +617,48 @@ def _make_exit_sweep_job(settings: Settings, calendar: TradingCalendar):
             )
         if result.noteworthy:
             await _send_exit_alert(settings, result)
+        # Every trade that ended, however it ended. Sent after the sweep's own
+        # report because they answer different questions: that one says what the
+        # system did, this one says what the account is now worth.
+        if result.closed:
+            await _announce_closed_trades(settings, result)
 
     return _job
+
+
+async def _announce_closed_trades(settings: Settings, result) -> None:
+    """One message per finished round trip, and never a second. Never raises.
+
+    Sent before the ledger entry is written, deliberately. A send that succeeds
+    and a write that fails costs one duplicate message; the other order costs
+    the message itself, and silence about money is the failure this exists to
+    end.
+    """
+    try:
+        from app.db.session import SessionLocal
+        from app.services.live_trade_alerts import message, record_announced
+        from app.services.telegram import TelegramNotificationService
+        from app.services.telegram_config import configured_settings
+
+        effective = await configured_settings(settings)
+        session_date = datetime.now(UTC).astimezone(MARKET_TIMEZONE).date()
+        telegram = TelegramNotificationService(effective) if effective.telegram_is_configured else None
+
+        for trade in result.closed:
+            if telegram is not None:
+                await telegram.send_message(message(trade, session_date, result.day_pnl), parse_mode="HTML")
+            logger.info(
+                "scheduler.trade_closed",
+                symbol=trade.symbol,
+                ending=trade.ending,
+                gross=str(trade.gross),
+                quantity=trade.quantity,
+            )
+            async with SessionLocal() as db:
+                await record_announced(db, trade)
+                await db.commit()
+    except Exception:  # noqa: BLE001 - an alert must not become a second failure
+        logger.exception("scheduler.closed_trade_announce_failed")
 
 
 async def _send_exit_alert(settings: Settings, result) -> None:

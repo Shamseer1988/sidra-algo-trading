@@ -109,6 +109,11 @@ class ExitSweepOutcome:
     step: str
     detail: str
     exits: list[PositionExit] = field(default_factory=list)
+    # Round trips the broker's book shows as finished and nobody has been told
+    # about. Collected here rather than announced here, because this module
+    # closes positions and the scheduler is what talks to people.
+    closed: list = field(default_factory=list)
+    day_pnl: Decimal | None = None
 
     @property
     def noteworthy(self) -> list[PositionExit]:
@@ -451,7 +456,46 @@ async def _sweep(settings: Settings, calendar: TradingCalendar) -> ExitSweepOutc
                 continue
             exits.append(await _consider(session, adapter, record, net, now, start, end, book, deadline))
 
-    return ExitSweepOutcome(True, "swept", f"{len(exits)} position(s) considered.", exits)
+        # The end of a trade, detected where it actually happens. A stop resting
+        # at the broker fills at the exchange: the position goes to zero and the
+        # loop above skips a flat row, so the most common way a trade ends was
+        # the one way that produced no message at all.
+        closed = await _finished_trades(session, book, start, end)
+        day_pnl = _day_total(positions)
+
+    return ExitSweepOutcome(True, "swept", f"{len(exits)} position(s) considered.", exits, closed, day_pnl)
+
+
+def _day_total(positions: list) -> Decimal | None:
+    """The account's day P&L, or None if any row is unreadable.
+
+    None rather than a partial sum: a running total missing one position is a
+    number an operator would act on and should not.
+    """
+    if not positions:
+        return None
+    figures = [record.day_pnl for record in positions]
+    if any(value is None for value in figures):
+        return None
+    return sum(figures, start=Decimal("0"))
+
+
+async def _finished_trades(session: AsyncSession, book: list | None, start, end) -> list:  # noqa: ANN001
+    """Round trips finished at the broker that nobody has been told about.
+
+    Never raises: a reporting failure must not stop the sweep that closes
+    positions.
+    """
+    if book is None:
+        return []
+    try:
+        from app.services.live_trade_alerts import closed_trades, todays_submissions, unannounced
+
+        submissions = await todays_submissions(session, start, end)
+        return await unannounced(session, closed_trades(submissions, book))
+    except Exception:  # noqa: BLE001 - closing positions matters more than reporting them
+        logger.exception("live_exit_manager.closed_trade_scan_failed")
+        return []
 
 
 async def _account_deadline(session: AsyncSession) -> str | None:

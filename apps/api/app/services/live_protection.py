@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import LiveOrderSubmission, PaperSignal
-from app.services.broker_adapter import BUY, INTRADAY, SELL, BrokerAdapter
+from app.services.broker_adapter import BUY, INTRADAY, OPEN_STATUSES, SELL, BrokerAdapter
 from app.services.live_orders import (
     ACCEPTED,
     UNKNOWN,
@@ -220,6 +220,40 @@ async def _cancel_entry(adapter: BrokerAdapter, submission: LiveOrderSubmission)
     return (not stuck), ("; ".join(stuck) if stuck else ", ".join(withdrawn))
 
 
+async def _broker_verdict(adapter: BrokerAdapter, submission: LiveOrderSubmission) -> tuple[bool, str]:
+    """Is this order still working, and what did the broker say about it?
+
+    A cancellation fails for two quite different reasons and only one of them is
+    a hanging risk: the order is already finished, or the broker would not do
+    it. Asked of the order book rather than of the refusal text, for the same
+    reason the exit manager asks there.
+
+    On 7 October a PAYTM entry was accepted over the API and then refused by the
+    exchange. The cancellation that followed failed -- an order that is already
+    rejected cannot be cancelled -- and this path reported "it may still be live
+    at the broker, cancel it by hand", about an order that no longer existed.
+    The broker's own words for the refusal were sitting in the order book,
+    unread: "you have entered an invalid order price". The operator found them
+    by opening the broker's app.
+
+    Returns (still_working, what the broker said). An unreadable book answers
+    "still working", because unknown exposure is the one to escalate.
+    """
+    numbers = {str(number) for number in (submission.broker_order_numbers or []) if number}
+    try:
+        book = await adapter.normalised_orders()
+    except Exception as exc:  # noqa: BLE001 - this path must not raise
+        logger.warning("live_protection.book_unreadable error=%s", exc)
+        return True, ""
+    rows = [record for record in book if str(record.broker_order_id) in numbers]
+    if not rows:
+        return False, ""
+    working = any(record.status in OPEN_STATUSES for record in rows)
+    said = next((record.status_message for record in rows if record.status_message), "")
+    state = next((record.status for record in rows if record.status), "")
+    return working, f"{state}: {said}".strip(": ").strip()
+
+
 async def _withdraw_unfilled(adapter: BrokerAdapter, submission: LiveOrderSubmission) -> str:
     """Cancel an entry that produced no position, and say what happened."""
     if not [number for number in (submission.broker_order_numbers or []) if number]:
@@ -227,10 +261,18 @@ async def _withdraw_unfilled(adapter: BrokerAdapter, submission: LiveOrderSubmis
     ok, detail = await _cancel_entry(adapter, submission)
     if ok:
         return f"Nothing filled. The resting entry was withdrawn ({detail})."
+
+    working, verdict = await _broker_verdict(adapter, submission)
+    if not working:
+        # Not a hanging order. The cancellation failed because there was nothing
+        # left to cancel, and the broker's reason is the thing worth saying.
+        return f"Nothing filled. {adapter.name} had already finished with the entry" + (
+            f" — {verdict}." if verdict else ", so there was nothing to withdraw."
+        )
     return (
         "Nothing filled, and the entry could not be withdrawn: "
-        f"{detail}. It may still be live at the broker -- cancel it by hand before "
-        "it fills with no stop behind it."
+        f"{detail}. It is still working at the broker -- cancel it by hand before "
+        "it fills with no stop behind it." + (f" The broker says: {verdict}." if verdict else "")
     )
 
 

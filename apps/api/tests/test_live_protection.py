@@ -40,11 +40,19 @@ class FakeAdapter:
         self.position_reads = 0
         self.cancelled: list = []
         self.cancel_result: tuple = (True, "")
+        # What the broker's order book says about our orders. Empty means the
+        # book does not know them, which is how a rejected order reads.
+        self.orders: list = []
 
     async def normalised_positions(self):
         self.position_reads += 1
         step = self._positions[min(self.position_reads - 1, len(self._positions) - 1)]
         return step
+
+    async def normalised_orders(self):
+        if isinstance(self.orders, Exception):
+            raise self.orders
+        return self.orders
 
     async def cancel(self, broker_order_id: str):
         self.cancelled.append(broker_order_id)
@@ -65,6 +73,22 @@ class FakeAdapter:
         if isinstance(result, Exception):
             raise result
         return result
+
+
+def book_row(order_id: str = "2610050001", status: str = "REJECTED", message: str | None = None):
+    from app.services.broker_adapter import BrokerOrderRecord
+
+    return BrokerOrderRecord(
+        broker_order_id=order_id,
+        client_order_id="sidra-1",
+        status=status,
+        symbol="RVNL",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=10,
+        filled_quantity=0,
+        status_message=message,
+    )
 
 
 def accepted(order_id: str = "stop-1"):
@@ -305,6 +329,7 @@ async def test_an_entry_that_cannot_be_withdrawn_is_escalated() -> None:
     """Worse than an unfilled order is an unfilled order nobody knows is live."""
     adapter = FakeAdapter([[]])
     adapter.cancel_result = (False, "order already in progress")
+    adapter.orders = [book_row(status="OPEN")]
     outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
 
     assert "could not be withdrawn" in outcome.detail
@@ -315,6 +340,7 @@ async def test_an_entry_that_cannot_be_withdrawn_is_escalated() -> None:
 async def test_a_broker_that_raises_on_cancel_does_not_crash_the_safety_path() -> None:
     adapter = FakeAdapter([[]])
     adapter.cancel_result = RuntimeError("connection reset")
+    adapter.orders = [book_row(status="OPEN")]
     outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
 
     assert outcome.step == "flat"
@@ -695,3 +721,63 @@ async def test_a_position_larger_than_the_order_is_not_treated_as_partial() -> N
 
     assert adapter.cancelled == []
     assert outcome.quantity == 12
+
+
+# --- an entry the exchange refused after the API accepted it -----------------
+#
+# On 7 October a PAYTM entry came back ACCEPTED with an order id and was then
+# refused by the exchange. The cancellation that followed failed -- an order
+# already rejected cannot be cancelled -- and this path reported "it may still
+# be live at the broker, cancel it by hand", about an order that no longer
+# existed. The broker's own words were sitting in the order book, unread: "you
+# have entered an invalid order price". The operator found them by opening the
+# broker's app.
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_entry_is_not_reported_as_still_live() -> None:
+    adapter = FakeAdapter([[]])
+    adapter.cancel_result = (False, "Cancel of already cancelled/rejected/completed order is not allowed")
+    adapter.orders = [book_row(message="You have entered an invalid order price")]
+
+    outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
+
+    assert outcome.step == "flat"
+    assert "still working" not in outcome.detail
+    assert "by hand" not in outcome.detail
+    # The reason, in the broker's own words, instead of in the broker's app.
+    assert "invalid order price" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_an_entry_still_working_is_still_escalated() -> None:
+    """The protection the book check must not remove: an order that really is
+    resting can still fill with no stop behind it."""
+    adapter = FakeAdapter([[]])
+    adapter.cancel_result = (False, "rate limited")
+    adapter.orders = [book_row(status="OPEN")]
+
+    outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
+
+    assert "still working at the broker" in outcome.detail
+    assert "by hand" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_book_escalates_rather_than_assuming() -> None:
+    adapter = FakeAdapter([[]])
+    adapter.cancel_result = (False, "rate limited")
+    adapter.orders = RuntimeError("book unavailable")
+
+    outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
+    assert "by hand" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_an_order_the_book_has_never_heard_of_is_not_a_hanging_risk() -> None:
+    adapter = FakeAdapter([[]])
+    adapter.cancel_result = (False, "not found")
+    adapter.orders = []
+
+    outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
+    assert "by hand" not in outcome.detail

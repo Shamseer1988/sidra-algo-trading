@@ -13,7 +13,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.services.entry_pricing import DEFAULT_CAP_PERCENT, plan_entry
+from app.services.entry_pricing import DEFAULT_CAP_PERCENT, DEFAULT_CAP_R, plan_entry
 from app.services.price_ticks import is_on_tick
 
 # The trade that prompted all of this.
@@ -27,14 +27,16 @@ BAJFINANCE = dict(
 
 
 def test_the_trade_that_went_over_budget():
-    """At the capped price the same budget buys nine shares, not twelve.
+    """At the capped price the same budget buys eleven shares, not twelve.
 
-    And the cap is ₹988.30, so the ₹995.40 the market actually offered that
-    morning would not have been taken at all.
+    The cap is a tenth of the ₹7.89 stop, so the limit is ₹986.60 and the
+    ₹995.40 the market actually offered that morning would not have been taken
+    at all. Eleven of twelve, because a cap measured against the trade's own
+    risk gives away a tenth of it rather than a third.
     """
     plan = plan_entry(**BAJFINANCE)
-    assert plan.limit_price == Decimal("988.30")
-    assert plan.quantity == 9
+    assert plan.limit_price == Decimal("986.60")
+    assert plan.quantity == 11
     assert plan.planned_quantity == 12
     assert plan.reduced is True
     assert plan.worst_case_risk <= Decimal("100")
@@ -148,6 +150,10 @@ def test_a_wide_cap_shrinks_the_position_rather_than_refusing_it():
         quantity=20,
         risk_budget=Decimal("100"),
         cap_percent=Decimal("2"),
+        # The risk cap is lifted out of the way so this test says what it means
+        # to say: it is about the percent cap, and the tighter of the two always
+        # wins. Four times a ₹5 stop is ₹20, the same move 2% of ₹1000 allows.
+        cap_r=Decimal("4"),
     )
     assert plan.refusal is None
     assert plan.quantity == 4
@@ -226,3 +232,73 @@ def test_the_plan_never_rounds_a_share_up():
     )
     assert plan.quantity == 9  # 99 / 10 = 9.9
     assert plan.worst_case_risk == Decimal("90.00")
+
+
+# --- the cap measured against risk, not against price ------------------------
+#
+# On 7 October an IRCTC short was planned at ₹450.85 behind a ₹454.46 stop --
+# ₹3.61 a share, 27 shares, ₹97 of a ₹100 budget. A 0.25% cap moved the limit
+# ₹1.13, which is 31% of the whole stop distance, so the order was sized against
+# ₹4.71 a share and 21 shares were sent. It filled at ₹450.94 and risked ₹73.71:
+# a quarter of the budget unused, on every trade, because the cap was measured
+# against the price instead of against the risk.
+
+IRCTC = dict(
+    side="SELL",
+    entry_price=Decimal("450.85"),
+    stop_price=Decimal("454.46"),
+    quantity=27,
+    risk_budget=Decimal("100"),
+)
+
+
+def test_the_trade_that_was_sized_too_small():
+    plan = plan_entry(**IRCTC)
+    assert plan.limit_price == Decimal("450.50")
+    assert plan.quantity == 25
+    assert plan.worst_case_risk <= Decimal("100")
+
+
+def test_the_percent_cap_alone_was_the_one_that_under_sized_it():
+    """The same trade with the risk cap lifted: 21 shares, as it went."""
+    plan = plan_entry(**IRCTC, cap_r=Decimal("1"))
+    assert plan.quantity == 21
+
+
+@pytest.mark.parametrize("cap_r", [Decimal("0"), Decimal("0.05"), DEFAULT_CAP_R, Decimal("0.5"), Decimal("1")])
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_a_fill_at_the_risk_cap_never_exceeds_the_budget(cap_r, side):
+    """The property the module exists for, at every risk cap it allows."""
+    entry, stop = (Decimal("1000"), Decimal("980")) if side == "BUY" else (Decimal("1000"), Decimal("1020"))
+    plan = plan_entry(
+        side=side,
+        entry_price=entry,
+        stop_price=stop,
+        quantity=50,
+        risk_budget=Decimal("100"),
+        cap_percent=Decimal("5"),
+        cap_r=cap_r,
+    )
+    if plan.refusal:
+        return
+    assert abs(plan.limit_price - stop) * plan.quantity <= Decimal("100")
+
+
+def test_the_tighter_of_the_two_caps_is_the_one_applied():
+    """Each exists to catch what the other cannot: one bounds the fraction of
+    risk given away, the other bounds the absolute move."""
+    wide_stop = dict(
+        side="BUY", entry_price=Decimal("1000"), stop_price=Decimal("900"), quantity=1, risk_budget=Decimal("1000")
+    )
+    # A tenth of a ₹100 stop is ₹10; 0.25% of ₹1000 is ₹2.50. The percent wins.
+    assert plan_entry(**wide_stop).limit_price == Decimal("1002.50")
+    # A tenth of a ₹3.61 stop is ₹0.36; 0.25% of ₹450 is ₹1.13. The risk wins.
+    assert plan_entry(**IRCTC).limit_price == Decimal("450.50")
+
+
+def test_a_zero_risk_cap_buys_the_quantity_the_strategy_planned():
+    """The strictest setting, and the one that makes live match paper exactly
+    when the limit fills at all."""
+    plan = plan_entry(**IRCTC, cap_r=Decimal("0"))
+    assert plan.limit_price == Decimal("450.85")
+    assert plan.quantity == 27

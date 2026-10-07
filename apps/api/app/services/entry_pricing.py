@@ -48,6 +48,23 @@ from app.services.price_ticks import round_to_tick
 # the one that was planned.
 DEFAULT_CAP_PERCENT = Decimal("0.25")
 
+# The same question asked the way a trader asks it: how much of the trade's risk
+# may the entry give away before it is a worse trade? A percent of price cannot
+# answer that, because the same percent means different things on different
+# stops.
+#
+# On 7 October an IRCTC short was planned at ₹450.85 behind a ₹454.46 stop --
+# ₹3.61 a share, 27 shares, ₹97 of a ₹100 budget. A 0.25% cap moved the limit
+# ₹1.13, which is **31% of the whole stop distance**, so the order was sized
+# against ₹4.71 a share and only 21 shares were sent. It filled at ₹450.94 and
+# risked ₹73.71 -- a quarter of the budget left unused, every trade, because the
+# cap was measured against the price instead of against the risk.
+#
+# A tenth of R moves the limit ₹0.36 on that trade and buys 25. On a wide-stop
+# instrument it allows more rupees of drift, and on a tight-stop one fewer,
+# which is what "the same tolerance" actually means.
+DEFAULT_CAP_R = Decimal("0.10")
+
 
 @dataclass(frozen=True)
 class EntryPlan:
@@ -73,13 +90,21 @@ def plan_entry(
     quantity: int,
     risk_budget: Decimal,
     cap_percent: Decimal = DEFAULT_CAP_PERCENT,
+    cap_r: Decimal = DEFAULT_CAP_R,
 ) -> EntryPlan:
     """Price and size an entry so that filling at the worst allowed price still
     risks no more than ``risk_budget``.
 
     ``side`` is the canonical BUY or SELL of the *entry*, not of the stop.
 
-    A cap of zero means the limit sits exactly at the signal's entry price:
+    Two ceilings, and the tighter one wins. ``cap_r`` is a fraction of the
+    trade's own stop distance and is normally the binding one: it keeps the
+    give-away proportional to what the trade is risking, so the same setting
+    behaves the same way on a ₹3 stop and a ₹30 one. ``cap_percent`` is a
+    fraction of the price and stays as a backstop for the case the first cannot
+    see -- a stop so wide that a tenth of it is a large absolute move.
+
+    Either cap at zero means the limit sits exactly at the signal's entry price:
     valid, and the strictest setting available, not a disabled one.
     """
     entry = Decimal(str(entry_price))
@@ -92,7 +117,13 @@ def plan_entry(
 
     buying = side.upper() == BUY
     # The cap moves against us: a buy may pay more, a sell may receive less.
-    drift = entry * Decimal(str(cap_percent)) / Decimal("100")
+    # The tighter of the two ceilings decides, because each exists to catch what
+    # the other cannot: one bounds the fraction of risk given away, the other
+    # bounds the absolute move.
+    planned_room = abs(stop - entry)
+    by_price = entry * Decimal(str(cap_percent)) / Decimal("100")
+    by_risk = planned_room * Decimal(str(cap_r))
+    drift = min(by_price, by_risk)
     cap = entry + drift if buying else entry - drift
     # Rounded by the same rule the order itself uses, so the price planned here
     # and the price sent are the same number rather than two that nearly agree.

@@ -288,9 +288,10 @@ async def test_a_limit_entry_is_priced_at_the_cap_and_sized_from_it(wiring) -> N
 
     ₹985.85 planned behind a ₹977.96 stop, twelve shares, ₹100 budget. It went
     as a MARKET order, filled at ₹995.40, and put ₹209 behind that budget. A
-    capped limit prices the order at ₹988.30 and buys nine shares there, so a
-    fill anywhere it can happen risks no more than the trade was given -- and
-    ₹995.40 is outside it, so that morning no trade would have been taken.
+    capped limit prices the order at ₹986.60 -- a tenth of the ₹7.89 stop -- and
+    buys eleven shares there, so a fill anywhere it can happen risks no more
+    than the trade was given, and ₹995.40 is outside it, so that morning no
+    trade would have been taken.
     """
     wiring.controls = controls(order_type="LIMIT", cap_percent=0.25)
     _sig = signal(side="LONG", entry="985.85", stop="977.9632", quantity=12, risk="100")
@@ -299,8 +300,8 @@ async def test_a_limit_entry_is_priced_at_the_cap_and_sized_from_it(wiring) -> N
 
     request = wiring.requested.request
     assert request.order_type == "LIMIT"
-    assert request.price == Decimal("988.30")
-    assert request.quantity == 9
+    assert request.price == Decimal("986.60")
+    assert request.quantity == 11
     assert (request.price - Decimal("977.9632")) * request.quantity <= Decimal("100")
 
 

@@ -96,6 +96,7 @@ DEFAULT_TRADING_CONTROLS = {
     "live_broker": "NONE",
     "live_entry_order_type": "LIMIT",
     "entry_slippage_cap_percent": 0.25,
+    "entry_slippage_cap_r": 0.10,
     "daily_profit_target": 2000.0,
     "daily_loss_limit": 400.0,
     # Zero means "no cap", which is the behaviour every deployment had before
@@ -156,6 +157,11 @@ class TradingControls(BaseModel):
     # live submission on or off; that is the approval mode and the gates.
     live_entry_order_type: str = Field(default="LIMIT")
     entry_slippage_cap_percent: float = Field(default=0.25, ge=0, le=5)
+    # The same ceiling expressed the way a trader states it: a fraction of the
+    # trade's own stop distance. Normally the binding one, because a percent of
+    # price means different things on different stops -- 0.25% of ₹450 is 31%
+    # of a ₹3.61 stop and 3% of a ₹36 one. The tighter of the two applies.
+    entry_slippage_cap_r: float = Field(default=0.10, ge=0, le=1)
 
     # The price band the scanner will watch at all. Here rather than in the
     # environment because it is an ordinary trading decision and belongs with

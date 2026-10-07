@@ -233,6 +233,21 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
         effect=NEXT_SIGNAL,
     ),
     SettingSpec(
+        key="entry_slippage_cap_r",
+        group=ACCOUNT,
+        label="Entry slippage cap (share of risk)",
+        help=(
+            "How much of a trade's own risk the entry may give away, as a fraction of the distance from "
+            "the entry to the stop. 0.10 means a tenth of it. This is normally the cap that binds, "
+            "because a percent of price means different things on different stops: 0.25% of ₹450 is a "
+            "third of a ₹3.61 stop and a thirtieth of a ₹36 one. Whichever of the two caps is tighter "
+            "is the one applied. Zero puts the limit exactly at the signal's entry price — the strictest "
+            "setting, and the one that buys the full planned quantity when it fills at all."
+        ),
+        unit=RATIO,
+        effect=NEXT_SIGNAL,
+    ),
+    SettingSpec(
         key="execution_approval_mode",
         group=ACCOUNT,
         label="Approval mode",

@@ -54,7 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import ApplicationSetting, LiveOrderApproval, LiveOrderSubmission, PaperSignal
-from app.services.entry_pricing import DEFAULT_CAP_PERCENT, plan_entry
+from app.services.entry_pricing import DEFAULT_CAP_PERCENT, DEFAULT_CAP_R, plan_entry
 from app.services.live_approval import BLOCKED, request_live_approval
 from app.services.live_execution import submit_live_order
 from app.services.live_execution_gateway import BrokerNotSelectedError, live_order_adapter
@@ -201,6 +201,7 @@ def _order_request(signal: PaperSignal, controls: Any) -> LiveOrderRequest:
         quantity=int(signal.quantity),
         risk_budget=Decimal(str(signal.risk_amount)),
         cap_percent=Decimal(str(getattr(controls, "entry_slippage_cap_percent", DEFAULT_CAP_PERCENT))),
+        cap_r=Decimal(str(getattr(controls, "entry_slippage_cap_r", DEFAULT_CAP_R))),
     )
     if plan.refusal:
         # Raised rather than returned: the caller already turns a ValueError here
