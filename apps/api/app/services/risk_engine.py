@@ -23,6 +23,42 @@ def _decimal(value: object) -> Decimal:
     return Decimal(str(value))
 
 
+def outside_price_band(entry_price: object, controls: TradingControls) -> str | None:
+    """Why this share is outside the operator's price band, or None.
+
+    The band existed only in ``universe``, which ranks the watchlist, and that
+    module runs only when ``UNIVERSE_ENABLED`` is set -- off by default. So an
+    operator who set a ₹1,500 cap on the Settings screen had set nothing: on
+    7 October the system entered PAYTM at ₹1,745 and BHARTIARTL at ₹1,818. The
+    universe filter also fails open when the day's list has not been built yet,
+    and it ranks on previous-day candles, so a share that crossed the cap this
+    morning would pass it even with everything switched on.
+
+    So the band is enforced here instead, where a trade is actually decided: on
+    the signal's own entry price, in the engine every signal must pass, whether
+    or not the dynamic universe is running and whatever it decided. The refusal
+    is recorded against the signal, so the operator reads "we found a setup and
+    refused it" rather than seeing nothing at all.
+
+    Only the saved control is used, and zero means unbounded. The environment
+    values behind ``universe`` are deployment defaults for ranking a watchlist;
+    a refusal to trade should come from the number the operator typed.
+
+    The reason this matters is not neatness. A price cap is how a risk budget is
+    kept spendable in whole shares: ₹100 of risk against a ₹1,818 share with a
+    0.8% stop buys six, and against a ₹4,700 one buys one -- a position that
+    spends the budget and earns a fraction of the target.
+    """
+    price = _decimal(entry_price)
+    high = _decimal(getattr(controls, "universe_max_share_price", 0) or 0)
+    low = _decimal(getattr(controls, "universe_min_share_price", 0) or 0)
+    if high > 0 and price > high:
+        return f"Share price {price} is above the {high} cap"
+    if low > 0 and price < low:
+        return f"Share price {price} is below the {low} floor"
+    return None
+
+
 class PaperRiskEngine:
     """Serializes paper signal allocations before a simulated entry order is queued."""
 
@@ -119,6 +155,11 @@ class PaperRiskEngine:
                 # first be crossed by a signal arriving rather than by a price
                 # moving, and whichever notices first owns recording it.
                 await daily_limits.record_halt(session, signal.session_date, daily_limits.PAPER, verdict)
+            elif (banded := outside_price_band(signal.entry_price, controls)) is not None:
+                # Before the allocation checks: this is a fact about the share,
+                # not about the day, and "we are not trading this stock" is a
+                # clearer thing to read than "the budget is full".
+                reason = banded
             elif reserved + risk_amount > daily_limit:
                 reason = "Daily paper-risk allocation limit reached"
             elif active_reservations >= controls.maximum_open_positions:

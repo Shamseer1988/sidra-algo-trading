@@ -46,6 +46,9 @@ async def main() -> int:
 
     async with SessionLocal() as session:
         from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
+        from app.core.config import get_settings
+
+        settings = get_settings()
         from app.services.strategy_registry import DEFAULT_STRATEGIES, STRATEGIES_KEY, StrategyConfiguration
 
         row = await session.get(ApplicationSetting, TRADING_KEY)
@@ -128,7 +131,22 @@ async def main() -> int:
 
         heading("3b. What the budget can buy")
         cap = Decimal(str(getattr(controls, "universe_max_share_price", 0) or 0))
+        low = Decimal(str(getattr(controls, "universe_min_share_price", 0) or 0))
         print(f"  universe_max_share_price   : {cap if cap > 0 else 'no limit'}")
+        print(f"  universe_min_share_price   : {low if low > 0 else 'no limit'}")
+        if cap > 0 or low > 0:
+            line(OK, "Enforced on every signal's entry price, whatever the dynamic universe decided.")
+        # The band used to live only in the watchlist ranking, which is off by
+        # default -- so a cap typed on the Settings screen refused nothing. It is
+        # enforced in the risk engine now, and this line exists so an operator
+        # can see which of the two is doing what.
+        if not settings.universe_enabled:
+            line(
+                WARN,
+                "UNIVERSE_ENABLED is off, so the dynamic watchlist (turnover, ATR and liquidity ranking) "
+                "is not running and every streamed instrument is scanned. The share-price band above "
+                "still applies; the other universe filters do not.",
+            )
         if floor > 0:
             # ``floor`` is the minimum stop distance as a fraction, so this is
             # the tightest stop the system will ever place -- and therefore the
