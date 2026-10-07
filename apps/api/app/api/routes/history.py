@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import AuditLog, User, UserRole
-from app.services import broker_day_figures, broker_trades, trade_history
+from app.services import broker_day_figures, broker_trades, execution_quality, trade_history
 from app.services.trading_calendar import MARKET_TIMEZONE
 
 router = APIRouter(prefix="/history", tags=["History"])
@@ -298,6 +298,119 @@ async def overview(
         broker_net_pnl=totals.broker_net_pnl,
         broker_days=totals.broker_days,
         days_pending_broker=totals.days_pending_broker,
+    )
+
+
+class QualityResponse(BaseModel):
+    """Execution quality for a range: fill rate, slippage, and what a trade is worth."""
+
+    from_date: str
+    to_date: str
+    verdict: str
+    notes: list[str]
+    signals: int
+    accepted: int
+    refused: int
+    refusals: dict[str, int]
+    sent: int
+    filled: int
+    unknown_fills: int
+    fill_rate_percent: Decimal | None
+    acceptance_percent: Decimal | None
+    entry_slippage_trades: int
+    entry_slippage_average: Decimal | None
+    entry_slippage_worst: Decimal | None
+    trade_slippage_trades: int
+    trade_slippage_total: Decimal
+    trade_slippage_average: Decimal | None
+    trades: int
+    wins: int
+    losses: int
+    scratches: int
+    win_rate_percent: Decimal | None
+    break_even_win_rate_percent: Decimal | None
+    average_win: Decimal | None
+    average_loss: Decimal | None
+    gross_per_trade: Decimal | None
+    net_per_trade: Decimal | None
+    average_r: Decimal | None
+    gross: Decimal
+    charges_estimated: Decimal
+    charges_broker: Decimal | None
+    charges_per_trade: Decimal | None
+    charges_percent_of_gross: Decimal | None
+    charge_days_settled: int
+    charge_days_pending: int
+    strategies: list[dict]
+
+
+@router.get("/quality", response_model=QualityResponse)
+async def quality(
+    session: DbSession,
+    _: CurrentUser,
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+    broker: str | None = Query(default=None, description="Narrow to one broker's account."),
+) -> QualityResponse:
+    """How well the system traded, as opposed to what it traded.
+
+    Live only, and not optional: a paper trade has no broker fill behind it, so
+    including one would dilute every figure here with a trade that cost nothing
+    and filled perfectly.
+    """
+    begin, end = _range(from_date, to_date)
+    records = await trade_history.load_trades(session, begin, end, execution_mode="LIVE", broker=broker)
+    days = await trade_history.summarise_days(session, records, begin, end, broker=broker, execution_mode="LIVE")
+    report = await execution_quality.build_report(session, begin, end, records, days)
+    return QualityResponse(
+        from_date=report.from_date.isoformat(),
+        to_date=report.to_date.isoformat(),
+        verdict=report.verdict,
+        notes=report.notes,
+        signals=report.funnel.signals,
+        accepted=report.funnel.accepted,
+        refused=report.funnel.refused,
+        refusals=report.funnel.refusals,
+        sent=report.funnel.sent,
+        filled=report.funnel.filled,
+        unknown_fills=report.funnel.unknown,
+        fill_rate_percent=report.funnel.fill_rate_percent,
+        acceptance_percent=report.funnel.acceptance_percent,
+        entry_slippage_trades=report.slippage.entry_trades,
+        entry_slippage_average=report.slippage.entry_average,
+        entry_slippage_worst=report.slippage.entry_worst,
+        trade_slippage_trades=report.slippage.trade_trades,
+        trade_slippage_total=report.slippage.trade_total,
+        trade_slippage_average=report.slippage.trade_average,
+        trades=report.expectancy.trades,
+        wins=report.expectancy.wins,
+        losses=report.expectancy.losses,
+        scratches=report.expectancy.scratches,
+        win_rate_percent=report.expectancy.win_rate_percent,
+        break_even_win_rate_percent=report.expectancy.break_even_win_rate_percent,
+        average_win=report.expectancy.average_win,
+        average_loss=report.expectancy.average_loss,
+        gross_per_trade=report.expectancy.gross_per_trade,
+        net_per_trade=report.expectancy.net_per_trade,
+        average_r=report.expectancy.average_r,
+        gross=report.charges.gross,
+        charges_estimated=report.charges.estimated,
+        charges_broker=report.charges.broker,
+        charges_per_trade=report.charges.per_trade,
+        charges_percent_of_gross=report.charges.percent_of_gross,
+        charge_days_settled=report.charges.broker_days,
+        charge_days_pending=report.charges.days_pending,
+        strategies=[
+            {
+                "strategy_version": row.strategy_version,
+                "trades": row.trades,
+                "wins": row.wins,
+                "net": str(row.net),
+                "net_per_trade": str(row.net_per_trade) if row.net_per_trade is not None else None,
+                "average_r": str(row.average_r) if row.average_r is not None else None,
+            }
+            for row in report.strategies
+        ],
     )
 
 

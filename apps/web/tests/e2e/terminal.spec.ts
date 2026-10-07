@@ -1883,6 +1883,79 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText("not reported").first()).toBeVisible();
   });
 
+  test("8o. Reports: execution quality says what the sample supports before any number", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/history/quality*", async (route: Route) => {
+      await route.fulfill({
+        json: {
+          from_date: "2026-09-08",
+          to_date: "2026-10-07",
+          verdict:
+            "5 closed live trades. This is not a sample. Nothing below is evidence of an edge — it is evidence about execution.",
+          notes: ["Charges came to 80.0% of gross profit, from the broker's own figures."],
+          signals: 41,
+          accepted: 9,
+          refused: 32,
+          refusals: { "Share price 1818.40 is above the 1500 cap": 12, "Daily trade ceiling reached": 20 },
+          sent: 9,
+          filled: 6,
+          unknown_fills: 1,
+          fill_rate_percent: "75.0",
+          acceptance_percent: "22.0",
+          entry_slippage_trades: 6,
+          entry_slippage_average: "0.09",
+          entry_slippage_worst: "0.14",
+          trade_slippage_trades: 6,
+          trade_slippage_total: "-12.40",
+          trade_slippage_average: "-2.07",
+          trades: 5,
+          wins: 2,
+          losses: 3,
+          scratches: 0,
+          win_rate_percent: "40.0",
+          break_even_win_rate_percent: "49.6",
+          average_win: "126.00",
+          average_loss: "-124.00",
+          gross_per_trade: "-9.12",
+          net_per_trade: "-36.71",
+          average_r: "-0.37",
+          gross: "-45.61",
+          charges_estimated: "64.85",
+          charges_broker: "137.96",
+          charges_per_trade: "27.59",
+          charges_percent_of_gross: null,
+          charge_days_settled: 4,
+          charge_days_pending: 1,
+          strategies: [
+            { strategy_version: "orb-retest-v1@9", trades: 3, wins: 2, net: "48.00", net_per_trade: "16.00", average_r: "0.16" },
+            { strategy_version: "rs-pullback-v1@4", trades: 2, wins: 0, net: "-231.55", net_per_trade: "-115.77", average_r: "-1.16" },
+          ],
+        },
+      });
+    });
+    await page.goto("/");
+
+    await go(page, "Reports", "Execution quality");
+
+    // The sentence that stops five trades being read as a finding, above
+    // everything else on the screen.
+    await expect(page.getByText(/This is not a sample/)).toBeVisible();
+
+    // The funnel: setups found, what survived risk, what filled.
+    await expect(page.getByText("41")).toBeVisible();
+    await expect(page.getByText(/1 unknown, left out/)).toBeVisible();
+    // Why setups were refused — including the share-price band.
+    await expect(page.getByText(/is above the 1500 cap/)).toBeVisible();
+
+    // The comparison that decides everything: real win rate against the rate
+    // this profile needs to come out level.
+    await expect(page.getByText(/below what this profile needs/)).toBeVisible();
+
+    // The broker's own charges, named as the broker's.
+    await expect(page.getByText("broker's own").first()).toBeVisible();
+    await expect(page.getByRole("row").filter({ hasText: "rs-pullback-v1@4" })).toContainText("−₹231.55");
+  });
+
   test("9. Navigation: eight places to work, and nothing that renders \"unavailable\"", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");

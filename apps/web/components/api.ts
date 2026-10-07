@@ -214,6 +214,54 @@ export type HistoryOverview = {
   broker_days: number;
   days_pending_broker: number;
 };
+export type ExecutionQuality = {
+  from_date: string;
+  to_date: string;
+  verdict: string;
+  notes: string[];
+  signals: number;
+  accepted: number;
+  refused: number;
+  refusals: Record<string, number>;
+  sent: number;
+  filled: number;
+  unknown_fills: number;
+  fill_rate_percent: string | null;
+  acceptance_percent: string | null;
+  entry_slippage_trades: number;
+  entry_slippage_average: string | null;
+  entry_slippage_worst: string | null;
+  trade_slippage_trades: number;
+  trade_slippage_total: string;
+  trade_slippage_average: string | null;
+  trades: number;
+  wins: number;
+  losses: number;
+  scratches: number;
+  win_rate_percent: string | null;
+  break_even_win_rate_percent: string | null;
+  average_win: string | null;
+  average_loss: string | null;
+  gross_per_trade: string | null;
+  net_per_trade: string | null;
+  average_r: string | null;
+  gross: string;
+  charges_estimated: string;
+  charges_broker: string | null;
+  charges_per_trade: string | null;
+  charges_percent_of_gross: string | null;
+  charge_days_settled: number;
+  charge_days_pending: number;
+  strategies: {
+    strategy_version: string;
+    trades: number;
+    wins: number;
+    net: string;
+    net_per_trade: string | null;
+    average_r: string | null;
+  }[];
+};
+
 export type HistoryOrder = {
   order_id: string;
   client_order_id: string;
@@ -409,6 +457,7 @@ export const api = {
 
   historyOverview: (range: HistoryRange) => request<HistoryOverview>(`/history/overview${historyQuery(range)}`),
   historyDaily: (range: HistoryRange) => request<HistoryDay[]>(`/history/daily${historyQuery(range)}`),
+  historyQuality: (range: HistoryRange) => request<ExecutionQuality>(`/history/quality${historyQuery(range)}`),
   historyBrokerTrades: (range: HistoryRange) =>
     request<BrokerTrade[]>(`/history/broker-trades${historyQuery(range)}`),
   historyTrades: (range: HistoryRange & { session_date?: string; instrument_token?: string; strategy_version?: string }) =>

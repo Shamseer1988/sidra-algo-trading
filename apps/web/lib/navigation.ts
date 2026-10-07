@@ -146,6 +146,7 @@ export const workspaceTabs: Partial<Record<WorkspaceId, WorkspaceTab[]>> = {
   reports: [
     { id: "calendar", label: "P&L calendar" },
     { id: "pnl", label: "P&L summary" },
+    { id: "quality", label: "Execution quality" },
   ],
   settings: [
     { id: "trading", label: "Trading controls" },

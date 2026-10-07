@@ -133,6 +133,26 @@ async def test_the_broker_trade_list_reads_the_rows_already_stored():
     assert rows[0].session_date == SESSION_DATE.isoformat()
 
 
+async def test_the_quality_report_measures_the_live_account_only() -> None:
+    """A paper trade has no broker fill behind it: it cost nothing and filled
+    perfectly, so including one would flatter every figure on the screen."""
+    await a_trade(gross="200", charges="20", live=True)
+    await a_trade(gross="-500", charges="35", live=False)
+    async with SessionLocal() as session:
+        report = await routes.quality(session, OPERATOR, SESSION_DATE, SESSION_DATE, None)
+
+    assert report.trades == 1
+    assert report.gross == Decimal("200.0000")
+    assert "not a sample" in report.verdict
+
+
+async def test_the_quality_report_says_what_the_sample_cannot_support() -> None:
+    async with SessionLocal() as session:
+        report = await routes.quality(session, OPERATOR, SESSION_DATE, SESSION_DATE, None)
+    assert report.trades == 0
+    assert "nothing here to measure" in report.verdict
+
+
 async def test_the_trade_list_can_be_pinned_to_one_session():
     await a_trade()
     async with SessionLocal() as session:

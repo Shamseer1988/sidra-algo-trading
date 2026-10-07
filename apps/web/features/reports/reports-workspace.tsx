@@ -1,6 +1,7 @@
 "use client";
 
 import type { OrderSource } from "../orders/use-order-source";
+import { ExecutionQualityPanel } from "./execution-quality";
 import { PnlCalendar } from "./pnl-calendar";
 import { PnlSummary } from "./pnl-summary";
 
@@ -24,9 +25,7 @@ export function ReportsWorkspace({
   onMessage: (message: string) => void;
   source: OrderSource;
 }) {
-  return tab === "pnl" ? (
-    <PnlSummary onMessage={onMessage} source={source} />
-  ) : (
-    <PnlCalendar onMessage={onMessage} source={source} />
-  );
+  if (tab === "pnl") return <PnlSummary onMessage={onMessage} source={source} />;
+  if (tab === "quality") return <ExecutionQualityPanel onMessage={onMessage} source={source} />;
+  return <PnlCalendar onMessage={onMessage} source={source} />;
 }
