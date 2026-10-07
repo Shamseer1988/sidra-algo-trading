@@ -46,6 +46,18 @@ logger = logging.getLogger(__name__)
 RESOLVED_PLACED = "RESOLVED_PLACED"
 NEEDS_REVIEW = "NEEDS_REVIEW"
 UNKNOWN = "UNKNOWN"
+PREPARED = "PREPARED"
+
+# The two states a lookup can still settle.
+#
+# PREPARED is the one that was unreachable. The write-ahead record is committed
+# before the order is sent, so a process that dies in between leaves a row that
+# nothing ever moves: the send never returned to set it, and this module
+# declined to look it up because it was "not unknown". The readiness gate counts
+# it as unresolved, so live trading stayed blocked with no path to clearing it
+# short of editing the database by hand. It is the same question as an UNKNOWN —
+# is this order at the broker — and it has the same answer in the same place.
+RESOLVABLE_STATUSES = frozenset({UNKNOWN, PREPARED})
 
 # After this many failed lookups the attempt stops being a transient ambiguity
 # and becomes something a person has to look at.
@@ -107,8 +119,8 @@ async def resolve_submission(
     could place or cancel an order while resolving an ambiguous one is how a
     single uncertain order becomes two certain ones.
     """
-    if submission.status != UNKNOWN:
-        return RecoveryResult(submission.status, "Submission is not unknown; nothing to resolve.", [])
+    if submission.status not in RESOLVABLE_STATUSES:
+        return RecoveryResult(submission.status, "Submission already has an outcome; nothing to resolve.", [])
 
     try:
         book = await adapter.normalised_orders()
@@ -158,6 +170,29 @@ async def unresolved_submissions(session: AsyncSession) -> list[LiveOrderSubmiss
     rows = await session.scalars(
         select(LiveOrderSubmission)
         .where(LiveOrderSubmission.status.in_([UNKNOWN, NEEDS_REVIEW, "PREPARED"]))
+        .order_by(LiveOrderSubmission.created_at.asc())
+    )
+    return list(rows.all())
+
+
+async def pending_resolution(session: AsyncSession, *, before: datetime) -> list[LiveOrderSubmission]:
+    """Submissions worth looking up now: still open, and old enough to look for.
+
+    ``before`` keeps the scheduled pass off rows that are in flight as it runs.
+    A PREPARED row is written one line before the order is sent, so a sweep that
+    read it immediately would be asking the broker about an order that has not
+    been placed yet and counting the miss against a budget of three.
+
+    NEEDS_REVIEW is deliberately absent. It is where this module puts something
+    once it has decided a person has to look, and a scheduler that kept asking
+    would either clear it without anybody looking or burn requests forever.
+    """
+    rows = await session.scalars(
+        select(LiveOrderSubmission)
+        .where(
+            LiveOrderSubmission.status.in_(sorted(RESOLVABLE_STATUSES)),
+            LiveOrderSubmission.created_at < before,
+        )
         .order_by(LiveOrderSubmission.created_at.asc())
     )
     return list(rows.all())

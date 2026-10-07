@@ -150,7 +150,7 @@ async def test_a_submission_that_is_not_unknown_is_left_alone() -> None:
     client = FakeClient()
     result = await resolve_submission(FirstockAdapter(client, None), record)
     assert client.calls == 0
-    assert result.detail == "Submission is not unknown; nothing to resolve."
+    assert result.detail == "Submission already has an outcome; nothing to resolve."
 
 
 async def test_repeated_absence_escalates_to_a_person() -> None:
@@ -182,3 +182,113 @@ async def test_a_book_without_an_identifier_escalates_on_the_first_attempt() -> 
     result = await resolve_submission(firstock([{"orderNumber": "1", "status": "OPEN"}]), record)
     assert result.status == NEEDS_REVIEW
     assert record.resolution_attempts == 1
+
+
+# --- the state nothing could resolve ----------------------------------------
+#
+# PREPARED is written one line before the order is sent, so a process that dies
+# in between leaves a row nothing ever moves: the send never returned to set it,
+# and this module declined to look it up because it was "not unknown". The
+# readiness gate counts it as unresolved, so live trading stayed blocked with no
+# way to clear it short of editing the database by hand.
+
+
+async def test_a_prepared_submission_can_be_looked_up() -> None:
+    record = submission(status="PREPARED")
+    result = await resolve_submission(firstock([{"orderNumber": "77", "remarks": "sidra-1"}]), record)
+
+    assert result.status == RESOLVED_PLACED
+    assert record.status == RESOLVED_PLACED
+    assert record.broker_order_numbers == ["77"]
+
+
+async def test_a_prepared_submission_the_broker_never_saw_still_escalates() -> None:
+    """Absence is not proof it was never placed, whichever state it was left in."""
+    record = submission(status="PREPARED")
+    for _ in range(MAX_RESOLUTION_ATTEMPTS):
+        result = await resolve_submission(firstock([]), record)
+
+    assert result.status == NEEDS_REVIEW
+    assert record.status == NEEDS_REVIEW
+
+
+@pytest.mark.parametrize("status", ["ACCEPTED", "REJECTED", "RESOLVED_PLACED", "NEEDS_REVIEW"])
+async def test_a_settled_submission_is_never_looked_up_again(status: str) -> None:
+    """NEEDS_REVIEW is where this module puts something once it has decided a
+    person has to look. A scheduler that kept asking would either clear it
+    without anybody looking or burn requests forever."""
+    client = FakeClient()
+    await resolve_submission(FirstockAdapter(client, None), submission(status=status))
+    assert client.calls == 0
+
+
+# --- which rows a scheduled pass picks up -----------------------------------
+
+
+async def _store(status: str, *, age_seconds: int, symbol: str = "RVNL"):
+    from datetime import UTC, datetime, timedelta
+
+    from app.db.models import LiveOrderSubmission
+    from app.db.session import SessionLocal
+
+    async with SessionLocal() as session:
+        record = LiveOrderSubmission(
+            client_order_id=f"sidra-{uuid4().hex[:12]}",
+            broker="UPSTOX",
+            exchange="NSE_EQ",
+            trading_symbol=symbol,
+            product="I",
+            price_type="LMT",
+            transaction_type="BUY",
+            quantity=1,
+            status=status,
+            created_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
+        )
+        session.add(record)
+        await session.commit()
+        return record.client_order_id
+
+
+@pytest.fixture
+async def clean_submissions():
+    from sqlalchemy import delete
+
+    from app.db.models import LiveOrderSubmission
+    from app.db.session import SessionLocal
+
+    async def wipe():
+        async with SessionLocal() as session:
+            await session.execute(delete(LiveOrderSubmission).where(LiveOrderSubmission.trading_symbol == "RVNL"))
+            await session.commit()
+
+    await wipe()
+    yield
+    await wipe()
+
+
+async def _pending(seconds: int = 120):
+    from datetime import UTC, datetime, timedelta
+
+    from app.db.session import SessionLocal
+    from app.services.live_order_recovery import pending_resolution
+
+    async with SessionLocal() as session:
+        rows = await pending_resolution(session, before=datetime.now(UTC) - timedelta(seconds=seconds))
+        return [row.client_order_id for row in rows]
+
+
+@pytest.mark.parametrize("status", ["UNKNOWN", "PREPARED"])
+async def test_an_open_submission_old_enough_is_picked_up(clean_submissions, status: str) -> None:
+    key = await _store(status, age_seconds=600)
+    assert key in await _pending()
+
+
+@pytest.mark.parametrize("status", ["ACCEPTED", "REJECTED", "RESOLVED_PLACED", "NEEDS_REVIEW"])
+async def test_a_settled_submission_is_not_picked_up(clean_submissions, status: str) -> None:
+    key = await _store(status, age_seconds=600)
+    assert key not in await _pending()
+
+
+async def test_a_submission_still_in_flight_is_left_for_the_next_pass(clean_submissions) -> None:
+    key = await _store("PREPARED", age_seconds=5)
+    assert key not in await _pending()

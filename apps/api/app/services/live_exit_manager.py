@@ -70,6 +70,14 @@ logger = logging.getLogger(__name__)
 # leaves several attempts at the close that actually matters.
 STOP_IS_POINTLESS_MINUTES = 5.0
 
+# How old a completed candle may be and still be worth measuring a target
+# against. Candles are built from ticks, so a minute with no trade in it
+# produces no candle at all and a small gap is ordinary on a quiet instrument.
+# A gap this large is not quiet, it is a feed that has stopped, and a target
+# judged against a price from twenty minutes ago is a decision made about a
+# market that has moved on.
+TARGET_PRICE_MAX_AGE_MINUTES = 5.0
+
 MARKET = "MARKET"
 STOP_MARKET = "SL-M"
 
@@ -96,7 +104,11 @@ class ExitSweepOutcome:
     @property
     def noteworthy(self) -> list[PositionExit]:
         """Anything the operator needs to read. A quiet sweep says nothing."""
-        return [item for item in self.exits if item.acted or item.step in {"cancel_failed", "orphaned", "no_signal"}]
+        return [
+            item
+            for item in self.exits
+            if item.acted or item.step in {"cancel_failed", "orphaned", "no_signal", "stale_price"}
+        ]
 
 
 def _decimal(value) -> Decimal | None:  # noqa: ANN001
@@ -111,14 +123,35 @@ def target_reached(*, long: bool, close: Decimal, target: Decimal) -> bool:
     return close >= target if long else close <= target
 
 
-async def _latest_close(session: AsyncSession, instrument_token: str) -> Decimal | None:
+async def _latest_close(session: AsyncSession, instrument_token: str) -> tuple[Decimal | None, datetime | None]:
+    """The newest completed candle's close, and when that candle closed.
+
+    The timestamp travels with the price because the price alone cannot say
+    whether it is still true. This read had no freshness check at all: a feed
+    that stopped at 11:00 left the 14:30 target measured against an 11:00 close,
+    which is how a target is missed on a trade that reached it or hit on one
+    that did not.
+    """
     candle = await session.scalar(
         select(MarketCandle)
         .where(MarketCandle.instrument_token == instrument_token)
         .order_by(MarketCandle.closed_at.desc())
         .limit(1)
     )
-    return _decimal(candle.close) if candle is not None else None
+    if candle is None:
+        return None, None
+    return _decimal(candle.close), candle.closed_at
+
+
+def price_refusal(closed_at: datetime | None, now: datetime) -> str | None:
+    """Why this price cannot be measured against, or None if it can."""
+    if closed_at is None:
+        return "there is no completed candle for it"
+    stamped = closed_at if closed_at.tzinfo else closed_at.replace(tzinfo=UTC)
+    age = (now - stamped).total_seconds() / 60
+    if age > TARGET_PRICE_MAX_AGE_MINUTES:
+        return f"the last completed candle is {age:.0f} minutes old"
+    return None
 
 
 async def _signal_for(session: AsyncSession, position, start, end) -> PaperSignal | None:  # noqa: ANN001
@@ -427,8 +460,7 @@ async def _hold_or_protect(
     net: Decimal,
     symbol: str,
     quantity: int,
-    close: Decimal,
-    target: Decimal,
+    price_note: str,
     start,  # noqa: ANN001
     end,  # noqa: ANN001
     book: list | None,
@@ -451,9 +483,7 @@ async def _hold_or_protect(
     three earlier joins compare a trading name against an instrument token and
     quietly find nothing.
     """
-    holding = PositionExit(
-        symbol, False, "holding", f"Holding; last close {close} against target {target}.", quantity=quantity
-    )
+    holding = PositionExit(symbol, False, "holding", f"Holding; {price_note}.", quantity=quantity)
     if book is None:
         # Unreadable book. Saying nothing is better than placing a second stop
         # behind a position that already has one: both would fill and the
@@ -578,15 +608,62 @@ async def _consider(
     reason = time_exit_due(opened_at=signal.created_at, now=now, rules=rules)
 
     if reason is None:
-        close = await _latest_close(session, signal.instrument_token)
+        close, closed_at = await _latest_close(session, signal.instrument_token)
         target = _decimal(signal.target_price)
-        if close is None or target is None:
-            return PositionExit(
-                symbol, False, "no_price", "No completed candle to measure the target against.", quantity=quantity
+        unusable = price_refusal(closed_at, now) if close is not None else "there is no completed candle for it"
+        if target is None:
+            unusable = "the trade carries no target"
+
+        if unusable is not None:
+            # The target cannot be judged. The stop still can, and must: this
+            # branch used to return here, so a position whose instrument had
+            # stopped producing candles was the one position the protection
+            # watchdog never looked at -- the watchdog lives inside
+            # _hold_or_protect and nothing else calls it.
+            outcome = await _hold_or_protect(
+                session,
+                adapter,
+                position,
+                signal,
+                net,
+                symbol,
+                quantity,
+                f"{unusable}, so the target is not being measured",
+                start,
+                end,
+                book,
+                rules,
+                now,
             )
+            if outcome.step != "holding":
+                return outcome
+            # Protected, but blind on the target. Said out loud rather than
+            # left in the quiet pile: a feed that has stopped means this trade
+            # can now only end on its stop or on the clock.
+            return PositionExit(
+                symbol,
+                False,
+                "stale_price",
+                f"{quantity} of {symbol} is held with a working stop, but {unusable} — "
+                "the target cannot be measured until prices resume.",
+                quantity=quantity,
+            )
+
         if not target_reached(long=long, close=close, target=target):
             return await _hold_or_protect(
-                session, adapter, position, signal, net, symbol, quantity, close, target, start, end, book, rules, now
+                session,
+                adapter,
+                position,
+                signal,
+                net,
+                symbol,
+                quantity,
+                f"last close {close} against target {target}",
+                start,
+                end,
+                book,
+                rules,
+                now,
             )
         reason = f"Target reached at {close}"
 

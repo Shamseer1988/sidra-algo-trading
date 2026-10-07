@@ -285,6 +285,111 @@ def _make_broker_figures_job(settings: Settings):
 SETTLEMENT_LOOKBACK_DAYS = 7
 
 
+# How long a submission must have existed before a scheduled pass asks the
+# broker about it. A PREPARED row is written one line before the order is sent,
+# so looking immediately would be asking about an order that is still in flight
+# and counting the miss against a budget of three attempts.
+RESOLUTION_SETTLE_SECONDS = 120
+
+
+def _make_submission_recovery_job(settings: Settings):
+    """Resolve submissions whose outcome was never learned.
+
+    An UNKNOWN is the one state that cannot be left alone: until it is settled
+    there may be a live order, and therefore live exposure, that nothing else in
+    this system knows about. ``live_order_recovery`` has always been able to
+    answer the question -- it looks our own client order id up in the broker's
+    book -- and until now nothing called it except an operator clicking a
+    button. On an unattended deployment that is not a recovery path, it is a
+    notification that trading has stopped: the readiness gate counts an
+    unresolved submission as blocking, so one ambiguous order ended the trading
+    day until somebody noticed.
+
+    Read-only at the broker, through the report adapter: resolving an uncertain
+    order must never be able to place or cancel anything, or one uncertain order
+    becomes two certain ones.
+
+    Resolved against the broker each order was sent to rather than the one
+    currently selected. Looking for it in the wrong order book would find
+    nothing and escalate an order that is sitting there plainly visible.
+    """
+
+    async def _job() -> None:
+        from app.db.session import SessionLocal
+        from app.services.live_execution_gateway import BrokerNotSelectedError, live_report_adapter
+        from app.services.live_order_recovery import NEEDS_REVIEW, RESOLVED_PLACED, pending_resolution
+        from app.services.live_order_recovery import resolve_submission as resolve
+
+        if settings.application_mode != "LIVE" or not settings.live_trading_enabled:
+            return
+
+        before = datetime.now(UTC) - timedelta(seconds=RESOLUTION_SETTLE_SECONDS)
+        escalated: list[str] = []
+        resolved: list[str] = []
+        async with SessionLocal() as db:
+            rows = await pending_resolution(db, before=before)
+            if not rows:
+                return
+            for record in rows:
+                try:
+                    adapter = await live_report_adapter(settings, db, record.broker or None)
+                except BrokerNotSelectedError as error:
+                    logger.warning("scheduler.recovery_no_broker", error=str(error))
+                    continue
+                except Exception as error:  # noqa: BLE001 - one bad row must not stop the rest
+                    # Deliberately before resolve(): a broker we cannot log in to
+                    # has told us nothing about the order, and spending one of
+                    # three attempts on that would escalate a resolvable
+                    # submission for a reason that has nothing to do with it.
+                    logger.warning("scheduler.recovery_login_failed", error=str(error))
+                    continue
+                result = await resolve(adapter, record)
+                if result.status == RESOLVED_PLACED:
+                    resolved.append(f"{record.trading_symbol} ({', '.join(result.broker_order_numbers)})")
+                elif result.status == NEEDS_REVIEW:
+                    escalated.append(f"{record.trading_symbol}: {result.detail}")
+            await db.commit()
+
+        logger.info(
+            "scheduler.submission_recovery_ran",
+            considered=len(rows),
+            resolved=len(resolved),
+            escalated=len(escalated),
+        )
+        if escalated:
+            await _persist_audit("scheduler.submission_escalated", {"submissions": escalated})
+        # Only the escalations are announced. A submission that resolved itself
+        # is the machinery working, and an alert for every one of those is how
+        # an operator learns to stop reading them -- while an escalation stops
+        # live trading until a person acts, which is the one thing they cannot
+        # find out from a container log.
+        if escalated:
+            await _announce_recovery(settings, escalated)
+
+    return _job
+
+
+async def _announce_recovery(settings: Settings, escalated: list[str]) -> None:
+    """Tell the operator that an order needs them. Never raises."""
+    try:
+        from app.services.telegram import TelegramNotificationService
+        from app.services.telegram_config import configured_settings
+
+        effective = await configured_settings(settings)
+        if not effective.telegram_is_configured:
+            return
+        lines = "\n".join(f"\u2022 {item}" for item in escalated)
+        text = (
+            "\U0001f6a8 <b>ORDER NEEDS REVIEW</b>\n\n"
+            f"{lines}\n\n"
+            "<i>Live trading is blocked until this is resolved. Check the broker's order book, "
+            "then clear it on the Live readiness screen.</i>"
+        )
+        await TelegramNotificationService(effective).send_message(text, parse_mode="HTML")
+    except Exception:  # noqa: BLE001 - an alert must not become a second failure
+        logger.exception("scheduler.recovery_announce_failed")
+
+
 def _make_settlement_catchup_job(settings: Settings):
     """Pick up the charges the evening pass was too early to see.
 
@@ -607,6 +712,22 @@ def init_upstox_scheduler(settings: Settings) -> AsyncIOScheduler | None:
         name="Live reconciliation refresh (every 10 min, 09:00-15:59 IST)",
         replace_existing=True,
         # A refresh that is late has already been overtaken by the next one.
+        misfire_grace_time=120,
+        max_instances=1,
+    )
+
+    # Every two minutes through the session and a little past it. An ambiguous
+    # order is exposure nobody can see, so it is chased while the market is
+    # open; the window runs to 16:00 so a submission left over from the close
+    # still gets its attempts. The job reads one indexed query and stops when
+    # there is nothing open, so a quiet deployment spends nothing.
+    scheduler.add_job(
+        _make_submission_recovery_job(settings),
+        trigger=CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*/2", timezone="Asia/Kolkata"),
+        id="live_submission_recovery",
+        name="Unresolved submission recovery (every 2 min, 09:00-15:59 IST)",
+        replace_existing=True,
+        # A late attempt has already been overtaken by the next one.
         misfire_grace_time=120,
         max_instances=1,
     )

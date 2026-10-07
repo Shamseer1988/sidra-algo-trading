@@ -196,7 +196,16 @@ class FakeSession:
 
 @pytest.fixture
 def wiring(monkeypatch: pytest.MonkeyPatch):
-    state = SimpleNamespace(session=None, signal=signal(), close=Decimal("2900"), stops=[stop_row()], deadline=None)
+    state = SimpleNamespace(
+        session=None,
+        signal=signal(),
+        close=Decimal("2900"),
+        # How old the last completed candle is. Fresh by default; the target is
+        # only measured against a price recent enough to still be true.
+        close_age_minutes=1.0,
+        stops=[stop_row()],
+        deadline=None,
+    )
 
     def session_factory():
         state.session = FakeSession(sig=state.signal, close=state.close, stops=state.stops)
@@ -211,7 +220,9 @@ def wiring(monkeypatch: pytest.MonkeyPatch):
         return state.signal
 
     async def latest_close(_session, _token):
-        return state.close
+        if state.close is None:
+            return None, None
+        return state.close, module.datetime.now(UTC) - timedelta(minutes=state.close_age_minutes)
 
     async def resting(_session, _signal_id, _start, _end):
         return state.stops
@@ -531,10 +542,20 @@ async def test_a_flat_book_does_nothing(wiring) -> None:
 
 @pytest.mark.asyncio
 async def test_no_candle_means_no_target_decision(wiring) -> None:
+    """No price, no target decision -- but the stop is still checked.
+
+    This branch used to return before the protection watchdog ran, so a
+    position whose instrument had stopped producing candles was the one
+    position nothing ever looked at. The watchdog lives inside
+    _hold_or_protect and nothing else calls it.
+    """
     wiring.close = None
     wiring.adapter = FakeAdapter([position(Decimal("-143"))])
     result = await sweep(wiring)
-    assert result.exits[0].step == "no_price"
+    assert result.exits[0].step == "stale_price"
+    assert result.exits[0].acted is False
+    assert wiring.adapter.submitted == []
+    assert "no completed candle" in result.exits[0].detail
     assert wiring.adapter.submitted == []
 
 
@@ -939,3 +960,86 @@ async def test_a_part_covered_position_near_the_deadline_sends_nothing_if_the_st
 
     assert result.exits[0].step == "cancel_failed"
     assert wiring.adapter.submitted == []
+
+
+# --- a price too old to decide on --------------------------------------------
+#
+# The target was measured against the newest candle whatever its age. A feed
+# that stopped at 11:00 left the 14:30 target judged against an 11:00 close,
+# which is how a target is missed on a trade that reached it, or hit on one
+# that did not.
+
+
+@pytest.mark.asyncio
+async def test_a_target_is_not_judged_against_a_price_from_hours_ago(wiring) -> None:
+    wiring.signal = signal(target="2850")
+    wiring.close = Decimal("2800")  # through the target of a short
+    wiring.close_age_minutes = 45.0
+    wiring.adapter = FakeAdapter([position(Decimal("-143"))])
+
+    result = await sweep(wiring)
+
+    assert result.exits[0].step == "stale_price"
+    assert wiring.adapter.submitted == []
+    assert "45 minutes old" in result.exits[0].detail
+
+
+@pytest.mark.asyncio
+async def test_a_recent_candle_still_decides_the_target(wiring) -> None:
+    """A minute with no trade in it produces no candle at all, so a small gap is
+    ordinary and must not stop a target being taken."""
+    wiring.signal = signal(target="2850")
+    wiring.close = Decimal("2800")
+    wiring.close_age_minutes = module.TARGET_PRICE_MAX_AGE_MINUTES - 1
+    wiring.adapter = FakeAdapter([position(Decimal("-143"))])
+
+    result = await sweep(wiring)
+
+    assert result.exits[0].step == "exited"
+    assert len(wiring.adapter.submitted) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_stale_price_still_gets_the_position_a_stop(wiring, monkeypatch) -> None:
+    calls = []
+
+    async def spy(_session, _adapter, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(protected=True, flattened=False, detail="Stop at 2850.00.")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    # Through the target of a short, and far too old to act on. Trusted, this
+    # price would close the trade; the stop is what has to happen instead.
+    wiring.close = Decimal("2800")
+    wiring.close_age_minutes = 45.0
+    # Nothing of ours on the book: the stop was rejected at placement.
+    wiring.adapter = FakeAdapter([position(Decimal("-143"))], orders=[])
+
+    result = await sweep(wiring)
+
+    assert len(calls) == 1
+    assert result.exits[0].step == "unprotected"
+
+
+@pytest.mark.asyncio
+async def test_the_square_off_does_not_wait_for_a_price(wiring) -> None:
+    """The clock is not a price question. A dead feed must not keep a position
+    open past the deadline."""
+    wiring.close = None
+
+    with _at_ist(15, 2):
+        wiring.signal = signal(square_off="15:00")
+        wiring.adapter = FakeAdapter([position(Decimal("-143"))])
+        result = await sweep(wiring)
+
+    assert result.exits[0].step == "exited"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_price_is_reported_rather_than_left_in_the_quiet_pile(wiring) -> None:
+    wiring.close_age_minutes = 45.0
+    wiring.adapter = FakeAdapter([position(Decimal("-143"))])
+
+    result = await sweep(wiring)
+
+    assert [item.step for item in result.noteworthy] == ["stale_price"]
