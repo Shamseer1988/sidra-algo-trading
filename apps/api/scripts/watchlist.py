@@ -47,17 +47,32 @@ async def main() -> int:
     args = parser.parse_args()
 
     settings = get_settings()
-    equities = configured_subscriptions(settings)
+    configured = configured_subscriptions(settings)
     streamed = feed_subscriptions(settings)
 
-    if not equities:
+    if not configured:
         print("UPSTOX_SUBSCRIPTIONS is empty, so nothing is streamed and nothing can be scanned.")
         return 1
 
-    # Streamed but never traded. They are force-added to the feed because
-    # relative strength and the NIFTY regime silently score zero without them,
-    # which is a different thing from being on the watchlist.
-    reference = [key for key in streamed if key not in equities]
+    # Streamed but never traded. The benchmark and VIX are force-added to the
+    # feed when they are absent, because relative strength and the NIFTY
+    # regime silently score zero without them -- but an operator may also have
+    # listed them in UPSTOX_SUBSCRIPTIONS by hand, as this deployment does.
+    # Deciding by "was it force-added" therefore reported NIFTY as something
+    # the scanner could signal on. It cannot: on_completed_candle returns
+    # immediately for the benchmark token, so an index is never evaluated by
+    # any strategy however it reached the feed. Decided by what the key is.
+    index_keys = {key for key in (settings.upstox_nifty_benchmark_key, settings.upstox_india_vix_key) if key}
+
+    def is_reference(key: str) -> bool:
+        return key in index_keys or key.startswith("NSE_INDEX|") or key.startswith("BSE_INDEX|")
+
+    equities = [key for key in configured if not is_reference(key)]
+    reference = [key for key in streamed if is_reference(key)]
+
+    if not equities:
+        print("Every subscribed key is an index. Indices are never evaluated, so nothing can be scanned.")
+        return 1
 
     async with SessionLocal() as session:
         names = await resolve_script_names(session, streamed)
