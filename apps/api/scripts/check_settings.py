@@ -197,6 +197,7 @@ async def main() -> int:
         print(f"  execution_approval_mode    : {controls.execution_approval_mode}")
         print(f"  live_entry_order_type      : {controls.live_entry_order_type}")
         print(f"  entry_slippage_cap_percent : {controls.entry_slippage_cap_percent}")
+        print(f"  entry_slippage_cap_r       : {controls.entry_slippage_cap_r}")
         if controls.live_broker == "NONE":
             problems += 1
             line(BAD, "No broker selected; live orders have nowhere to go.")
@@ -211,16 +212,48 @@ async def main() -> int:
                 "a 100 budget. Set LIMIT to make the planned risk a ceiling.",
             )
         else:
+            # Two ceilings, and the tighter of the two decides. Zero means a
+            # bound is not applied -- the same convention as every other bound
+            # here -- so reading only the percent made a cap of 0 look like a
+            # cap of nothing, and this said "expect very few fills" about a
+            # deployment whose R cap was doing the work. The 8 October RVNL
+            # entry settles it: a 0% percent cap would have sent the limit at
+            # the signal's 193.09, the 0.10R cap sends 192.94, and 192.94 is
+            # what went to the broker.
             cap = Decimal(str(controls.entry_slippage_cap_percent))
-            line(
-                OK,
-                f"LIMIT entries fill at most {cap}% past the signal and are sized from that price, "
-                f"so a filled trade risks no more than {per_trade:,.2f}.",
-            )
-            if cap == 0:
-                line(WARN, "A 0% cap only fills at the signal's exact price; expect very few fills.")
-            elif cap >= 1:
-                line(WARN, f"A {cap}% cap is wide; positions will shrink a lot to stay inside the budget.")
+            cap_r = Decimal(str(controls.entry_slippage_cap_r))
+            if cap <= 0 and cap_r <= 0:
+                problems += 1
+                line(
+                    BAD,
+                    "Both slippage caps are off, so a LIMIT entry is priced at the signal exactly and "
+                    "fills only if the market comes back to it. Set entry_slippage_cap_r to allow drift.",
+                )
+            else:
+                active = []
+                if cap > 0:
+                    active.append(f"{cap}% of price")
+                if cap_r > 0:
+                    active.append(f"{cap_r}R of the stop distance")
+                line(
+                    OK,
+                    f"LIMIT entries drift at most {' or '.join(active)} past the signal, whichever is "
+                    f"tighter, and are sized from that price, so a filled trade risks no more than "
+                    f"{per_trade:,.2f}.",
+                )
+                if cap <= 0:
+                    line(OK, f"The percent cap is off; the {cap_r}R cap is what acts.")
+                if cap_r <= 0:
+                    line(
+                        WARN,
+                        f"The R cap is off, so only the {cap}% cap acts. A percent of price is a different "
+                        "fraction of the stop on every instrument: 0.25% of a 450 share is a third of a "
+                        "3.60 stop and a thirtieth of a 36 one.",
+                    )
+                if cap >= 1:
+                    line(WARN, f"A {cap}% cap is wide; positions will shrink a lot to stay inside the budget.")
+                if cap_r >= Decimal("0.5"):
+                    line(WARN, f"A {cap_r}R cap gives away half the planned stop distance before entry.")
 
         heading("5. What each strategy will actually use")
         row = await session.get(ApplicationSetting, STRATEGIES_KEY)
