@@ -1,10 +1,10 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import ApplicationSetting, AuditLog, ScannerEvaluation, User, UserRole
@@ -248,6 +248,12 @@ class StrategyMetric(BaseModel):
     rejected: int
     watching: int
     acceptance_rate: float
+    # What the counts above actually cover. A card that shows a bare percentage
+    # without saying over what cannot be read: the same "0%" means a healthy
+    # scanner at three in the morning and a broken one at eleven.
+    sessions: int
+    first_session: date | None = None
+    last_session: date | None = None
 
 
 async def _get_controls(session: DbSession) -> TradingControls:
@@ -709,31 +715,110 @@ async def update_strategies(
     return normalized
 
 
+# The feed-quality block writes its own evaluation row so that a candle nobody
+# scored still leaves a record of why. It is not a strategy: its status is the
+# literal "REJECTED" at the one place it is constructed, so it can only ever
+# report 0% and it is not something an operator can tune. Shown beside the
+# strategies it looked like a fifth one that never fired.
+QUALITY_GATE_ID = "data-quality"
+
+# Sessions of scanning behind each card. Trading days, not calendar days, since
+# the rows are keyed by session_date: a Monday morning shows Friday beside it
+# rather than an empty weekend.
+METRIC_SESSIONS = 5
+
+
 @router.get("/strategies/metrics", response_model=list[StrategyMetric])
 async def strategy_metrics(_: CurrentUser, session: DbSession) -> list[StrategyMetric]:
-    rows = list(
-        (
-            await session.scalars(select(ScannerEvaluation).order_by(ScannerEvaluation.created_at.desc()).limit(1000))
-        ).all()
-    )
+    """Acceptance per strategy over the last few sessions of scanning.
+
+    This used to read the most recent 1000 evaluation rows and group them. The
+    window was therefore 1000 rows **in total**, shared by every writer: with
+    four strategies and the quality gate each card saw about 200 rows, which is
+    a few minutes of scanning rather than a day.
+
+    Two consequences, and the screen showed both at once. Opened outside market
+    hours the newest rows are the last ones written -- after the entry cutoff,
+    where the trade window refuses everything -- so every card read 0% with
+    certainty rather than as a measurement. And an accepted signal is rare on
+    purpose, a handful a day against thousands of evaluations, so even a
+    correctly scoped window reports a fraction of a percent.
+
+    So the counts are aggregated in the database over whole sessions, and each
+    card carries the window it covers. A card that cannot say what it measured
+    cannot be read: the same "0%" meant a healthy scanner at three in the
+    morning and a broken one at eleven.
+    """
+    recent = (
+        await session.scalars(
+            select(ScannerEvaluation.session_date)
+            .distinct()
+            .order_by(ScannerEvaluation.session_date.desc())
+            .limit(METRIC_SESSIONS)
+        )
+    ).all()
+    if not recent:
+        return []
+    days = sorted(recent)
+
+    # Grouped by session as well as status, so each card can report the
+    # sessions **it** has rows for. Counting distinct dates across every
+    # strategy would let a card claim a session it never evaluated in -- a
+    # strategy added on Thursday would say "5 sessions" beside one that had
+    # been running all week.
+    rows = (
+        await session.execute(
+            select(
+                ScannerEvaluation.strategy_id,
+                ScannerEvaluation.strategy_name,
+                ScannerEvaluation.strategy_version,
+                ScannerEvaluation.session_date,
+                ScannerEvaluation.status,
+                func.count().label("total"),
+            )
+            .where(
+                ScannerEvaluation.session_date >= days[0],
+                ScannerEvaluation.strategy_id != QUALITY_GATE_ID,
+            )
+            .group_by(
+                ScannerEvaluation.strategy_id,
+                ScannerEvaluation.strategy_name,
+                ScannerEvaluation.strategy_version,
+                ScannerEvaluation.session_date,
+                ScannerEvaluation.status,
+            )
+        )
+    ).all()
+
     metrics: dict[tuple[str, str, int], dict[str, int]] = {}
-    for row in rows:
-        key = (row.strategy_id, row.strategy_name, row.strategy_version)
+    seen: dict[tuple[str, str, int], set[date]] = {}
+    for strategy_id, strategy_name, strategy_version, day, state, total in rows:
+        key = (strategy_id, strategy_name, strategy_version)
         values = metrics.setdefault(key, {"evaluations": 0, "accepted": 0, "rejected": 0, "watching": 0})
-        values["evaluations"] += 1
-        if row.status == "ACCEPTED":
-            values["accepted"] += 1
-        elif row.status == "REJECTED":
-            values["rejected"] += 1
+        seen.setdefault(key, set()).add(day)
+        values["evaluations"] += total
+        if state == "ACCEPTED":
+            values["accepted"] += total
+        elif state == "REJECTED":
+            values["rejected"] += total
         else:
-            values["watching"] += 1
+            values["watching"] += total
+
     return [
         StrategyMetric(
             strategy_id=strategy_id,
             strategy_name=strategy_name,
             strategy_version=strategy_version,
             **values,
-            acceptance_rate=round(values["accepted"] * 100 / values["evaluations"], 2),
+            # Guarded because a strategy can appear with no rows at all if its
+            # only evaluations were quality blocks, and dividing by zero to
+            # render a card is a 500 on a settings screen.
+            acceptance_rate=(
+                round(values["accepted"] * 100 / values["evaluations"], 2) if values["evaluations"] else 0.0
+            ),
+            sessions=len(seen[(strategy_id, strategy_name, strategy_version)]),
+            first_session=min(seen[(strategy_id, strategy_name, strategy_version)]),
+            last_session=max(seen[(strategy_id, strategy_name, strategy_version)]),
         )
         for (strategy_id, strategy_name, strategy_version), values in metrics.items()
     ]
