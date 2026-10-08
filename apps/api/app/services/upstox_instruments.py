@@ -82,6 +82,18 @@ async def refresh_is_due(settings: Settings) -> bool:
         )
     if latest is None:
         return True
+    if _uncovered_keys(settings, latest):
+        # Stale in coverage rather than in age or shape. ``configured_keys``
+        # holds only the instruments that were subscribed when it was fetched,
+        # so adding a name to UPSTOX_SUBSCRIPTIONS leaves a master that is
+        # recent, complete, and silent about the new instrument. Its tick then
+        # falls back to ₹0.05 -- correct for most of the segment and wrong for
+        # the 461 shares on ₹0.10 or coarser, whose orders are refused outright.
+        #
+        # Seen on 8 October: RELIANCE and LT were added to a deployment whose
+        # master had been fetched hours earlier. Both trade on ₹0.10, both were
+        # about to be priced on ₹0.05, and neither age nor shape could see it.
+        return True
     if _missing_fields(latest):
         # Stale in shape rather than in age. The master is re-read for every
         # subscribed instrument, so widening what is stored leaves the existing
@@ -91,6 +103,21 @@ async def refresh_is_due(settings: Settings) -> bool:
         # not to be due and had no tick sizes in it. Age alone could not see it.
         return True
     return (datetime.now(UTC) - latest.fetched_at).total_seconds() >= settings.upstox_instrument_refresh_hours * 3600
+
+
+def _uncovered_keys(settings: Settings, record: InstrumentMasterRefresh) -> list[str]:
+    """Subscribed instruments this stored master says nothing about.
+
+    ``missing_keys`` is deliberately not consulted: a key Upstox itself does
+    not publish is absent from every fetch, and treating that as a reason to
+    refetch would download the master on every check forever.
+    """
+    stored = record.configured_keys if isinstance(record.configured_keys, dict) else {}
+    if not stored:
+        return []
+    unpublished = set(record.missing_keys or [])
+    wanted = set(configured_subscriptions(settings)) | {settings.upstox_nifty_benchmark_key}
+    return sorted(wanted - set(stored) - unpublished)
 
 
 def _missing_fields(record: InstrumentMasterRefresh) -> bool:
