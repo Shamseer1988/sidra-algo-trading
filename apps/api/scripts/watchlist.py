@@ -27,9 +27,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from sqlalchemy import desc, select  # noqa: E402
+
 from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
-from app.db.models import ApplicationSetting  # noqa: E402
+from app.db.models import (
+    ApplicationSetting,  # noqa: E402
+    MarketCandle,  # noqa: E402
+)
 from app.db.session import SessionLocal  # noqa: E402
 from app.services.trading_symbols import instrument_tick_size, resolve_script_names  # noqa: E402
 from app.services.upstox_market_data import configured_subscriptions, feed_subscriptions  # noqa: E402
@@ -76,23 +81,47 @@ async def main() -> int:
 
     async with SessionLocal() as session:
         names = await resolve_script_names(session, streamed)
+        # Read before the watchlist is printed, because each row is now
+        # measured against the band rather than the band being stated after.
         row = await session.get(ApplicationSetting, TRADING_KEY)
         controls = TradingControls.model_validate(row.value if row else DEFAULT_TRADING_CONTROLS)
+        high = Decimal(str(controls.universe_max_share_price))
+        low = Decimal(str(controls.universe_min_share_price))
         ticks = {key: await instrument_tick_size(session, key) for key in equities}
-
-    high = Decimal(str(controls.universe_max_share_price))
-    low = Decimal(str(controls.universe_min_share_price))
+        # The last completed candle this deployment stored, which is what the
+        # band will be applied to on the next signal. Asking the broker would
+        # be a live price; this is the price the system itself has, and a
+        # disagreement between the two is its own finding.
+        closes: dict[str, Decimal | None] = {}
+        for key in equities:
+            closes[key] = await session.scalar(
+                select(MarketCandle.close)
+                .where(MarketCandle.instrument_token == key)
+                .order_by(desc(MarketCandle.opened_at))
+                .limit(1)
+            )
 
     heading(f"WATCHLIST — {len(equities)} instrument(s) the scanner can signal on")
     # Sized to the longest name actually present: an instrument the master
     # could not name falls back to its key, which is wider than any symbol and
     # would otherwise push every row after it out of line.
     width = max((len(names.get(key, key)) for key in streamed), default=18)
+    blocked: list[str] = []
+    unseen: list[str] = []
     for key in equities:
         name = names.get(key, key)
         tick = ticks.get(key)
         grid = f"tick ₹{tick}" if tick is not None else "tick unknown — a price may be refused"
-        print(f"  {name:<{width}}  {grid}" + (f"   {key}" if args.tokens else ""))
+        close = closes.get(key)
+        if close is None:
+            unseen.append(name)
+            price = "no candle stored yet"
+        else:
+            price = f"last ₹{close:,.2f}"
+            if (high > 0 and close > high) or (low > 0 and close < low):
+                blocked.append(name)
+                price += "  OUTSIDE THE BAND"
+        print(f"  {name:<{width}}  {grid:<16}  {price}" + (f"   {key}" if args.tokens else ""))
 
     if reference:
         heading(f"REFERENCE — {len(reference)} streamed for scoring, never traded")
@@ -116,6 +145,18 @@ async def main() -> int:
         print("  That is checked per signal on the live price, so a name here can still be skipped today.")
     else:
         print("  No share-price band is set, so price alone never refuses a signal.")
+
+    if blocked:
+        print()
+        print(f"  [WARN] {len(blocked)} instrument(s) last traded outside the band:")
+        print(f"         {', '.join(sorted(blocked))}")
+        print("         They are scanned every candle and a signal on them is refused on price.")
+        print("         Raise the band, or drop them from UPSTOX_SUBSCRIPTIONS.")
+    if unseen:
+        print()
+        print(f"  [WARN] {len(unseen)} instrument(s) have no stored candle at all:")
+        print(f"         {', '.join(sorted(unseen))}")
+        print("         Either they were subscribed only just now, or the feed is not reaching them.")
 
     unknown = [names.get(key, key) for key, tick in ticks.items() if tick is None]
     if unknown:
