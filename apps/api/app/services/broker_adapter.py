@@ -182,6 +182,20 @@ class BrokerOrderRecord:
     # trigger price was not a multiple of the tick size.
     trigger_price: Decimal | None = None
     status_message: str | None = None
+    # ``limit_price`` is what the broker is resting the order at, which is not
+    # always the kind of order we asked for. On 8 October two protective stops
+    # went out as SL-M; Upstox's book answered "SL" for the one still resting
+    # and "LIMIT" for the one that had triggered, and the triggered one filled
+    # at exactly its trigger. Any of three things explains that -- a protected
+    # market order, a conversion to stop-limit, or a 9-share fill that simply
+    # landed on the bid -- and the order's own limit price tells them apart.
+    # It was sitting unparsed in ``raw`` while the question was open.
+    limit_price: Decimal | None = None
+    # When the exchange acted, as against ``placed_at``, when it was asked.
+    # A stop's placement time says nothing about when it was hit, so a day's
+    # orders could be read without being able to tell a stop that triggered in
+    # forty seconds from one that held for three hours.
+    exchange_at: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -567,6 +581,8 @@ class UpstoxAdapter:
                     placed_at=_timestamp_or_none(raw.get("order_timestamp")),
                     trigger_price=_decimal_or_none(raw.get("trigger_price")),
                     status_message=_text_or_none(raw.get("status_message") or raw.get("status_message_raw")),
+                    limit_price=_decimal_or_none(raw.get("price")),
+                    exchange_at=_timestamp_or_none(raw.get("exchange_timestamp")),
                     raw=raw,
                 )
             )
@@ -767,6 +783,13 @@ class FirstockAdapter:
                     # id at Firstock, and reading it here would print our tag
                     # back as the broker's explanation.
                     status_message=_text_or_none(raw.get("rejectReason") or raw.get("rejReason")),
+                    limit_price=_decimal_or_none(raw.get("price")),
+                    # Both spellings are guesses: Firstock's order-book response
+                    # is not documented in this repository and no live session
+                    # has been run against it. An absent key parses to None,
+                    # which already means "the broker did not say", so being
+                    # wrong here costs a blank column and never a wrong time.
+                    exchange_at=_timestamp_or_none(raw.get("exchangeTime") or raw.get("exchangeUpdateTime")),
                     client_order_id=self.find_client_order_id(raw),
                     status=self._STATUS.get(str(raw.get("status") or "").strip().upper(), STATUS_UNREADABLE),
                     symbol=str(raw.get("tradingSymbol") or "unknown"),

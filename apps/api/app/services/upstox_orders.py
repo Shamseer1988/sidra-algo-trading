@@ -72,6 +72,23 @@ MAX_TAG_LENGTH = 40
 # outright rather than ignored, so the distinction has to be honoured here.
 PRICELESS_ORDER_TYPES = frozenset({"MARKET", "SL-M"})
 
+# ``market_protection`` applies to exactly the order types above, and Upstox
+# documents three cases: ``-1`` is automatic protection under exchange
+# guidelines, ``0`` is none -- which it also documents as rejected outright,
+# because market orders from the API are currently restricted -- and a positive
+# number is a percentage band of one's own choosing.
+#
+# Until now the field was not sent at all, so every market exit and every
+# protective stop this system has placed has worked on Upstox's default. The
+# default happens to be the safe one, which is why nothing has failed; the
+# dependency is the problem, not the value. A broker that changed its default
+# to 0 would reject every market exit and every stop at once, and the first
+# evidence would be an unprotected live position.
+#
+# So the value is stated. ``-1`` keeps today's behaviour exactly, and makes it
+# ours rather than theirs.
+MARKET_PROTECTION_AUTOMATIC = -1
+
 
 class UpstoxError(RuntimeError):
     """Base for every Upstox order-path failure."""
@@ -372,6 +389,7 @@ class UpstoxOrderClient(UpstoxReportClient):
         disclosed_quantity: int = 0,
         is_amo: bool = False,
         slice_order: bool = False,
+        market_protection: int = MARKET_PROTECTION_AUTOMATIC,
     ) -> list[str]:
         """Place one order and return every order id it produced.
 
@@ -410,6 +428,10 @@ class UpstoxOrderClient(UpstoxReportClient):
             "trigger_price": trigger_price,
             "is_amo": is_amo,
             "slice": slice_order,
+            # Sent on every order. Upstox documents it as ignored for LIMIT and
+            # SL, so there is no branch here: one value on every payload is one
+            # fewer thing that can be true of some orders and not others.
+            "market_protection": market_protection,
         }
         data = await self._request("POST", f"{UPSTOX_HFT_BASE_URL}/v3/order/place", json=payload)
         return order_ids_from(data)

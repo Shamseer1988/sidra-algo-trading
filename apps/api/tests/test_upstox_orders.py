@@ -265,6 +265,38 @@ async def test_a_stop_limit_order_keeps_its_price(monkeypatch: pytest.MonkeyPatc
     assert body["trigger_price"] == 415.0
 
 
+async def test_every_order_states_its_market_protection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Upstox documents 0 as "no market protection -- order will be rejected".
+
+    The field was not being sent at all, so every market exit and every
+    protective stop placed so far has worked on Upstox's own default. The
+    default is the safe one, which is why nothing failed; relying on it is the
+    problem. A default that changed to 0 would refuse every market exit and
+    every stop at once, and the first sign of it would be a live position with
+    nothing behind it.
+    """
+    fake = respond(200, {"status": "success", "data": {"order_ids": ["1"]}}, monkeypatch=monkeypatch)
+    await order_client().place_order(**{**PLACE, "order_type": "SL-M", "trigger_price": 415.0})
+    assert fake.calls[0][1]["json"]["market_protection"] == -1
+
+
+async def test_market_protection_is_never_the_value_upstox_rejects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one value that must never be the default, on any order type."""
+    fake = respond(200, {"status": "success", "data": {"order_ids": ["1"]}}, monkeypatch=monkeypatch)
+    for order_type in ("MARKET", "LIMIT", "SL", "SL-M"):
+        await order_client().place_order(**{**PLACE, "order_type": order_type, "trigger_price": 415.0})
+    assert all(call[1]["json"]["market_protection"] != 0 for call in fake.calls)
+
+
+async def test_a_caller_can_choose_its_own_protection_band(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Upstox accepts a percentage of one's own choosing. Nothing asks for one
+    today; the parameter exists so that choosing one later is not a protocol
+    change."""
+    fake = respond(200, {"status": "success", "data": {"order_ids": ["1"]}}, monkeypatch=monkeypatch)
+    await order_client().place_order(**{**PLACE, "order_type": "MARKET", "market_protection": 3})
+    assert fake.calls[0][1]["json"]["market_protection"] == 3
+
+
 # --- cancellation ---------------------------------------------------------
 
 

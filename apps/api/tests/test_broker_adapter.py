@@ -514,6 +514,67 @@ async def test_an_order_the_broker_said_nothing_about_reports_nothing() -> None:
     row = (await adapter.normalised_orders())[0]
     assert row.trigger_price is None
     assert row.status_message is None
+    assert row.limit_price is None
+    assert row.exchange_at is None
+
+
+async def test_the_order_book_carries_the_limit_a_stop_is_resting_on() -> None:
+    """Two stops sent as SL-M on 8 October came back as "SL" and "LIMIT".
+
+    Whether a protective stop fills in a gap depends on the limit it rests on,
+    and that number was being dropped on the floor while the question of what
+    our stops actually are at Upstox was open.
+    """
+    adapter = UpstoxAdapter(
+        FakeUpstox(
+            book=[
+                {
+                    "order_id": "261008000236211",
+                    "status": "complete",
+                    "order_type": "LIMIT",
+                    "trigger_price": "1239.70",
+                    "price": "1239.70",
+                }
+            ]
+        )
+    )
+    row = (await adapter.normalised_orders())[0]
+    assert row.limit_price == Decimal("1239.70")
+    assert row.trigger_price == Decimal("1239.70")
+
+
+async def test_a_zero_limit_is_reported_as_zero_and_not_as_silence() -> None:
+    """A true market stop carries no limit. That is a fact the broker stated,
+    not a field it omitted, and the two have to stay distinguishable."""
+    adapter = UpstoxAdapter(FakeUpstox(book=[{"order_id": "1", "status": "open", "price": "0"}]))
+    assert (await adapter.normalised_orders())[0].limit_price == Decimal("0")
+
+
+async def test_the_order_book_carries_when_the_exchange_acted() -> None:
+    """``placed_at`` is when we asked. A stop placed at 12:22 and triggered at
+    14:40 reads as a 12:22 event without the exchange's own stamp."""
+    adapter = UpstoxAdapter(
+        FakeUpstox(
+            book=[
+                {
+                    "order_id": "1",
+                    "status": "complete",
+                    "order_timestamp": "2026-10-08 12:22:03",
+                    "exchange_timestamp": "2026-10-08 14:40:11",
+                }
+            ]
+        )
+    )
+    row = (await adapter.normalised_orders())[0]
+    assert row.placed_at.startswith("2026-10-08T12:22:03")
+    assert row.exchange_at.startswith("2026-10-08T14:40:11")
+
+
+async def test_firstock_carries_the_limit_too() -> None:
+    adapter = FirstockAdapter(
+        FakeFirstock(book=[{"orderNumber": "1", "status": "COMPLETE", "price": "185.20"}]), FakeSession()
+    )
+    assert (await adapter.normalised_orders())[0].limit_price == Decimal("185.20")
 
 
 @pytest.mark.parametrize(

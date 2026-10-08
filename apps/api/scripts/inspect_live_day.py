@@ -8,6 +8,8 @@ open beside the container logs:
   what did they say     the broker's own status and its own refusal message
   what actually filled  quantity and average price, per leg
   what did it risk      planned against sent, and budget against the real stop
+  what is a stop really the limit it rests on, which is not always the kind of
+                        order we asked for, and when the exchange acted on it
 
 Read-only everywhere. The broker side goes through the report client, which has
 no method that can place, modify or cancel an order, so this is safe to run
@@ -43,6 +45,32 @@ THIN = "-" * 78
 
 def parse_day(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def stop_shape(record) -> str | None:  # noqa: ANN001
+    """Say what a stop is actually resting as, when that is not what we asked.
+
+    Every protective stop this system places goes out as SL-M, and on 8 October
+    Upstox's order book answered "SL" for one and "LIMIT" for another. Neither
+    is SL-M, and the difference matters: a market stop fills at whatever the
+    book offers, while a stop resting on a limit can be jumped and leave the
+    position open with the loss still running.
+
+    The limit price settles it, so it is read rather than reasoned about. A
+    protected market order carries a band Upstox computed; a plain limit stop
+    carries its own trigger; a true market stop carries nothing.
+    """
+    trigger = record.trigger_price or Decimal("0")
+    if trigger <= 0:
+        return None
+    limit = record.limit_price
+    if limit is None:
+        return "broker did not report a limit price"
+    if limit <= 0:
+        return "resting with no limit - fills at market once triggered"
+    if limit == trigger:
+        return f"limit equals the trigger ({money(limit)}) - will not fill past it"
+    return f"limit {money(limit)} against trigger {money(trigger)} - a protection band of {money(abs(limit - trigger))}"
 
 
 def money(value) -> str:  # noqa: ANN001
@@ -182,12 +210,23 @@ async def main(args) -> int:
             )
             print(
                 f"     status {record.status}  trigger {money(record.trigger_price)}  "
-                f"avg {money(record.average_price)}  tag {record.client_order_id or '—'}"
+                f"limit {money(record.limit_price)}  avg {money(record.average_price)}"
+            )
+            # Placed against acted-on. A stop's placement time says nothing
+            # about when it was hit, and without the exchange's own stamp a
+            # stop that triggered in forty seconds reads the same as one that
+            # held for three hours.
+            print(
+                f"     placed {record.placed_at or '—'}  exchange {record.exchange_at or '—'}  "
+                f"tag {record.client_order_id or '—'}"
             )
             if record.status_message:
                 # The field that would have said "invalid order price" in a
                 # Telegram message instead of in the broker's app.
                 print(f"     BROKER MESSAGE: {record.status_message}")
+            note = stop_shape(record)
+            if note:
+                print(f"     STOP SHAPE: {note}")
         if not book:
             print("  (the order book is empty)")
 

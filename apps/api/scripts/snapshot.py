@@ -80,6 +80,7 @@ FEATURES = [
     ("unattended order recovery", "app.services.live_order_recovery", "pending_resolution"),
     ("broker settlement catch-up", "app.services.broker_day_figures", "sync_days"),
     ("execution quality report", "app.services.execution_quality", "build_report"),
+    ("market protection stated, not defaulted", "app.services.upstox_orders", "MARKET_PROTECTION_AUTOMATIC"),
 ]
 
 
