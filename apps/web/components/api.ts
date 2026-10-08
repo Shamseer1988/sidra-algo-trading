@@ -425,6 +425,48 @@ async function refreshAccessToken(): Promise<boolean> {
   return refreshInFlight;
 }
 
+/** One validation problem, as a sentence naming the field it is about.
+ *
+ * `loc` arrives as ["body", "instrument_tokens", 0]: the leading "body" or
+ * "query" names the part of the request rather than anything the person
+ * filled in, and a trailing index is noise on a message that already says
+ * "at least 1 item". Pydantic also prefixes its own custom errors with
+ * "Value error, ", which reads as a stutter in a toast.
+ */
+function problemLine(item: unknown): string {
+  if (typeof item === "string") return item;
+  if (!item || typeof item !== "object") return "";
+  const { loc, msg } = item as { loc?: unknown; msg?: unknown };
+  const text = (typeof msg === "string" ? msg : "").replace(/^Value error,\s*/, "");
+  const field = Array.isArray(loc)
+    ? loc.filter((part) => typeof part === "string" && part !== "body" && part !== "query").join(".")
+    : "";
+  if (field && text) return `${field}: ${text}`;
+  return text || field;
+}
+
+/** What to show for a failed response.
+ *
+ * `detail` was typed as a string and handed straight to `ApiError`. FastAPI
+ * answers a 422 with a **list of objects**, so the list was coerced by
+ * `Error` and every validation failure in the app surfaced as
+ * "[object Object]" — the Backtesting lab most visibly, because its form
+ * posts a date range and an instrument list that are easy to get wrong. The
+ * cast was the bug: it told the compiler a shape the server does not send.
+ */
+function errorMessage(detail: unknown, status: number): string {
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const lines = detail.map(problemLine).filter(Boolean);
+    if (lines.length) return lines.join("; ");
+  }
+  if (detail && typeof detail === "object") {
+    const line = problemLine(detail);
+    if (line) return line;
+  }
+  return `Request failed (${status})`;
+}
+
 async function request<T>(path: string, init?: RequestInit, allowRefresh = true): Promise<T> {
   const method = init?.method?.toUpperCase() ?? "GET";
   const csrf = ["POST", "PUT", "PATCH", "DELETE"].includes(method) && path !== "/auth/login" ? csrfToken() : undefined;
@@ -432,7 +474,7 @@ async function request<T>(path: string, init?: RequestInit, allowRefresh = true)
   if (response.status === 401 && allowRefresh && !["/auth/login", "/auth/refresh"].includes(path)) {
     if (await refreshAccessToken()) return request<T>(path, init, false);
   }
-  if (!response.ok) { const body = await response.json().catch(() => null) as { detail?: string } | null; throw new ApiError(body?.detail ?? "Request failed", response.status); }
+  if (!response.ok) { const body = await response.json().catch(() => null) as { detail?: unknown } | null; throw new ApiError(errorMessage(body?.detail, response.status), response.status); }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
