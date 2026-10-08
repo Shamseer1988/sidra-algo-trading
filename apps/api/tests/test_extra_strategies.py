@@ -6,6 +6,9 @@ from app.services.extra_strategies import (
     LONG_PULLBACK,
     LONG_RS_PULLBACK,
     SIGNALLED,
+    _market_points,
+    _trend_points,
+    _volume_points,
     evaluate_ema_momentum,
     evaluate_rs_pullback,
     evaluate_vwap_pullback,
@@ -168,3 +171,131 @@ def test_registry_exposes_all_strategies_and_routes_by_type() -> None:
     assert replayed.next_state == LONG_PULLBACK
     direct = evaluate_vwap_pullback(_candle("100.5", "101", "99.8", "101"), VWAP_INDICATORS, NIFTY, CONTROLS, AWAITING)
     assert replayed == direct
+
+
+# --- absence must not outscore unfavourable evidence -------------------------
+#
+# The opening-range scorer was fixed in September 2026 so that a missing input
+# scores zero rather than full marks. The three strategies in this module kept
+# the old behaviour, and they also never ran the required-input gate at all,
+# although DEFAULT_REQUIRED_INPUTS has named their required inputs the whole
+# time. Measured on 9 October: a VWAP pullback scored 87 of 100 on an
+# instrument with no volume baseline, no relative strength and no benchmark
+# regime, of which 40 points were full credit for data that did not exist --
+# the whole of the margin over a threshold of 80.
+
+NO_BASELINE = {
+    "vwap": 100.0,
+    "ema_fast": 102.0,
+    "ema_slow": 99.0,
+    "atr": 2.0,
+    "volume": {},
+    "relative_strength": {},
+}
+UNDECIDED = {"nifty_regime": {"regime": "INSUFFICIENT_DATA"}}
+REQUIRING = {**CONTROLS, "required_inputs": ["atr", "vwap", "rvol"]}
+
+
+def test_a_missing_volume_baseline_scores_nothing_for_volume() -> None:
+    assert _volume_points({"volume": {}}, CONTROLS, Decimal("20")) == Decimal("0")
+
+
+def test_volume_below_the_multiple_and_volume_absent_are_both_zero() -> None:
+    """They are different facts worth the same: neither confirms anything."""
+    below = _volume_points({"volume": {"relative_volume": 0.4}}, CONTROLS, Decimal("20"))
+    absent = _volume_points({"volume": {}}, CONTROLS, Decimal("20"))
+    assert below == absent == Decimal("0")
+
+
+def test_volume_above_the_multiple_still_earns_its_points() -> None:
+    assert _volume_points({"volume": {"relative_volume": 2.8}}, CONTROLS, Decimal("20")) > Decimal("10")
+
+
+def test_a_benchmark_that_could_not_decide_has_not_agreed() -> None:
+    assert _market_points("LONG", NO_BASELINE, UNDECIDED, Decimal("20")) == Decimal("0")
+
+
+def test_a_benchmark_that_said_nothing_at_all_has_not_agreed() -> None:
+    assert _market_points("LONG", NO_BASELINE, {}, Decimal("20")) == Decimal("0")
+
+
+def test_a_benchmark_that_disagrees_and_one_that_is_silent_score_the_same() -> None:
+    bearish = _market_points("LONG", NO_BASELINE, {"nifty_regime": {"regime": "BEARISH"}}, Decimal("20"))
+    silent = _market_points("LONG", NO_BASELINE, {}, Decimal("20"))
+    assert bearish == silent == Decimal("0")
+
+
+def test_a_benchmark_that_agrees_earns_its_half() -> None:
+    assert _market_points("LONG", NO_BASELINE, NIFTY, Decimal("20")) == Decimal("10")
+
+
+def test_relative_strength_in_the_trade_direction_earns_the_other_half() -> None:
+    full = _market_points("LONG", VWAP_INDICATORS, NIFTY, Decimal("20"))
+    assert full > Decimal("10")
+
+
+def test_missing_emas_are_not_half_a_trend() -> None:
+    """``or Decimal("0")`` collapsed both to zero, so the spread between them
+    came out as zero and the function returned half the cap for a trend nobody
+    had measured."""
+    assert _trend_points(_candle("100", "101", "99", "100.5"), {}, Decimal("30")) == Decimal("0")
+
+
+def test_present_emas_still_earn_their_floor() -> None:
+    points = _trend_points(_candle("100", "101", "99", "100.5"), VWAP_INDICATORS, Decimal("30"))
+    assert points >= Decimal("15")
+
+
+# --- the declared required inputs are now actually enforced -----------------
+
+
+def test_the_vwap_pullback_refuses_a_required_input_it_does_not_have() -> None:
+    pull = evaluate_vwap_pullback(_candle("100.5", "101", "99.8", "101"), NO_BASELINE, NIFTY, REQUIRING, AWAITING)
+    assert pull.next_state == LONG_PULLBACK
+
+    signal = evaluate_vwap_pullback(
+        _candle("100.2", "101.6", "99.9", "100.8"), NO_BASELINE, NIFTY, REQUIRING, LONG_PULLBACK
+    )
+    assert signal.side is None
+    assert signal.next_state == AWAITING
+    assert "rvol" in signal.reason
+
+
+def test_a_refused_setup_reports_missing_data_and_not_a_low_score() -> None:
+    """A low score says the setup was weak. It was not: it was never judged."""
+    signal = evaluate_vwap_pullback(
+        _candle("100.2", "101.6", "99.9", "100.8"), NO_BASELINE, NIFTY, REQUIRING, LONG_PULLBACK
+    )
+    assert "Required market data unavailable" in signal.reason
+    assert signal.score == 0
+
+
+def test_the_refusal_drops_the_setup_rather_than_holding_it() -> None:
+    """Holding LONG_PULLBACK would fire the moment a baseline filled in
+    mid-session, on a setup formed hours earlier."""
+    signal = evaluate_vwap_pullback(
+        _candle("100.2", "101.6", "99.9", "100.8"), NO_BASELINE, NIFTY, REQUIRING, LONG_PULLBACK
+    )
+    assert signal.next_state == AWAITING
+
+
+def test_the_rs_pullback_refuses_without_relative_strength() -> None:
+    requiring = {**CONTROLS, "required_inputs": ["atr", "ema", "relative_strength"]}
+    blind = {**VWAP_INDICATORS, "relative_strength": {}}
+    signal = evaluate_rs_pullback(_candle("100.2", "101.6", "99.9", "100.8"), blind, NIFTY, requiring, LONG_RS_PULLBACK)
+    assert signal.side is None
+
+
+def test_every_strategy_still_signals_when_every_input_is_present() -> None:
+    """The guard against over-tightening: a strategy that can no longer fire is
+    as broken as one that fires on nothing."""
+    evaluate_vwap_pullback(_candle("100.5", "101", "99.8", "101"), VWAP_INDICATORS, NIFTY, CONTROLS, AWAITING)
+    signal = evaluate_vwap_pullback(
+        _candle("100.2", "101.6", "99.9", "100.8"),
+        VWAP_INDICATORS,
+        NIFTY,
+        {**CONTROLS, "required_inputs": ["atr", "vwap", "rvol"]},
+        LONG_PULLBACK,
+    )
+    assert signal.side == "LONG"
+    assert signal.score >= int(CONTROLS["minimum_score"])

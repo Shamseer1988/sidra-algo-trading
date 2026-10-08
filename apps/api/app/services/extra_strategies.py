@@ -20,6 +20,7 @@ from app.services.paper_strategy import (
     _round_points,
     plan_trade,
 )
+from app.services.signal_inputs import missing_required
 
 VWAP_PULLBACK_VERSION = "vwap-pullback-v1"
 EMA_MOMENTUM_VERSION = "ema-momentum-v1"
@@ -30,6 +31,31 @@ SHORT_PULLBACK = "SHORT_PULLBACK"
 LONG_RS_PULLBACK = "LONG_RS_PULLBACK"
 SHORT_RS_PULLBACK = "SHORT_RS_PULLBACK"
 DEFAULT_RS_THRESHOLD_PERCENT = Decimal("0.3")
+
+
+def _required_refusal(indicators: dict, benchmark: dict, controls: dict) -> StrategyDecision | None:
+    """Refuse outright when an input this strategy declares it needs is absent.
+
+    ``DEFAULT_REQUIRED_INPUTS`` has named required inputs for all four
+    strategies since the gate was built, but ``missing_required`` was only ever
+    called from ``evaluate_orb_retest``. The other three declared what they
+    could not trade without, the Strategies screen showed it, and nothing
+    checked it -- so "rvol" was required of the VWAP pullback and the EMA
+    momentum strategy while both happily signalled without it.
+
+    Placed after the setup is confirmed and before scoring, exactly as in the
+    opening-range strategy, so that missing data is reported as missing data
+    rather than as a low score. Returning AWAITING rather than holding the
+    pullback state means the setup has to re-form once the data exists, instead
+    of firing the moment a baseline fills in mid-session.
+    """
+    missing = missing_required(indicators, benchmark, controls.get("required_inputs"))
+    if not missing:
+        return None
+    return StrategyDecision(
+        next_state=AWAITING,
+        reason=f"Required market data unavailable: {', '.join(missing)}",
+    )
 
 
 def _regime_name(benchmark: dict) -> str | None:
@@ -48,11 +74,24 @@ def _relative_volume(indicators: dict) -> Decimal | None:
 
 
 def _volume_points(indicators: dict, controls: dict, cap: Decimal) -> Decimal:
-    """Missing volume data awards full credit; below the RVOL multiple is a hard zero."""
+    """Volume confirmation, where absent volume confirms nothing.
+
+    This awarded full marks for a baseline that did not exist. The same mistake
+    was found and fixed in the opening-range scorer in September 2026 and the
+    reasoning there applies unchanged: the data-quality gate watches the feed,
+    not whether a volume baseline has been computed, so a healthy feed on a
+    newly tracked instrument reached here with nothing and collected the cap.
+
+    A VWAP pullback scoring 87 of 100 was measured on 9 October with no volume
+    baseline and no benchmark: 20 points of that came from this function and 20
+    more from ``_market_points``, which is the whole of the margin over the
+    threshold of 80. Without the two freebies the setup scored 47 and would not
+    have traded.
+    """
     rvol = _relative_volume(indicators)
     threshold = Decimal(str(controls["volume_multiplier"]))
     if rvol is None:
-        return cap
+        return Decimal("0")
     if rvol < threshold:
         return Decimal("0")
     excess = (rvol - threshold) / threshold if threshold > 0 else Decimal("1")
@@ -60,21 +99,41 @@ def _volume_points(indicators: dict, controls: dict, cap: Decimal) -> Decimal:
 
 
 def _market_points(side: Side, indicators: dict, benchmark: dict, cap: Decimal) -> Decimal:
+    """Benchmark agreement, where a benchmark that said nothing has not agreed.
+
+    Both halves used to pay out on absence: a regime of None or
+    INSUFFICIENT_DATA counted as agreement, and a missing relative strength
+    took the full scale rather than none of it. Absence must not outscore
+    unfavourable evidence -- a benchmark that disagrees earns zero, so one that
+    could not be computed cannot earn the cap.
+    """
     is_long = side == "LONG"
     wanted = "BULLISH" if is_long else "BEARISH"
     regime = _regime_name(benchmark)
-    regime_ok = regime in (None, "INSUFFICIENT_DATA") or regime == wanted
     rs = _relative_strength(indicators)
-    rs_ok = rs is None or ((rs > 0) == is_long)
-    rs_scale = _clamp(abs(rs) / Decimal("0.4"), Decimal("0"), Decimal("1")) if rs is not None else Decimal("1")
     half = cap / Decimal("2")
-    return (half if regime_ok else Decimal("0")) + (half * rs_scale if rs_ok else Decimal("0"))
+    regime_points = half if regime == wanted else Decimal("0")
+    if rs is None or (rs > 0) != is_long or rs == 0:
+        rs_points = Decimal("0")
+    else:
+        rs_points = half * _clamp(abs(rs) / Decimal("0.4"), Decimal("0"), Decimal("1"))
+    return regime_points + rs_points
 
 
 def _trend_points(candle: CompletedCandle, indicators: dict, cap: Decimal) -> Decimal:
-    fast = _number(indicators, "ema_fast") or Decimal("0")
-    slow = _number(indicators, "ema_slow") or Decimal("0")
-    spread = abs(fast - slow) / candle.close * Decimal("100") if candle.close > 0 else Decimal("0")
+    """EMA separation, scored only when there are EMAs to separate.
+
+    ``or Decimal("0")`` collapsed a missing EMA to zero, so both collapsed to
+    zero together, the spread between them came out as zero, and the function
+    returned half the cap for a trend nobody had measured. Each caller already
+    gates on EMA direction before scoring, so the floor is earned where the
+    EMAs exist; it is not earned where they do not.
+    """
+    fast = _number(indicators, "ema_fast")
+    slow = _number(indicators, "ema_slow")
+    if fast is None or slow is None or candle.close <= 0:
+        return Decimal("0")
+    spread = abs(fast - slow) / candle.close * Decimal("100")
     base = cap / Decimal("2")
     return base + base * _clamp(spread / Decimal("0.3"), Decimal("0"), Decimal("1"))
 
@@ -130,6 +189,10 @@ def evaluate_vwap_pullback(
     )
     if not reclaimed:
         return StrategyDecision(next_state=prior_state, reason="Awaiting the VWAP reclaim candle")
+
+    refusal = _required_refusal(indicators, benchmark, controls)
+    if refusal is not None:
+        return refusal
 
     breakdown = _score_vwap_pullback(side, candle, indicators, benchmark, controls, vwap, atr)
     score = sum(breakdown.values())
@@ -225,6 +288,10 @@ def evaluate_ema_momentum(
         return StrategyDecision(next_state=AWAITING, reason="Awaiting a momentum push through the opening range")
     if overextended:
         return StrategyDecision(next_state=AWAITING, reason="Price is already extended from VWAP")
+
+    refusal = _required_refusal(indicators, benchmark, controls)
+    if refusal is not None:
+        return refusal
 
     side: Side = "LONG" if up_push else "SHORT"
     level = or_high if side == "LONG" else or_low
@@ -345,6 +412,10 @@ def evaluate_rs_pullback(
     if not reclaimed:
         return StrategyDecision(next_state=prior_state, reason="Awaiting the fast-EMA reclaim candle")
 
+    refusal = _required_refusal(indicators, benchmark, controls)
+    if refusal is not None:
+        return refusal
+
     breakdown = _score_rs_pullback(side, candle, indicators, benchmark, rs, threshold, fast, atr)
     score = sum(breakdown.values())
     if score < int(controls["minimum_score"]):
@@ -393,7 +464,9 @@ def _score_rs_pullback(
     reclaim = Decimal("25") * _clamp(reclaim_distance / Decimal("0.3"), Decimal("0"), Decimal("1"))
     regime = _regime_name(benchmark)
     wanted = "BULLISH" if is_long else "BEARISH"
-    regime_points = Decimal("20") if regime in (None, "INSUFFICIENT_DATA", wanted) else Decimal("0")
+    # Its own copy of the ``_market_points`` bug: None and INSUFFICIENT_DATA
+    # both paid the full 20 for a benchmark that had not agreed to anything.
+    regime_points = Decimal("20") if regime == wanted else Decimal("0")
     return {
         "relative_strength": _round_points(Decimal("15") + rs_points / Decimal("2"), Decimal("30")),
         "trend_alignment": _round_points(_trend_points(candle, indicators, Decimal("25")), Decimal("25")),
