@@ -235,11 +235,15 @@ async def main() -> int:
                     active.append(f"{cap}% of price")
                 if cap_r > 0:
                     active.append(f"{cap_r}R of the stop distance")
+                # "whichever is tighter" is true of two ceilings and nonsense
+                # about one, and with the percent cap off there is only one.
+                allowance = " or ".join(active)
+                if len(active) > 1:
+                    allowance += ", whichever is tighter"
                 line(
                     OK,
-                    f"LIMIT entries drift at most {' or '.join(active)} past the signal, whichever is "
-                    f"tighter, and are sized from that price, so a filled trade risks no more than "
-                    f"{per_trade:,.2f}.",
+                    f"LIMIT entries drift at most {allowance} past the signal, and are sized from that "
+                    f"price, so a filled trade risks no more than {per_trade:,.2f}.",
                 )
                 if cap <= 0:
                     line(OK, f"The percent cap is off; the {cap_r}R cap is what acts.")
