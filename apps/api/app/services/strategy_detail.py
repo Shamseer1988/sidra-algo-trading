@@ -85,7 +85,10 @@ PROFILES: dict[str, StrategyProfile] = {
         ),
         does_not=(
             "It does not predict the direction of the day, and it does not trade the break itself. "
-            "A day that trends straight from the open without a retest produces no signal at all."
+            "A day that trends straight from the open without a retest produces no signal at all. "
+            "Nor does it wait indefinitely: a close more than the retest tolerance back through the "
+            "broken level ends the setup, so a break that fails in the first ten minutes cannot be "
+            "retested at two in the afternoon."
         ),
     ),
     "vwap-pullback-v1": StrategyProfile(

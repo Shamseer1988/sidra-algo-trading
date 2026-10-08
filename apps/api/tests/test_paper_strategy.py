@@ -2,7 +2,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from app.services.market_calculations import CompletedCandle
-from app.services.paper_strategy import AWAITING, LONG_BREAKOUT, SIGNALLED, evaluate_orb_retest
+from app.services.paper_strategy import (
+    AWAITING,
+    LONG_BREAKOUT,
+    SHORT_BREAKOUT,
+    SIGNALLED,
+    evaluate_orb_retest,
+)
 from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 
 CONTROLS = {
@@ -256,3 +262,94 @@ def test_registry_enforces_scope_session_and_directional_configuration() -> None
         LONG_BREAKOUT,
     )
     assert decision.reason == "Long signals are disabled"
+
+
+# --- a breakout that goes back inside the range has failed -------------------
+#
+# Invalidation used to require a close at the FAR side of the opening range: a
+# long breakout survived until price closed below the range LOW. Driven through
+# the state machine on 9 October, a breakout that failed within ten minutes
+# stayed armed for five hours and then signalled:
+#
+#   09:35 closes above OR high          -> LONG_BREAKOUT
+#   09:45 back INSIDE the range         -> LONG_BREAKOUT   awaiting retest
+#   10:30 .. 13:30 drifting mid-range   -> LONG_BREAKOUT   awaiting retest
+#   14:30 pokes the level, closes above -> SIGNALLED
+#
+# The level is the boundary that matters. The tolerance that defines a retest
+# now also defines the failure, so the band reads the same in both directions.
+# On the fixture's level of 110 that band is 110 x 0.9985 = 109.835.
+
+
+def test_a_breakout_that_closes_back_inside_the_range_is_dead() -> None:
+    failed = evaluate_orb_retest(
+        candle(close="105", low="104.5", high="110.2"), INDICATORS, NIFTY, CONTROLS, LONG_BREAKOUT
+    )
+    assert failed.next_state == AWAITING
+    assert failed.side is None
+    assert "closed back inside the range" in failed.reason
+
+
+def test_a_dead_breakout_cannot_be_revived_by_a_later_poke_at_the_level() -> None:
+    """The five-hour signal, as one sequence. The last candle is a textbook
+    retest; it must not be read as one, because the setup it belonged to ended
+    when price closed back inside the range."""
+    state = AWAITING
+    for close, low, high in (
+        ("111", "110.8", "112"),  # breaks out
+        ("105", "104.5", "110.2"),  # back inside the range -- setup over
+        ("104", "103.5", "104.5"),  # drifting
+        ("104.5", "104", "105"),  # drifting
+    ):
+        state = evaluate_orb_retest(
+            candle(close=close, low=low, high=high), INDICATORS, NIFTY, CONTROLS, state
+        ).next_state
+    assert state == AWAITING
+
+    poke = evaluate_orb_retest(candle(close="112", low="110.1", high="112.5"), INDICATORS, NIFTY, CONTROLS, state)
+    assert poke.side is None, "a retest of a breakout that no longer exists is not a signal"
+
+
+def test_a_marginal_dip_inside_the_band_still_gets_to_reclaim() -> None:
+    """Over-tightening would be its own bug. A close a few paise under the
+    level is noise at the boundary, not a failed breakout."""
+    held = evaluate_orb_retest(
+        candle(close="109.9", low="109.8", high="110.4"), INDICATORS, NIFTY, CONTROLS, LONG_BREAKOUT
+    )
+    assert held.next_state == LONG_BREAKOUT
+    assert held.side is None
+
+    reclaimed = evaluate_orb_retest(
+        candle(close="112", low="110.1", high="112.5"), INDICATORS, NIFTY, CONTROLS, held.next_state
+    )
+    assert reclaimed.side == "LONG"
+
+
+def test_the_old_invalidation_is_subsumed_and_not_lost() -> None:
+    """A close below the opening range low is necessarily a close below the
+    level's lower band, so everything that used to invalidate still does."""
+    collapsed = evaluate_orb_retest(
+        candle(close="97.6", low="97.5", high="110.5"), INDICATORS, NIFTY, CONTROLS, LONG_BREAKOUT
+    )
+    assert collapsed.next_state == AWAITING
+    assert collapsed.side is None
+
+
+def test_a_short_breakout_fails_the_same_way_upwards() -> None:
+    broke_down = evaluate_orb_retest(candle(close="99", low="98.5", high="99.5"), INDICATORS, NIFTY, CONTROLS, AWAITING)
+    assert broke_down.next_state == SHORT_BREAKOUT
+
+    failed = evaluate_orb_retest(
+        candle(close="105", low="99.5", high="105.5"), INDICATORS, NIFTY, CONTROLS, SHORT_BREAKOUT
+    )
+    assert failed.next_state == AWAITING
+    assert failed.side is None
+
+
+def test_a_retest_and_an_invalidation_can_never_both_be_true() -> None:
+    """A retest closes beyond the level; a failure closes more than the
+    tolerance back inside it. If the two could overlap, which one won would
+    depend on the order the code happens to check them in."""
+    level = Decimal("110")
+    tolerance = Decimal(str(CONTROLS["retest_tolerance_percent"])) / Decimal("100")
+    assert level * (Decimal("1") - tolerance) < level

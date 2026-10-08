@@ -304,14 +304,36 @@ def evaluate_orb_retest(
         return StrategyDecision(next_state=AWAITING, reason="Awaiting opening-range breakout")
     side: Side = "LONG" if prior_state == LONG_BREAKOUT else "SHORT"
     level = high if side == "LONG" else low
+    # **A breakout that goes back inside the range has failed.** Invalidation
+    # used to require a close at the *far* side of the range -- a long breakout
+    # survived until price closed below the opening range LOW -- so a breakout
+    # that failed in the first ten minutes stayed armed for the rest of the
+    # session. Driven through the state machine on 9 October:
+    #
+    #   09:35 closes above OR high          -> LONG_BREAKOUT
+    #   09:45 back INSIDE the range         -> LONG_BREAKOUT   awaiting retest
+    #   10:30 .. 13:30 drifting mid-range   -> LONG_BREAKOUT   awaiting retest
+    #   14:30 pokes the level, closes above -> SIGNALLED       <== signal
+    #
+    # Five hours after the setup stopped existing, with opening-range sizing
+    # and an opening-range thesis. The level is the boundary that matters, not
+    # the other side of the range: closing back through it by more than the
+    # retest tolerance is the breakout failing.
+    #
+    # The tolerance is deliberately the same number that defines a retest, so
+    # the band has one meaning in both directions: inside it, a marginal dip
+    # below the level is allowed to reclaim on the next candle; outside it, the
+    # setup is gone. This also subsumes the old rule -- a close below the
+    # opening range low is necessarily a close below the level's lower band --
+    # so nothing that used to invalidate now survives.
     if side == "LONG":
         retested = candle.low <= level * (Decimal("1") + tolerance) and candle.close > level
-        invalidated = candle.close < low
+        invalidated = candle.close < level * (Decimal("1") - tolerance)
     else:
         retested = candle.high >= level * (Decimal("1") - tolerance) and candle.close < level
-        invalidated = candle.close > high
+        invalidated = candle.close > level * (Decimal("1") + tolerance)
     if invalidated:
-        return StrategyDecision(next_state=AWAITING, reason="Breakout was invalidated")
+        return StrategyDecision(next_state=AWAITING, reason="Breakout failed: price closed back inside the range")
     if not retested:
         return StrategyDecision(next_state=prior_state, reason="Awaiting breakout retest")
     # Checked after the setup is confirmed and before anything else can refuse

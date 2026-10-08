@@ -456,8 +456,13 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
         group=SIGNAL_QUALITY,
         label="Retest tolerance",
         help=(
-            "How close price must come back to the broken level to count as a retest. Wider takes "
-            "more setups and lets weaker ones through."
+            "How close price must come back to the broken level to count as a retest, and — since "
+            "October 2026 — how far back through that level counts as the breakout failing. One band, "
+            "read in both directions: inside it a marginal dip gets to reclaim, outside it the setup "
+            "is over. A breakout used to survive until price reached the far side of the opening "
+            "range, so it could be retested hours after it failed; signals from before that change "
+            "are not comparable. Wider takes more setups, lets weaker ones through, and keeps a "
+            "failing breakout alive longer."
         ),
         unit=PERCENT,
         effect=NEXT_SIGNAL,
