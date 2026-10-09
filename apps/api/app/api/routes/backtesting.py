@@ -1,5 +1,6 @@
 """Completed-candle-only historical research APIs; these routes cannot submit orders."""
 
+import asyncio
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -261,8 +262,21 @@ async def create_backtest(
         request.start_date,
         request.end_date,
     )
-    result = run_completed_candle_backtest(
-        by_instrument, benchmark, selected, controls, execution_controls, measured_with
+    # Off the event loop. The replay is a tight CPU-bound pass over every
+    # candle and it used to run inline, so the whole API stopped answering
+    # while it worked: on 9 October a ten-instrument run starved the loop long
+    # enough that the container's own health check -- a three-second urlopen of
+    # /health/ready -- timed out five times in a row and Docker marked the API
+    # unhealthy. The run itself was fine. Everything else was not, including
+    # the exit sweep that squares positions off at the cutoff.
+    result = await asyncio.to_thread(
+        run_completed_candle_backtest,
+        by_instrument,
+        benchmark,
+        selected,
+        controls,
+        execution_controls,
+        measured_with,
     )
     run = BacktestRun(
         created_by_user_id=user.id,
@@ -466,7 +480,10 @@ async def create_sweep(
         request.end_date,
     )
     try:
-        sweep_result = run_parameter_sweep(
+        # Same reason as the single replay above, and more so: a sweep runs
+        # one replay per parameter combination.
+        sweep_result = await asyncio.to_thread(
+            run_parameter_sweep,
             base_strategy,
             controls,
             execution_controls,
