@@ -380,6 +380,72 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
     ),
     # --- signal quality ----------------------------------------------------
     SettingSpec(
+        key="universe_enabled",
+        group=SIGNAL_QUALITY,
+        label="Rank the watchlist daily",
+        help=(
+            "Off, every streamed instrument is scanned every candle. On, a pre-open ranking scores "
+            "them by traded value, daily ATR and the bands below, and only the top few are scanned. "
+            "It fails open: a morning where the ranking has not been built yet scans everything, so "
+            "turning this on cannot leave the scanner watching nothing. The ranking reads the "
+            "previous session's daily candles, so an instrument subscribed today is ranked tomorrow."
+        ),
+        unit=BOOLEAN,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
+        key="universe_min_atr_percent",
+        group=SIGNAL_QUALITY,
+        label="Quietest share to watch (daily ATR)",
+        help=(
+            "A share whose average daily range is smaller than this is not worth scanning, because "
+            "the target has to be reachable inside one session. With a 0.8% stop and a 2R target, a "
+            "winner needs a 1.6% move; on 9 October an AXISBANK trade was entered needing exactly "
+            "that from a share that travelled 1.13% all day, and squared off flat at 15:00. Around "
+            "2.5x the stop percent is where a target starts being reachable by lunchtime. Zero means "
+            "no floor. Only applies when the ranking above is on."
+        ),
+        unit=PERCENT,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
+        key="universe_max_atr_percent",
+        group=SIGNAL_QUALITY,
+        label="Wildest share to watch (daily ATR)",
+        help=(
+            "The other end of the same band: above this a share moves far enough that a stop placed "
+            "on structure is hit by ordinary noise. Zero means no ceiling. Only applies when the "
+            "ranking is on."
+        ),
+        unit=PERCENT,
+        is_ceiling=True,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
+        key="universe_min_avg_turnover",
+        group=SIGNAL_QUALITY,
+        label="Least traded value to watch",
+        help=(
+            "Average daily rupees traded, over the last twenty sessions. Below this an order of any "
+            "size moves the price against itself, which shows up as slippage rather than as a "
+            "refusal. Zero means no floor. Only applies when the ranking is on."
+        ),
+        unit=INR,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
+        key="universe_size",
+        group=SIGNAL_QUALITY,
+        label="How many shares to watch",
+        help=(
+            "How many of the ranked shares are scanned. Set above the number subscribed and the "
+            "bands above are doing all the filtering; set it low and the ranking chooses. Only "
+            "applies when the ranking is on."
+        ),
+        unit=COUNT,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
         key="universe_max_share_price",
         group=SIGNAL_QUALITY,
         label="Most expensive share to watch",

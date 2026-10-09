@@ -11,7 +11,7 @@ from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import ScanUniverseEntry, User, UserRole
 from app.services.indicator_settings import effective as effective_settings
 from app.services.trading_symbols import resolve_script_names
-from app.services.universe import refresh_universe
+from app.services.universe import ranking_is_on, refresh_universe
 
 router = APIRouter(prefix="/universe", tags=["Universe"])
 
@@ -91,7 +91,7 @@ async def universe_summary(
     built_at = max((row.created_at for row in rows), default=None)
     return UniverseSummaryResponse(
         session_date=target.isoformat(),
-        enabled=settings.universe_enabled,
+        enabled=await ranking_is_on(settings),
         universe_size=settings.universe_size,
         total_candidates=len(rows),
         eligible=sum(row.eligible for row in rows),
@@ -115,7 +115,7 @@ async def rebuild_universe(
     built_at = max((row.created_at for row in rows), default=None)
     return UniverseSummaryResponse(
         session_date=target.isoformat(),
-        enabled=settings.universe_enabled,
+        enabled=await ranking_is_on(settings),
         universe_size=settings.universe_size,
         total_candidates=len(rows),
         eligible=sum(row.eligible for row in rows),

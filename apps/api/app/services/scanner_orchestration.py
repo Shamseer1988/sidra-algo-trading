@@ -75,13 +75,18 @@ class PaperScannerOrchestrator:
             return f"Market regime blocks short entries ({regime.get('reason', 'risk-on')})"
         return None
 
-    async def _in_active_universe(self, candle: CompletedCandle) -> bool:
+    async def _in_active_universe(self, candle: CompletedCandle, controls: dict) -> bool:
         """When the dynamic universe is enabled, only score its selected instruments.
 
         Fails open: an empty universe (not built yet today) scans everything, matching
         the behaviour before the pre-open refresh runs.
+
+        The switch is read from the saved controls rather than from the
+        environment, so turning the ranking on is a setting an operator changes
+        between sessions instead of an .env edit and a restart. A deployment
+        with nothing saved gets the default, which repeats the environment's.
         """
-        if not self._settings.universe_enabled:
+        if not controls.get("universe_enabled", False):
             return True
         if self._universe.get("date") != candle.session_date:
             async with SessionLocal() as session:
@@ -454,11 +459,12 @@ class PaperScannerOrchestrator:
                 reason=quality.get("reason") if isinstance(quality, dict) else "Quality snapshot unavailable",
             )
             return
-        if not await self._in_active_universe(candle):
+        # Loaded before the universe gate, which now reads its switch from it.
+        controls = await self._controls()
+        if not await self._in_active_universe(candle, controls):
             return
         if not await self._tracking_active():
             return
-        controls = await self._controls()
         nifty = await self._nifty_snapshot()
         if not nifty and not self._benchmark_warned:
             self._benchmark_warned = True

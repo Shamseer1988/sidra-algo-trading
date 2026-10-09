@@ -28,8 +28,33 @@ logger = structlog.get_logger("universe")
 MIN_DAILY_CANDLES = 6
 
 
+async def ranking_is_on(settings: Settings) -> bool:
+    """Whether the daily ranking should run, per the saved controls.
+
+    One function, because three callers used to ask the environment
+    separately: the scanner's per-candle gate, the pre-open job that builds
+    the ranking, and the screen that reports whether it is on. Turning the
+    switch on in one place and not the others would leave a screen saying
+    "ranked" over a scanner watching everything, or a gate filtering against a
+    ranking nothing had built.
+    """
+    stored = await _stored_controls()
+    value = getattr(stored, "universe_enabled", None)
+    return bool(value) if value is not None else bool(settings.universe_enabled)
+
+
+def _whole(stored: object | None, key: str, fallback: int) -> int:
+    """A saved count, or the environment's. Zero is not a size anybody means."""
+    value = getattr(stored, key, None) if stored is not None else None
+    try:
+        saved = int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        saved = 0
+    return saved if saved > 0 else int(fallback)
+
+
 def _bound(stored: object | None, key: str, fallback: float) -> Decimal:
-    """A saved price bound, or the environment's, with zero meaning unbounded."""
+    """A saved bound, or the environment's, with zero meaning unbounded."""
     value = getattr(stored, key, None) if stored is not None else None
     try:
         saved = Decimal(str(value)) if value is not None else Decimal("0")
@@ -51,7 +76,8 @@ class UniverseControls:
     def from_settings(cls, settings: Settings, stored: object | None = None) -> UniverseControls:
         """Environment values, overridden by whatever the operator saved.
 
-        The price band moved into the trading controls because it is an
+        The whole universe now lives in the trading controls, for the reason
+        the price band moved there first: which shares are worth scanning is an
         ordinary trading decision, not a deployment constant: a share price is
         what decides whether a risk budget can be spent in whole shares. On a
         ₹10,000 account risking ₹100, a ₹4,777 share buys one, and one share
@@ -65,12 +91,12 @@ class UniverseControls:
         always wins and an unset one changes nothing.
         """
         return cls(
-            size=settings.universe_size,
-            min_avg_turnover=Decimal(str(settings.universe_min_avg_turnover)),
+            size=_whole(stored, "universe_size", settings.universe_size),
+            min_avg_turnover=_bound(stored, "universe_min_avg_turnover", settings.universe_min_avg_turnover),
             min_price=_bound(stored, "universe_min_share_price", settings.universe_min_price),
             max_price=_bound(stored, "universe_max_share_price", settings.universe_max_price),
-            min_atr_percent=Decimal(str(settings.universe_min_atr_percent)),
-            max_atr_percent=Decimal(str(settings.universe_max_atr_percent)),
+            min_atr_percent=_bound(stored, "universe_min_atr_percent", settings.universe_min_atr_percent),
+            max_atr_percent=_bound(stored, "universe_max_atr_percent", settings.universe_max_atr_percent),
         )
 
 

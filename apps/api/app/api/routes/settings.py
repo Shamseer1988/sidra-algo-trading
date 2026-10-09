@@ -103,6 +103,16 @@ DEFAULT_TRADING_CONTROLS = {
     # these became settings rather than environment variables.
     "universe_max_share_price": 0.0,
     "universe_min_share_price": 0.0,
+    # The rest of the dynamic universe, moved here for the same reason the
+    # price band was: which shares are worth scanning today is an ordinary
+    # trading decision, not a deployment constant. Every default below repeats
+    # the environment default it replaces, so a deployment that never opens
+    # the screen keeps exactly the behaviour it had.
+    "universe_enabled": False,
+    "universe_size": 30,
+    "universe_min_avg_turnover": 250_000_000.0,
+    "universe_min_atr_percent": 0.8,
+    "universe_max_atr_percent": 8.0,
 }
 
 
@@ -172,6 +182,22 @@ class TradingControls(BaseModel):
     universe_max_share_price: float = Field(default=0.0, ge=0, le=1_000_000)
     universe_min_share_price: float = Field(default=0.0, ge=0, le=1_000_000)
 
+    # The dynamic universe. These governed scanning from the environment and
+    # needed a container restart to change, which is the wrong shape for a
+    # decision an operator makes between sessions: on 9 October an AXISBANK
+    # target needed a 1.6% move from a share that travelled 1.13% all day, and
+    # the ATR floor that would have excluded it sat in .env at 0.8.
+    #
+    # A saved value now governs; the environment value is the default here
+    # rather than a fallback consulted at read time, so there is one answer to
+    # "what is the floor" instead of two that can disagree.
+    universe_enabled: bool = Field(default=False)
+    universe_size: int = Field(default=30, ge=1, le=200)
+    universe_min_avg_turnover: float = Field(default=250_000_000.0, ge=0)
+    # Zero on either side means that end is unbounded, as elsewhere here.
+    universe_min_atr_percent: float = Field(default=0.8, ge=0, le=50)
+    universe_max_atr_percent: float = Field(default=8.0, ge=0, le=50)
+
     # Realised-plus-open session P&L at which the day stops, in rupees. Zero
     # disables the limit. Deliberately rupees rather than a percentage: a daily
     # stop is an amount somebody is willing to lose today, not a ratio that
@@ -235,6 +261,17 @@ class TradingControls(BaseModel):
             raise ValueError(
                 f"universe_min_share_price ({low}) must be below universe_max_share_price ({high}); "
                 "as written no share could qualify and the scanner would watch nothing."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_atr_band(self) -> "TradingControls":
+        """The same trap, one band over. Zero on either side is unbounded."""
+        low, high = self.universe_min_atr_percent, self.universe_max_atr_percent
+        if low > 0 and high > 0 and low >= high:
+            raise ValueError(
+                f"universe_min_atr_percent ({low}) must be below universe_max_atr_percent ({high}); "
+                "as written no share could qualify and the universe would be empty every morning."
             )
         return self
 

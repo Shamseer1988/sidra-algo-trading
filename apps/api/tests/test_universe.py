@@ -232,3 +232,52 @@ def test_the_cap_actually_removes_an_expensive_share() -> None:
     # The reason is on the row, because a share that silently stopped being
     # watched is a strategy that silently stopped being tested.
     assert by_token["HAL"].rejection_reason
+
+
+# --- the rest of the universe follows the price band onto the screen ---------
+#
+# min_atr_percent, max_atr_percent, min_avg_turnover, size and the on/off
+# switch all lived in .env and needed a container restart. That is the wrong
+# shape for a decision made between sessions: on 9 October an AXISBANK trade
+# was entered needing a 1.6% move from a share that travelled 1.13% all day,
+# and squared off flat at 15:00. The ATR floor that would have excluded it was
+# 0.8 in an environment file.
+
+
+def test_a_saved_atr_floor_beats_the_environment() -> None:
+    controls = UniverseControls.from_settings(_settings(), _stored(universe_min_atr_percent=2.0))
+    assert controls.min_atr_percent == Decimal("2.0")
+
+
+def test_a_saved_atr_ceiling_turnover_and_size_all_beat_the_environment() -> None:
+    controls = UniverseControls.from_settings(
+        _settings(),
+        _stored(universe_max_atr_percent=6.0, universe_min_avg_turnover=500_000_000.0, universe_size=12),
+    )
+    assert controls.max_atr_percent == Decimal("6.0")
+    assert controls.min_avg_turnover == Decimal("500000000.0")
+    assert controls.size == 12
+
+
+def test_saving_nothing_keeps_every_environment_value() -> None:
+    """A deployment that never opens the screen must scan what it scanned
+    yesterday. A new control that quietly narrowed the universe would be a
+    scanner that stopped seeing shares nobody asked it to stop seeing."""
+    env = _settings()
+    controls = UniverseControls.from_settings(env, _stored())
+    assert controls.min_atr_percent == Decimal(str(env.universe_min_atr_percent))
+    assert controls.max_atr_percent == Decimal(str(env.universe_max_atr_percent))
+    assert controls.min_avg_turnover == Decimal(str(env.universe_min_avg_turnover))
+    assert controls.size == env.universe_size
+
+
+def test_a_zero_size_is_not_a_size_anybody_means() -> None:
+    """Zero reads as unbounded for the bands. A universe of zero shares is not
+    an unbounded universe, it is a scanner watching nothing."""
+    assert UniverseControls.from_settings(_settings(), _stored(universe_size=0)).size == _settings().universe_size
+
+
+def test_a_zero_band_is_still_unbounded() -> None:
+    env = _settings()
+    controls = UniverseControls.from_settings(env, _stored(universe_min_atr_percent=0.0))
+    assert controls.min_atr_percent == Decimal(str(env.universe_min_atr_percent))

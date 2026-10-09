@@ -25,6 +25,7 @@ from app.services.indicator_settings import IndicatorSettings, overlay
 from app.services.indicator_settings import load as load_indicators
 from app.services.scanner_orchestration import PaperScannerOrchestrator
 from app.services.trading_calendar import MARKET_TIMEZONE, TradingCalendar
+from app.services.universe import ranking_is_on as universe_ranking_is_on
 from app.services.universe import refresh_universe
 from app.services.upstox_backfill import backfill_daily_history, backfill_today_candles
 from app.services.upstox_instruments import InstrumentRefreshError, refresh_is_due, refresh_upstox_instruments
@@ -295,7 +296,11 @@ async def run() -> None:
                     except Exception as exc:
                         logger.warning("scanner.market_data_catchup_failed", error=str(exc))
 
-                if settings.universe_enabled and requested_state == "RUNNING" and selected_broker == "UPSTOX":
+                if (
+                    requested_state == "RUNNING"
+                    and selected_broker == "UPSTOX"
+                    and await universe_ranking_is_on(settings)
+                ):
                     market_now = datetime.now(UTC)
                     market_status = calendar.status_at(market_now)
                     local_hhmm = market_now.astimezone(MARKET_TIMEZONE).strftime("%H:%M")
