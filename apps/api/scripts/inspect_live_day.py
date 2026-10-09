@@ -47,30 +47,43 @@ def parse_day(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-def stop_shape(record) -> str | None:  # noqa: ANN001
-    """Say what a stop is actually resting as, when that is not what we asked.
+def order_shape(record, sent_priceless: bool) -> str | None:  # noqa: ANN001
+    """The limit the broker is holding an order at, when we did not set one.
 
-    Every protective stop this system places goes out as SL-M, and on 8 October
-    Upstox's order book answered "SL" for one and "LIMIT" for another. Neither
-    is SL-M, and the difference matters: a market stop fills at whatever the
-    book offers, while a stop resting on a limit can be jumped and leave the
-    position open with the loss still running.
+    Every stop goes out as SL-M and every exit as MARKET, both without a
+    price. Upstox answers with a limit anyway: on 9 October the stop rested at
+    ₹1,236.10 against a ₹1,248.60 trigger, and the square-off -- sent as a
+    plain MARKET order -- came back holding a limit of ₹1,249.80 against a
+    ₹1,262.50 fill. Both are 1.00% bands Upstox computed, and both bound what
+    the order can do:
 
-    The limit price settles it, so it is read rather than reasoned about. A
-    protected market order carries a band Upstox computed; a plain limit stop
-    carries its own trigger; a true market stop carries nothing.
+      a stop that gaps more than 1% past its trigger does not fill, and the
+      position stays open with the loss still running
+
+      a square-off in a market falling more than 1% does not fill either, and
+      an intraday position is left for the broker's own auto-square-off
+
+    The number is read rather than reasoned about, and only where we sent no
+    price -- a limit we chose ourselves is not a finding.
     """
-    trigger = record.trigger_price or Decimal("0")
-    if trigger <= 0:
+    if not sent_priceless:
         return None
     limit = record.limit_price
     if limit is None:
         return "broker did not report a limit price"
     if limit <= 0:
-        return "resting with no limit - fills at market once triggered"
-    if limit == trigger:
+        return "no limit - fills at whatever the book offers"
+    trigger = record.trigger_price or Decimal("0")
+    against = trigger if trigger > 0 else (record.average_price or Decimal("0"))
+    if against <= 0:
+        return f"held at a limit of {money(limit)}, which we did not set"
+    if limit == against:
         return f"limit equals the trigger ({money(limit)}) - will not fill past it"
-    return f"limit {money(limit)} against trigger {money(trigger)} - a protection band of {money(abs(limit - trigger))}"
+    band = abs(against - limit)
+    return (
+        f"limit {money(limit)} against {money(against)} - a {band / against * 100:.2f}% band "
+        f"({money(band)}) that we did not set"
+    )
 
 
 def money(value) -> str:  # noqa: ANN001
@@ -84,6 +97,11 @@ def money(value) -> str:  # noqa: ANN001
 
 def ist(value: datetime | None) -> str:
     return value.astimezone(MARKET_TIMEZONE).strftime("%H:%M:%S") if value else "—"
+
+
+# Order types we send without a price, in both vocabularies: MARKET and SL-M
+# at Upstox, MKT and SL-MKT at Firstock.
+PRICELESS = frozenset({"MARKET", "SL-M", "MKT", "SL-MKT"})
 
 
 def canonical(row: LiveOrderSubmission, key: str) -> str:
@@ -202,6 +220,16 @@ async def main(args) -> int:
             continue
 
         ours = {str(number) for row in rows for number in (row.broker_order_numbers or [])}
+        # Which of ours went out carrying no price of their own, so a limit in
+        # the book is the broker's and not something we chose. Both
+        # vocabularies, because the column holds the broker's spelling while
+        # the snapshot holds the canonical one.
+        priceless = {
+            str(number)
+            for row in rows
+            if canonical(row, "orderType") in PRICELESS or str(row.price_type or "").upper() in PRICELESS
+            for number in (row.broker_order_numbers or [])
+        }
         for record in book:
             mark = "*" if str(record.broker_order_id) in ours else " "
             print(
@@ -212,21 +240,22 @@ async def main(args) -> int:
                 f"     status {record.status}  trigger {money(record.trigger_price)}  "
                 f"limit {money(record.limit_price)}  avg {money(record.average_price)}"
             )
-            # Placed against acted-on. A stop's placement time says nothing
-            # about when it was hit, and without the exchange's own stamp a
-            # stop that triggered in forty seconds reads the same as one that
-            # held for three hours.
+            # Not "placed". Upstox's order_timestamp moves on every change, so
+            # on 9 October a stop sent at 09:41:02 reported 15:00:00 -- the
+            # moment it was cancelled. Labelling that as the placement time
+            # made a stop that rested all day look like one placed at the
+            # close. When it was sent is our own record, printed above.
             print(
-                f"     placed {record.placed_at or '—'}  exchange {record.exchange_at or '—'}  "
+                f"     last update {record.placed_at or '—'}  exchange {record.exchange_at or '—'}  "
                 f"tag {record.client_order_id or '—'}"
             )
             if record.status_message:
                 # The field that would have said "invalid order price" in a
                 # Telegram message instead of in the broker's app.
                 print(f"     BROKER MESSAGE: {record.status_message}")
-            note = stop_shape(record)
+            note = order_shape(record, str(record.broker_order_id) in priceless)
             if note:
-                print(f"     STOP SHAPE: {note}")
+                print(f"     BROKER'S OWN LIMIT: {note}")
         if not book:
             print("  (the order book is empty)")
 
