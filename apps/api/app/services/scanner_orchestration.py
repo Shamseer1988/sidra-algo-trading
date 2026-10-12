@@ -82,14 +82,16 @@ class PaperScannerOrchestrator:
         the behaviour before the pre-open refresh runs.
 
         **An empty answer is not cached.** The ranking is built at
-        ``universe_refresh_time``, which defaults to 09:25, and the first
+        ``universe_refresh_time``, which defaulted to 09:25 while the first
         candle of the session arrives at 09:15. Caching by date alone meant the
         scanner read an empty table ten minutes before the ranking existed,
         failed open -- correctly -- and then kept that empty set for the rest
         of the day, so the ranking was never applied at all. Measured on
         12 October: 21 instruments selected, 27 scanned, the six the ranking
-        had rejected among them. The refresh time and the first candle can be
-        in either order, and this must behave the same way regardless.
+        had rejected among them. That setting now lives on the settings screen,
+        defaults to 09:16, and is refused if it is not before the trade start
+        time -- but the refresh time and the first candle can still be in
+        either order, and this must behave the same way regardless.
 
         The re-read costs one indexed query per minute while the ranking is
         missing, not one per instrument: the minute already checked is

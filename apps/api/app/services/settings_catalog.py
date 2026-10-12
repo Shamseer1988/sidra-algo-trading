@@ -394,6 +394,22 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
         effect=NEXT_SESSION,
     ),
     SettingSpec(
+        key="universe_refresh_time",
+        group=SIGNAL_QUALITY,
+        label="Build the ranking at",
+        help=(
+            "IST. When the day's ranking is scored and written, once per session. It must be after "
+            "09:15, because the gap part of the score compares the open with the previous close and "
+            "that needs the first candle to have closed, and it must be before the trade start time, "
+            "because a ranking built after entries begin cannot filter them. On 12 October it was "
+            "set to 09:25 against a 09:15 first candle: the scanner's first look found nothing "
+            "ranked, which correctly scans everything rather than nothing, and six instruments the "
+            "ATR band had rejected were scanned all day. Only applies when the ranking is on."
+        ),
+        unit=TIME_IST,
+        effect=NEXT_SESSION,
+    ),
+    SettingSpec(
         key="universe_min_atr_percent",
         group=SIGNAL_QUALITY,
         label="Quietest share to watch (daily ATR)",

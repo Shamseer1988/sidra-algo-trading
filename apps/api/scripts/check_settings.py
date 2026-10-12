@@ -140,13 +140,39 @@ async def main() -> int:
         # default -- so a cap typed on the Settings screen refused nothing. It is
         # enforced in the risk engine now, and this line exists so an operator
         # can see which of the two is doing what.
-        if not settings.universe_enabled:
+        # Read from the saved controls, not the environment. The switch moved
+        # onto the settings screen, and a script that still read .env told an
+        # operator who had turned the ranking on that it was off.
+        ranking_on = bool(getattr(controls, "universe_enabled", settings.universe_enabled))
+        if not ranking_on:
             line(
                 WARN,
-                "UNIVERSE_ENABLED is off, so the dynamic watchlist (turnover, ATR and liquidity ranking) "
-                "is not running and every streamed instrument is scanned. The share-price band above "
+                "The daily watchlist ranking is off, so the turnover, ATR and liquidity filters are "
+                "not running and every streamed instrument is scanned. The share-price band above "
                 "still applies; the other universe filters do not.",
             )
+        else:
+            built_at = str(getattr(controls, "universe_refresh_time", settings.universe_refresh_time))
+            starts_at = str(controls.trade_start_time)
+            print(f"  ranking built at           : {built_at}")
+            print(f"  first entry allowed at     : {starts_at}")
+            if built_at >= starts_at:
+                problems += 1
+                line(
+                    BAD,
+                    f"The ranking is built at {built_at} but entries may start at {starts_at}. A ranking "
+                    "built after the first entry cannot filter it: the scanner fails open and watches "
+                    "every subscribed instrument, which is what happened on 12 October.",
+                )
+            elif built_at < "09:16":
+                line(
+                    WARN,
+                    f"The ranking is built at {built_at}, before the first candle of the day has closed. "
+                    "It will still rank on the previous sessions' daily candles, but the gap component "
+                    "scores the open against the previous close and will be zero for everything.",
+                )
+            else:
+                line(OK, f"The ranking exists {built_at} -> {starts_at} before the first entry can be taken.")
         if floor > 0:
             # ``floor`` is the minimum stop distance as a fraction, so this is
             # the tightest stop the system will ever place -- and therefore the

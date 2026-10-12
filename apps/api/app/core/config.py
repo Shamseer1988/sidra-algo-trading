@@ -107,7 +107,10 @@ class Settings(BaseSettings):
     # Dynamic scan universe. Opt-in: while disabled the scanner evaluates every streamed instrument.
     universe_enabled: bool = False
     universe_size: int = Field(default=30, ge=1, le=200)
-    universe_refresh_time: str = Field(default="09:25", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    # Only a fallback for an unreadable settings row now; the operator's saved
+    # control governs. 09:16 rather than 09:25 because the ranking has to exist
+    # before the first entry, and the default trade start is 09:24.
+    universe_refresh_time: str = Field(default="09:16", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     universe_min_avg_turnover: float = Field(default=250_000_000, ge=0)
     universe_min_price: float = Field(default=40, ge=0)
     universe_max_price: float = Field(default=15_000, ge=0)

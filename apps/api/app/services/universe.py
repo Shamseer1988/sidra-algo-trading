@@ -43,6 +43,19 @@ async def ranking_is_on(settings: Settings) -> bool:
     return bool(value) if value is not None else bool(settings.universe_enabled)
 
 
+async def refresh_time(settings: Settings) -> str:
+    """When today's ranking is built, per the saved controls. IST, "HH:MM".
+
+    Same shape as ``ranking_is_on`` above, and for the same reason: the
+    environment is consulted only when the controls cannot be read at all. A
+    time that lives in two places is a time that can disagree with itself, and
+    this one decides whether the filter exists before the first entry.
+    """
+    stored = await _stored_controls()
+    value = getattr(stored, "universe_refresh_time", None)
+    return str(value) if value else str(settings.universe_refresh_time)
+
+
 def _whole(stored: object | None, key: str, fallback: int) -> int:
     """A saved count, or the environment's. Zero is not a size anybody means."""
     value = getattr(stored, key, None) if stored is not None else None

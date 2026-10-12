@@ -26,6 +26,7 @@ from app.services.indicator_settings import load as load_indicators
 from app.services.scanner_orchestration import PaperScannerOrchestrator
 from app.services.trading_calendar import MARKET_TIMEZONE, TradingCalendar
 from app.services.universe import ranking_is_on as universe_ranking_is_on
+from app.services.universe import refresh_time as universe_refresh_time
 from app.services.universe import refresh_universe
 from app.services.upstox_backfill import backfill_daily_history, backfill_today_candles
 from app.services.upstox_instruments import InstrumentRefreshError, refresh_is_due, refresh_upstox_instruments
@@ -305,10 +306,13 @@ async def run() -> None:
                     market_status = calendar.status_at(market_now)
                     local_hhmm = market_now.astimezone(MARKET_TIMEZONE).strftime("%H:%M")
                     today = market_now.astimezone(MARKET_TIMEZONE).date()
+                    # The saved time, not the environment's: this is read only
+                    # while today's refresh is still pending, so it costs one
+                    # query per loop before the ranking is built and none after.
                     if (
                         market_status.trading_day
-                        and local_hhmm >= settings.universe_refresh_time
                         and last_universe_refresh != today
+                        and local_hhmm >= await universe_refresh_time(settings)
                     ):
                         try:
                             summary = await refresh_universe(settings, today)

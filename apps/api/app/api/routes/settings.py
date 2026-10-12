@@ -110,6 +110,7 @@ DEFAULT_TRADING_CONTROLS = {
     # the screen keeps exactly the behaviour it had.
     "universe_enabled": False,
     "universe_size": 30,
+    "universe_refresh_time": "09:16",
     "universe_min_avg_turnover": 250_000_000.0,
     "universe_min_atr_percent": 0.8,
     "universe_max_atr_percent": 8.0,
@@ -193,6 +194,12 @@ class TradingControls(BaseModel):
     # "what is the floor" instead of two that can disagree.
     universe_enabled: bool = Field(default=False)
     universe_size: int = Field(default=30, ge=1, le=200)
+    # When the ranking is built, IST. It has to be after the first candle of
+    # the day has closed, because the gap component scores the open against
+    # the previous close, and before trade_start_time, because a ranking built
+    # after entries begin cannot filter them -- which is exactly how six
+    # rejected instruments were scanned on 12 October.
+    universe_refresh_time: str = Field(default="09:16", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     universe_min_avg_turnover: float = Field(default=250_000_000.0, ge=0)
     # Zero on either side means that end is unbounded, as elsewhere here.
     universe_min_atr_percent: float = Field(default=0.8, ge=0, le=50)
@@ -293,6 +300,40 @@ class StrategyMetric(BaseModel):
     last_session: date | None = None
 
 
+def ranking_built_too_late(controls: TradingControls) -> str | None:
+    """Why this pair of times cannot work, or None.
+
+    This is the 12 October failure as a rule. The ranking ran at 09:25 and the
+    first candle closed at 09:15, so the scanner's first look found an empty
+    table; the gate fails open, as it must, and BANKBARODA, BHARTIARTL,
+    ICICIBANK, LT, RELIANCE and SBIN were scanned although the ATR band had
+    rejected them. Keeping both times on one screen is no use if they can
+    still be set to contradict each other.
+
+    Checked when the controls are **saved**, not when they are validated. A
+    model validator would have been shorter, and would also have refused to
+    *read back* a configuration already stored -- so a deployment whose trade
+    start sits at or before the new refresh default would have come up to a
+    settings screen that 500s, with no way in to fix the value. The invariant
+    belongs on the write path; the read path reports it instead, which is what
+    ``scripts/check_settings.py`` does.
+
+    Only while the ranking is on: refusing an unrelated change because of a
+    time that governs nothing would be a worse screen. Strictly before, not
+    at -- two things scheduled in the same minute have no order between them.
+    """
+    if not controls.universe_enabled:
+        return None
+    if controls.universe_refresh_time < controls.trade_start_time:
+        return None
+    return (
+        f"The watchlist ranking is built at {controls.universe_refresh_time} but entries may start at "
+        f"{controls.trade_start_time}. A ranking built after the first entry cannot filter it: the scanner "
+        "fails open and watches every subscribed instrument instead of the ranked few. Build the ranking "
+        "earlier, or start trading later."
+    )
+
+
 async def _get_controls(session: DbSession) -> TradingControls:
     setting = await session.get(ApplicationSetting, TRADING_KEY)
     return TradingControls.model_validate(setting.value if setting else DEFAULT_TRADING_CONTROLS)
@@ -380,6 +421,10 @@ async def _persist_controls(session: DbSession, controls: TradingControls, user:
     and audited exactly as a hand edit is. A second path that skipped any of
     that would be a way to change risk limits without leaving a trace.
     """
+    contradiction = ranking_built_too_late(controls)
+    if contradiction:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, contradiction)
+
     setting = await session.get(ApplicationSetting, TRADING_KEY)
     previous = dict(setting.value) if setting else dict(DEFAULT_TRADING_CONTROLS)
     payload = controls.model_dump()
