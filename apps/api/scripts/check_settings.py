@@ -32,6 +32,33 @@ OK, WARN, BAD = (
 )
 
 
+def sizing_room(controls) -> Decimal:  # noqa: ANN001 - the settings model, imported inside main
+    """The risk per share the sizer divides the budget by, as a fraction of the
+    entry price. Wider than the stop, which is why this exists.
+
+    A LIMIT entry is sized from the price the order may fill at, not the price
+    the signal named: ``entry_pricing.plan_entry`` computes
+    ``room = |entry - stop| + drift`` and then ``floor(budget / room)``. This
+    script printed ``budget / stop``, so every exposure figure it reported was
+    overstated by the drift -- it read 12,500 where two real trades came in at
+    about 11,364.
+
+    The same ``min()`` the engine takes, with both ceilings written as a
+    fraction of the entry price so that no share price is needed: the percent
+    cap is one already, and the R cap is the stop distance times its multiple.
+    Zero means that ceiling is off, exactly as there.
+    """
+    floor = Decimal(str(controls.min_stop_distance_percent)) / 100
+    # A MARKET entry is not capped or re-sized: it is sent for the quantity the
+    # signal carried, at the stop the signal named.
+    if str(getattr(controls, "live_entry_order_type", "")).upper() != "LIMIT":
+        return floor
+    cap_percent = Decimal(str(getattr(controls, "entry_slippage_cap_percent", 0) or 0)) / 100
+    cap_r = Decimal(str(getattr(controls, "entry_slippage_cap_r", 0) or 0))
+    drifts = [value for value in (cap_percent, floor * cap_r) if value > 0]
+    return floor + (min(drifts) if drifts else Decimal("0"))
+
+
 def line(flag: str, text: str) -> None:
     print(f"  {flag} {text}")
 
@@ -63,8 +90,23 @@ async def main() -> int:
         print(f"  stop_atr_multiple          : {controls.stop_atr_multiple}")
         print(f"  min_stop_distance_percent  : {controls.min_stop_distance_percent}")
         floor = Decimal(str(controls.min_stop_distance_percent)) / 100
+        room = sizing_room(controls)
+        drift = room - floor
+
         if floor > 0:
-            print(f"  -> a stop this wide sizes every trade to {per_trade / floor:,.0f} of exposure")
+            if drift > 0:
+                print(f"  -> a stop this wide sizes every trade to about {per_trade / room:,.0f} of exposure")
+                line(
+                    "      ",
+                    f"Between {per_trade / room:,.0f} and {per_trade / floor:,.0f}: the quantity is sized from "
+                    f"the capped entry price, not the signal's "
+                    f"({float(floor * 100):g}% stop + {float(drift * 100):g}% drift), and the drift is then "
+                    "rounded down to the instrument's tick. The dearer the share the nearer the lower "
+                    "figure; on one cheap enough that the drift rounds to nothing, the upper. Whole-share "
+                    "rounding takes a little more off either.",
+                )
+            else:
+                print(f"  -> a stop this wide sizes every trade to {per_trade / room:,.0f} of exposure")
 
         heading("2. What the day allows, read together")
         budget = capital * Decimal(str(controls.maximum_daily_risk_percent)) / 100
@@ -123,7 +165,7 @@ async def main() -> int:
         print(f"  maximum_open_exposure_pct  : {controls.maximum_open_exposure_percent}")
         print(f"  exposure ceiling           : {exposure:,.2f}")
         if floor > 0:
-            sized = (per_trade / floor) * concurrent
+            sized = (per_trade / room) * concurrent
             if sized <= exposure:
                 line(OK, f"Risk sizing caps you at {sized:,.2f}; the exposure ceiling never binds.")
             else:
@@ -174,16 +216,16 @@ async def main() -> int:
             else:
                 line(OK, f"The ranking exists {built_at} -> {starts_at} before the first entry can be taken.")
         if floor > 0:
-            # ``floor`` is the minimum stop distance as a fraction, so this is
-            # the tightest stop the system will ever place -- and therefore the
-            # most shares a budget can buy at a given price.
+            # ``room`` is the tightest risk per share the system will ever take
+            # -- the minimum stop plus the entry cap it is sized from -- and
+            # therefore the most shares a budget can buy at a given price.
             def shares_at(price: Decimal) -> int:
-                per_share = price * floor
+                per_share = price * room
                 return int(per_trade / per_share) if per_share > 0 else 0
 
             reference = cap if cap > 0 else Decimal("5000")
             at_cap = shares_at(reference)
-            spent = reference * floor * at_cap
+            spent = reference * room * at_cap
             if at_cap <= 0:
                 problems += 1
                 line(BAD, f"At {reference:,.0f} a share the budget does not cover one share; such a signal is skipped.")
