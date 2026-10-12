@@ -81,6 +81,20 @@ class PaperScannerOrchestrator:
         Fails open: an empty universe (not built yet today) scans everything, matching
         the behaviour before the pre-open refresh runs.
 
+        **An empty answer is not cached.** The ranking is built at
+        ``universe_refresh_time``, which defaults to 09:25, and the first
+        candle of the session arrives at 09:15. Caching by date alone meant the
+        scanner read an empty table ten minutes before the ranking existed,
+        failed open -- correctly -- and then kept that empty set for the rest
+        of the day, so the ranking was never applied at all. Measured on
+        12 October: 21 instruments selected, 27 scanned, the six the ranking
+        had rejected among them. The refresh time and the first candle can be
+        in either order, and this must behave the same way regardless.
+
+        The re-read costs one indexed query per minute while the ranking is
+        missing, not one per instrument: the minute already checked is
+        remembered even though the result is not.
+
         The switch is read from the saved controls rather than from the
         environment, so turning the ranking on is a setting an operator changes
         between sessions instead of an .env edit and a restart. A deployment
@@ -88,7 +102,10 @@ class PaperScannerOrchestrator:
         """
         if not controls.get("universe_enabled", False):
             return True
-        if self._universe.get("date") != candle.session_date:
+        minute = candle.opened_at
+        known = self._universe.get("date") == candle.session_date and self._universe.get("tokens")
+        looked_this_minute = self._universe.get("checked") == minute
+        if not known and not looked_this_minute:
             async with SessionLocal() as session:
                 rows = await session.scalars(
                     select(ScanUniverseEntry.instrument_token).where(
@@ -96,8 +113,12 @@ class PaperScannerOrchestrator:
                         ScanUniverseEntry.selected.is_(True),
                     )
                 )
-                self._universe = {"date": candle.session_date, "tokens": frozenset(rows.all())}
-        tokens = self._universe["tokens"]
+                self._universe = {
+                    "date": candle.session_date,
+                    "tokens": frozenset(rows.all()),
+                    "checked": minute,
+                }
+        tokens = self._universe.get("tokens") or frozenset()
         return not tokens or candle.instrument_token in tokens
 
     async def _tracking_active(self) -> bool:
