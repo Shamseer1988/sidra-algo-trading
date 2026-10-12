@@ -77,6 +77,22 @@ async def metrics():
         return await strategy_metrics(None, session)
 
 
+async def orb_card():
+    """This module's own ORB card, and never another writer's.
+
+    A card is keyed by strategy id *and version*, so a database that already
+    holds real rows for ``orb-retest-default`` -- a live configuration is on
+    version 12 -- reports two cards under that id. Picking the first one by id
+    alone read whichever the dictionary happened to yield, and the assertions
+    below then described somebody else's rows.
+    """
+    cards = [
+        item for item in await metrics() if item.strategy_id == "orb-retest-default" and item.strategy_version == 1
+    ]
+    assert len(cards) == 1, f"expected exactly one card for this module's rows, got {len(cards)}"
+    return cards[0]
+
+
 async def test_the_quality_gate_is_not_reported_as_a_strategy() -> None:
     """It writes an evaluation row so a candle nobody scored still leaves a
     record of why. Its status is hardcoded REJECTED, so shown beside the
@@ -114,7 +130,7 @@ async def test_the_quality_gate_does_not_eat_the_strategies_row_budget() -> None
         for index in range(50)
     ]
     await seed(rows)
-    orb = next(item for item in await metrics() if item.strategy_id == "orb-retest-default")
+    orb = await orb_card()
     assert orb.evaluations == 5
 
 
@@ -125,7 +141,7 @@ async def test_an_accepted_signal_is_counted_however_old_the_session_is() -> Non
     rows = [evaluation("m-accept", session_date=day, status="ACCEPTED")]
     rows += [evaluation(f"m-reject-{index}", session_date=day, status="REJECTED") for index in range(99)]
     await seed(rows)
-    orb = next(item for item in await metrics() if item.strategy_id == "orb-retest-default")
+    orb = await orb_card()
     assert orb.accepted == 1
     assert orb.rejected == 99
     assert orb.evaluations == 100
@@ -141,7 +157,7 @@ async def test_each_card_says_which_sessions_it_covers() -> None:
             evaluation("m-day2", session_date=date(2099, 5, 5), status="ACCEPTED"),
         ]
     )
-    orb = next(item for item in await metrics() if item.strategy_id == "orb-retest-default")
+    orb = await orb_card()
     assert orb.sessions == 2
     assert orb.first_session == date(2099, 5, 4)
     assert orb.last_session == date(2099, 5, 5)
@@ -152,7 +168,7 @@ async def test_the_window_is_trading_sessions_and_not_calendar_days() -> None:
     than an empty weekend. 2 and 5 May 2099 are a Friday and a Monday."""
     days = [date(2099, 5, 1), date(2099, 5, 2), date(2099, 5, 5), date(2099, 5, 6), date(2099, 5, 7)]
     await seed([evaluation(f"m-{day}", session_date=day, status="REJECTED") for day in days])
-    orb = next(item for item in await metrics() if item.strategy_id == "orb-retest-default")
+    orb = await orb_card()
     assert orb.sessions == min(len(days), METRIC_SESSIONS)
     assert orb.evaluations == min(len(days), METRIC_SESSIONS)
 
@@ -178,6 +194,6 @@ async def test_a_card_counts_only_the_sessions_it_has_rows_for() -> None:
 async def test_sessions_beyond_the_window_are_left_out() -> None:
     days = [date(2099, 5, 1), date(2099, 5, 2), date(2099, 5, 5), date(2099, 5, 6), date(2099, 5, 7), date(2099, 5, 8)]
     await seed([evaluation(f"m-{day}", session_date=day, status="REJECTED") for day in days])
-    orb = next(item for item in await metrics() if item.strategy_id == "orb-retest-default")
+    orb = await orb_card()
     assert orb.sessions == METRIC_SESSIONS
     assert orb.first_session == date(2099, 5, 2), "the oldest session must fall out of the window"
