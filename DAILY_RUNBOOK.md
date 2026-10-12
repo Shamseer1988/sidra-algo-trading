@@ -98,6 +98,35 @@ the output.
 
 ---
 
+## 4b — 09:20, after the ranking is built
+
+Only while the daily watchlist ranking is on. Two commands, both read-only.
+
+    docker compose logs --since 30m scanner-worker | grep universe_refresh
+    docker compose exec api python scripts/universe_applied.py
+
+**The log line — look for:** `scanner.universe_refreshed` with a timestamp near
+`09:16`, carrying `candidates`, `eligible` and `selected`. A timestamp of 09:25
+means the container is running the old image; no line at all means the refresh
+did not run, and the scanner is watching everything.
+
+**`universe_applied.py` — look for:** `selected by the ranking` and `actually
+scanned` agreeing, and `[OK] Nothing was scanned that the ranking had not
+selected`.
+
+This is the one check no screen could answer. The ranking being correct and the
+ranking being *obeyed* are different facts: on 12 October the ranking selected
+21 of 27 and all 27 were scanned, because the scanner looked for the ranking at
+09:15, before the 09:25 refresh had written it, and kept that empty answer all
+day. Every universe screen reported the ranking and looked healthy throughout.
+`SCANNED BUT NOT SELECTED` is that failure, named.
+
+Run it again after the close if you want the full day rather than the first few
+minutes — it reads the whole session either way, so early in the morning the
+`Selected but never scanned` note is expected and means nothing.
+
+---
+
 ## 5 — During the session: nothing
 
 Do not run anything on a schedule. Telegram tells you about entries, stops and
@@ -158,6 +187,7 @@ Friday's 08:40 catch-up fills them in — nothing for you to do.
 | 08:15 | `snapshot.py` then `check_settings.py` |
 | 08:35 | `session_open_dryrun.py` |
 | 08:50 | `snapshot.py` |
+| 09:20 | `docker compose logs --since 30m scanner-worker \| grep universe_refresh` then `universe_applied.py` |
 | 15:45 | `inspect_live_day.py --date <today>` |
 | 18:15 | `inspect_live_day.py --date <today>` + Reports → P&L calendar |
 
@@ -175,6 +205,9 @@ Not part of the daily routine.
 | `verify_upstox_orders.py` | After changing the Upstox app, or if orders start getting rejected at the account level. Tells you the IP you are calling from — the one that has to be registered. |
 | `backfill_broker_history.py` | Rebuilding the P&L calendar from the broker's reports after a purge. |
 | `purge_history.py` | Clearing local history. Destructive — read it first. |
+| `universe_applied.py` | Any day you want to know whether the watchlist ranking actually governed what was scanned, rather than what it ranked. Part of the 09:20 step above while the ranking is on. |
+| `why_no_trade.py` | A day that traded less than you expected. Groups every evaluation by the reason it stopped there. |
+| `watchlist.py` | After changing `UPSTOX_SUBSCRIPTIONS`. Lists what is actually being watched, with tick sizes and last stored close. |
 
 No script prints a secret. Credentials appear as `configured: yes`, never as a
 value, because the usual reason to run one is to paste the output.
