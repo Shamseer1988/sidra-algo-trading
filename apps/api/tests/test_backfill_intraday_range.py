@@ -306,3 +306,49 @@ async def test_a_year_the_calendar_has_not_confirmed_is_counted_not_silently_dro
     assert report.stored[TOKEN] == 0
     assert report.out_of_session[TOKEN] == 10
     assert not report.failures  # Upstox answered; we are the ones refusing.
+
+
+def test_the_sweep_reports_progress_before_each_combination() -> None:
+    """A sweep over months of candles takes hours on a small machine. One that
+    prints nothing until it finishes is one an operator kills, because a long
+    silence and a hang look identical."""
+    from app.api.routes.settings import DEFAULT_TRADING_CONTROLS
+    from app.services.backtest_sweep import run_parameter_sweep
+    from app.services.paper_execution import DEFAULT_PAPER_EXECUTION_CONTROLS, PaperExecutionControls
+    from app.services.strategy_registry import DEFAULT_STRATEGIES, StrategyConfiguration
+
+    seen: list[tuple[int, int, dict]] = []
+    run_parameter_sweep(
+        StrategyConfiguration.model_validate(DEFAULT_STRATEGIES[0]),
+        dict(DEFAULT_TRADING_CONTROLS),
+        PaperExecutionControls.model_validate(DEFAULT_PAPER_EXECUTION_CONTROLS),
+        get_settings(),
+        # No candles: the replays are empty, which is all this test needs --
+        # the question is whether the callback fires once per combination.
+        {},
+        [],
+        {"minimum_score": [60, 65, 70]},
+        progress=lambda finished, total, parameters: seen.append((finished, total, parameters)),
+    )
+    assert [item[0] for item in seen] == [0, 1, 2]
+    assert {item[1] for item in seen} == {3}
+    assert [item[2]["minimum_score"] for item in seen] == [60, 65, 70]
+
+
+def test_a_sweep_without_a_progress_callback_still_runs() -> None:
+    """The callback is optional; the route does not pass one."""
+    from app.api.routes.settings import DEFAULT_TRADING_CONTROLS
+    from app.services.backtest_sweep import run_parameter_sweep
+    from app.services.paper_execution import DEFAULT_PAPER_EXECUTION_CONTROLS, PaperExecutionControls
+    from app.services.strategy_registry import DEFAULT_STRATEGIES, StrategyConfiguration
+
+    result = run_parameter_sweep(
+        StrategyConfiguration.model_validate(DEFAULT_STRATEGIES[0]),
+        dict(DEFAULT_TRADING_CONTROLS),
+        PaperExecutionControls.model_validate(DEFAULT_PAPER_EXECUTION_CONTROLS),
+        get_settings(),
+        {},
+        [],
+        {"minimum_score": [60, 65]},
+    )
+    assert len(result.combinations) == 2

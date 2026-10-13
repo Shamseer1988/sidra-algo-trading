@@ -8,6 +8,7 @@ Nothing is promoted automatically.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -130,7 +131,15 @@ def run_parameter_sweep(
     *,
     validation_fraction: float = 0.35,
     maximum_combinations: int = 40,
+    progress: Callable[[int, int, dict], None] | None = None,
 ) -> SweepResult:
+    """Replay every combination, scored in sample and out of it.
+
+    ``progress`` is called with (finished, total, parameters) before each
+    combination. A sweep over months of candles takes hours on a small machine,
+    and one that prints nothing until it is done is one an operator kills
+    because they cannot tell it from a hang.
+    """
     combos = build_combinations(grid, maximum_combinations)
     session_dates = sorted({candle.session_date for rows in candles_by_instrument.values() for candle in rows})
     in_sample_dates, validation_dates = _partition_dates(session_dates, validation_fraction)
@@ -138,6 +147,8 @@ def run_parameter_sweep(
 
     results: list[SweepCombination] = []
     for index, combo in enumerate(combos):
+        if progress is not None:
+            progress(index, len(combos), combo)
         strategy_variant = base_strategy.model_copy(
             update={key: value for key, value in combo.items() if key in STRATEGY_PARAMS}
         )
