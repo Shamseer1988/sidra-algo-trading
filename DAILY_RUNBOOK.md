@@ -110,16 +110,26 @@ Only while the daily watchlist ranking is on. Two commands, both read-only.
 means the container is running the old image; no line at all means the refresh
 did not run, and the scanner is watching everything.
 
-**`universe_applied.py` — look for:** `selected by the ranking` and `actually
-scanned` agreeing, and `[OK] Nothing was scanned that the ranking had not
-selected`.
+**`universe_applied.py` — look for:** `[OK] Nothing a strategy scored under
+this ranking was outside its selection`, and a `ranking written at` time near
+09:16.
+
+Expect a `Not counted above, and why` block under it, and read it rather than
+worrying about it. Two things put evaluation rows against an instrument the
+ranking refused, and neither is the gate failing: the data-quality gate records
+its blocks *before* the universe is consulted, and the 09:15 candle is scanned
+before the ranking exists, because a ranking that has not run must not halt
+trading. On 13 October five refused names each had one such row — an earlier
+version of this script called that a leak, and it was not.
 
 This is the one check no screen could answer. The ranking being correct and the
 ranking being *obeyed* are different facts: on 12 October the ranking selected
 21 of 27 and all 27 were scanned, because the scanner looked for the ranking at
 09:15, before the 09:25 refresh had written it, and kept that empty answer all
 day. Every universe screen reported the ranking and looked healthy throughout.
-`SCANNED BUT NOT SELECTED` is that failure, named.
+`SCANNED UNDER THIS RANKING BUT NOT SELECTED BY IT` is that failure, named:
+a strategy scoring a refused instrument on a candle that opened after the
+ranking was written, when the gate demonstrably had it.
 
 Run it again after the close if you want the full day rather than the first few
 minutes — it reads the whole session either way, so early in the morning the
