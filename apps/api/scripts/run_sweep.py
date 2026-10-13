@@ -236,8 +236,19 @@ async def main() -> int:
     if not benchmark:
         print("  No benchmark (NIFTY) candles in this range; market-confirmation scoring will be degraded.")
 
+    from app.services.backtest_sweep import STRATEGY_PARAMS
+
+    shared = len(combinations) > 1 and set(grid) <= STRATEGY_PARAMS
     print(f"  Replaying {len(combinations)} combination(s) over {len(by_instrument)} instrument(s)...")
-    print("  Each combination replays every candle again, so the cost is linear in both.")
+    if shared:
+        print("  One shared pass: this grid only varies what the strategy carries, so every")
+        print("  combination is scored against the same candles and the same indicators, and")
+        print(f"  the whole sweep costs about what a single replay costs rather than {len(combinations)}.")
+    else:
+        touched = sorted(set(grid) - STRATEGY_PARAMS)
+        print(f"  One pass per combination: {', '.join(touched)} change the controls or the")
+        print("  indicator periods, which a replay takes once for the whole run. Expect this")
+        print(f"  to cost about {len(combinations)} replays.")
     print()
 
     started = time.monotonic()

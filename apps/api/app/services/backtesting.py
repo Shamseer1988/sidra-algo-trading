@@ -221,26 +221,53 @@ def run_completed_candle_backtest(
             prior_daily = [daily for day, daily in sorted(daily_by_date.items()) if day < session_date][
                 -settings.daily_history_sessions :
             ]
-            for strategy in sorted(strategies, key=lambda item: item.id):
-                state = AWAITING
-                effective_controls = strategy.effective_controls(controls)
-                for index in range(len(session_rows) - 2):
-                    candle = session_rows[index]
-                    history = session_rows[: index + 1]
-                    benchmark_history = [item for item in benchmark if item.closed_at <= candle.closed_at]
-                    if not benchmark_history:
-                        continue
-                    indicators = indicator_snapshot(
-                        history,
-                        benchmark_history,
-                        opening_range_minutes=settings.opening_range_minutes,
-                        fast_ema_period=settings.ema_fast_period,
-                        slow_ema_period=settings.ema_slow_period,
-                        volume_lookback=settings.volume_lookback_candles,
-                        is_nifty=False,
-                        atr_period=settings.atr_period,
-                        daily_candles=prior_daily,
-                    )
+            # One indicator snapshot per candle, shared by every strategy.
+            #
+            # It was computed inside the strategy loop, though it depends on
+            # the candles and the settings and on nothing a strategy carries.
+            # With one strategy that cost nothing; with N it did the same work
+            # N times, and a parameter sweep is exactly N variants of one
+            # strategy. The benchmark snapshot was worse: identical for every
+            # instrument on a session, and recomputed for each of them.
+            #
+            # The loops are therefore inverted -- candles outside, strategies
+            # inside -- with the per-strategy state that used to be a local
+            # local held in a dict. ``_analytics`` sorts trades itself, so the
+            # order they are appended in does not reach the result.
+            pending = {strategy.id: strategy for strategy in sorted(strategies, key=lambda item: item.id)}
+            states = dict.fromkeys(pending, AWAITING)
+            controls_for = {key: value.effective_controls(controls) for key, value in pending.items()}
+            # Keyed by the candle's close, which is what decides the slice. One
+            # session's worth at a time, so this is bounded by a few hundred
+            # entries however long the range is.
+            nifty_cache: dict[object, dict] = {}
+            cursor = 0
+            for index in range(len(session_rows) - 2):
+                if not pending:
+                    break
+                candle = session_rows[index]
+                history = session_rows[: index + 1]
+                # The benchmark prefix by a walking cursor rather than a filter
+                # over the whole session per candle. Both series are in time
+                # order, so the cursor only ever moves forward.
+                while cursor < len(benchmark) and benchmark[cursor].closed_at <= candle.closed_at:
+                    cursor += 1
+                benchmark_history = benchmark[:cursor]
+                if not benchmark_history:
+                    continue
+                indicators = indicator_snapshot(
+                    history,
+                    benchmark_history,
+                    opening_range_minutes=settings.opening_range_minutes,
+                    fast_ema_period=settings.ema_fast_period,
+                    slow_ema_period=settings.ema_slow_period,
+                    volume_lookback=settings.volume_lookback_candles,
+                    is_nifty=False,
+                    atr_period=settings.atr_period,
+                    daily_candles=prior_daily,
+                )
+                nifty = nifty_cache.get(candle.closed_at)
+                if nifty is None:
                     nifty = indicator_snapshot(
                         benchmark_history,
                         benchmark_history,
@@ -251,10 +278,17 @@ def run_completed_candle_backtest(
                         is_nifty=True,
                         atr_period=settings.atr_period,
                     )
-                    decision = StrategyRegistry.evaluate(strategy, candle, indicators, nifty, effective_controls, state)
-                    state = decision.next_state
+                    nifty_cache[candle.closed_at] = nifty
+
+                signalled: list[str] = []
+                for key, strategy in pending.items():
+                    decision = StrategyRegistry.evaluate(
+                        strategy, candle, indicators, nifty, controls_for[key], states[key]
+                    )
+                    states[key] = decision.next_state
                     if decision.next_state != SIGNALLED or decision.side is None:
                         continue
+                    signalled.append(key)
                     entry_candle = session_rows[index + 1]
                     entry_price = slipped_price(
                         entry_candle.open, entry_side(decision.side), execution_controls.slippage_bps
@@ -296,7 +330,12 @@ def run_completed_candle_backtest(
                             exit_reason=exit_reason,
                         )
                     )
-                    break
+                # A strategy takes one trade per instrument per session, which
+                # the old loop expressed as ``break``. With the loops inverted
+                # that becomes dropping it from the pending set, and the candle
+                # loop ends when the last one is gone.
+                for key in signalled:
+                    del pending[key]
     initial_capital = _decimal(controls["account_capital"])
     return BacktestResult(
         trades=tuple(sorted(trades, key=lambda trade: (trade.exited_at, trade.trade_key))),

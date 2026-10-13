@@ -120,6 +120,78 @@ def _metrics(trades: list, capital: Decimal) -> dict:
     }
 
 
+def _rank(results: list[SweepCombination]) -> int | None:
+    """The index to recommend: the best proven combination, else the best row.
+
+    Shared by both paths so they cannot disagree about what "best" means.
+    """
+    ranked = sorted(
+        results,
+        key=lambda item: (
+            item.validation["return_percent"],
+            item.validation["net_pnl"],
+            item.in_sample["return_percent"],
+        ),
+        reverse=True,
+    )
+    return next((item.index for item in ranked if item.proven), ranked[0].index if ranked else None)
+
+
+def _one_pass(
+    base_strategy: StrategyConfiguration,
+    base_controls: dict,
+    execution_controls: PaperExecutionControls,
+    base_settings: object,
+    candles_by_instrument: dict[str, list[CompletedCandle]],
+    benchmark_candles: list[CompletedCandle],
+    combos: list[dict],
+    in_sample_dates: set[date],
+    validation_dates: set[date],
+    capital: Decimal,
+    progress: Callable[[int, int, dict], None] | None,
+) -> SweepResult:
+    """Every combination in one replay, which is the whole optimisation.
+
+    Each variant gets a distinct id so its trades can be told apart again --
+    the replay stamps ``strategy_id`` on every trade, and nothing in it lets
+    one strategy's decisions reach another: state is per strategy, the trade
+    list is append-only, and there is no cross-strategy daily cap in a replay.
+    """
+    variants = [
+        base_strategy.model_copy(update={**combo, "id": f"{base_strategy.id}#sweep{index}"})
+        for index, combo in enumerate(combos)
+    ]
+    if progress is not None:
+        # One pass, so one report: the per-combination count would be a lie
+        # about what is happening and the estimate drawn from it worse.
+        progress(0, 1, {"combinations": len(combos), "shared_pass": True})
+
+    result = run_completed_candle_backtest(
+        candles_by_instrument,
+        benchmark_candles,
+        variants,
+        base_controls,
+        execution_controls,
+        _settings_namespace(base_settings, {}),
+    )
+    by_variant: dict[str, list] = {variant.id: [] for variant in variants}
+    for trade in result.trades:
+        if trade.strategy_id in by_variant:
+            by_variant[trade.strategy_id].append(trade)
+
+    results: list[SweepCombination] = []
+    for index, (combo, variant) in enumerate(zip(combos, variants, strict=True)):
+        mine = by_variant[variant.id]
+        in_trades = [t for t in mine if date.fromisoformat(t.session_date) in in_sample_dates]
+        val_trades = [t for t in mine if date.fromisoformat(t.session_date) in validation_dates]
+        in_metrics = _metrics(in_trades, capital)
+        val_metrics = _metrics(val_trades, capital)
+        proven = val_metrics["trades"] >= 3 and val_metrics["return_percent"] > 0
+        results.append(SweepCombination(index, combo, in_metrics, val_metrics, proven))
+
+    return SweepResult(combinations=tuple(results), best_index=_rank(results))
+
+
 def run_parameter_sweep(
     base_strategy: StrategyConfiguration,
     base_controls: dict,
@@ -144,6 +216,30 @@ def run_parameter_sweep(
     session_dates = sorted({candle.session_date for rows in candles_by_instrument.values() for candle in rows})
     in_sample_dates, validation_dates = _partition_dates(session_dates, validation_fraction)
     capital = Decimal(str(base_controls["account_capital"]))
+
+    # When the grid only varies what a strategy carries, every combination
+    # sees exactly the same candles and the same indicators -- so they can be
+    # replayed together instead of once each. The replay already takes a list
+    # of strategies and now computes each candle's indicators once for all of
+    # them, so N variants in one pass cost about what one pass costs.
+    #
+    # A grid touching CONTROL_PARAMS or SETTINGS_PARAMS cannot share a pass:
+    # those change the controls dict or the indicator periods, which the
+    # replay takes once for the whole run. Those still go one at a time.
+    if combos and len(combos) > 1 and set(grid) <= STRATEGY_PARAMS:
+        return _one_pass(
+            base_strategy,
+            base_controls,
+            execution_controls,
+            base_settings,
+            candles_by_instrument,
+            benchmark_candles,
+            combos,
+            in_sample_dates,
+            validation_dates,
+            capital,
+            progress,
+        )
 
     results: list[SweepCombination] = []
     for index, combo in enumerate(combos):
@@ -172,14 +268,4 @@ def run_parameter_sweep(
         proven = val_metrics["trades"] >= 3 and val_metrics["return_percent"] > 0
         results.append(SweepCombination(index, combo, in_metrics, val_metrics, proven))
 
-    ranked = sorted(
-        results,
-        key=lambda item: (
-            item.validation["return_percent"],
-            item.validation["net_pnl"],
-            item.in_sample["return_percent"],
-        ),
-        reverse=True,
-    )
-    best = next((item.index for item in ranked if item.proven), ranked[0].index if ranked else None)
-    return SweepResult(combinations=tuple(results), best_index=best)
+    return SweepResult(combinations=tuple(results), best_index=_rank(results))

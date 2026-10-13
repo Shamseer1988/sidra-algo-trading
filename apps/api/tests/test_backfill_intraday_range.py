@@ -308,10 +308,7 @@ async def test_a_year_the_calendar_has_not_confirmed_is_counted_not_silently_dro
     assert not report.failures  # Upstox answered; we are the ones refusing.
 
 
-def test_the_sweep_reports_progress_before_each_combination() -> None:
-    """A sweep over months of candles takes hours on a small machine. One that
-    prints nothing until it finishes is one an operator kills, because a long
-    silence and a hang look identical."""
+def _sweep_progress(grid: dict) -> list[tuple[int, int, dict]]:
     from app.api.routes.settings import DEFAULT_TRADING_CONTROLS
     from app.services.backtest_sweep import run_parameter_sweep
     from app.services.paper_execution import DEFAULT_PAPER_EXECUTION_CONTROLS, PaperExecutionControls
@@ -323,16 +320,40 @@ def test_the_sweep_reports_progress_before_each_combination() -> None:
         dict(DEFAULT_TRADING_CONTROLS),
         PaperExecutionControls.model_validate(DEFAULT_PAPER_EXECUTION_CONTROLS),
         get_settings(),
-        # No candles: the replays are empty, which is all this test needs --
-        # the question is whether the callback fires once per combination.
+        # No candles: the replays are empty, which is all this needs -- the
+        # question is only how often the callback fires.
         {},
         [],
-        {"minimum_score": [60, 65, 70]},
+        grid,
         progress=lambda finished, total, parameters: seen.append((finished, total, parameters)),
     )
+    return seen
+
+
+def test_a_sweep_that_replays_once_reports_once() -> None:
+    """A grid over what the strategy carries shares a single pass, so there is
+    one replay to report. Reporting three of three here would be a lie about
+    what is happening, and the "minutes each" estimate drawn from it worse."""
+    seen = _sweep_progress({"minimum_score": [60, 65, 70]})
+    assert len(seen) == 1
+    finished, total, parameters = seen[0]
+    assert (finished, total) == (0, 1)
+    assert parameters["shared_pass"] is True
+    assert parameters["combinations"] == 3
+
+
+def test_a_sweep_that_replays_separately_reports_each_combination() -> None:
+    """A sweep over months of candles takes hours on a small machine. One that
+    prints nothing until it finishes is one an operator kills, because a long
+    silence and a hang look identical.
+
+    ``min_stop_distance_percent`` is a control, taken once per replay, so this
+    grid cannot share a pass.
+    """
+    seen = _sweep_progress({"min_stop_distance_percent": [0.35, 0.8, 1.2]})
     assert [item[0] for item in seen] == [0, 1, 2]
     assert {item[1] for item in seen} == {3}
-    assert [item[2]["minimum_score"] for item in seen] == [60, 65, 70]
+    assert [item[2]["min_stop_distance_percent"] for item in seen] == [0.35, 0.8, 1.2]
 
 
 def test_a_sweep_without_a_progress_callback_still_runs() -> None:
