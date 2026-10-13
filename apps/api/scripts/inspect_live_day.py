@@ -108,6 +108,89 @@ def canonical(row: LiveOrderSubmission, key: str) -> str:
     return str(((row.request_snapshot or {}).get("canonical") or {}).get(key) or "—")
 
 
+async def report_charges(day: date, risked: list[Decimal], rr: Decimal | None) -> None:
+    """What the day cost after the broker's own charges, and what that demands.
+
+    This section was missing, and its absence was the most expensive gap in
+    the report: without it the only P&L shown is gross, and the question every
+    other number serves -- "is this configuration capable of making money" --
+    cannot be asked. On a 100 risk budget the difference between 11 and 46 of
+    charges is the difference between needing to win 45% of trades and 61%.
+
+    The figures are the broker's, from ``broker_day_snapshots``, written by the
+    18:15 settlement job. They settle over hours, so a day fetched too early
+    has a row with a null ``charges`` and that is reported as waiting rather
+    than as zero -- a zero here would be a claim the broker never made.
+    """
+    from sqlalchemy import desc
+
+    from app.db.models import BrokerDaySnapshot
+
+    async with SessionLocal() as session:
+        snapshots = list(
+            (
+                await session.scalars(
+                    select(BrokerDaySnapshot)
+                    .where(BrokerDaySnapshot.session_date == day)
+                    .order_by(desc(BrokerDaySnapshot.fetched_at))
+                )
+            ).all()
+        )
+
+    print()
+    print(RULE)
+    print("CHARGES — the broker's own figures, not our estimates")
+    print(RULE)
+
+    if not snapshots:
+        print("  Nothing fetched for this day.")
+        print("  The 18:15 job writes it. If the day is older than that and this is still empty:")
+        print("    docker compose exec api python scripts/backfill_broker_history.py")
+        return
+
+    settled = next((item for item in snapshots if item.charges is not None), None)
+    newest = snapshots[0]
+    if settled is None:
+        print(f"  Fetched {len(snapshots)} time(s), most recently {newest.fetched_at.astimezone(MARKET_TIMEZONE)}.")
+        print("  The broker has not published charges for this day yet -- the row says nothing,")
+        print("  which is different from saying zero. Friday's catch-up pass fills it in.")
+        if newest.realized_pnl is not None:
+            print(f"  Their realised P&L so far: ₹{money(newest.realized_pnl)} (before charges)")
+        return
+
+    charges = settled.charges
+    print(f"  source            : {settled.source}   fetched {settled.fetched_at.astimezone(MARKET_TIMEZONE)}")
+    if settled.realized_pnl is not None:
+        print(f"  realised (gross)  : ₹{money(settled.realized_pnl)}")
+        print(f"  charges           : ₹{money(charges)}")
+        print(f"  NET              : ₹{money(settled.realized_pnl - charges)}")
+    else:
+        print(f"  charges           : ₹{money(charges)}")
+    if settled.turnover is not None:
+        print(f"  turnover          : ₹{money(settled.turnover)}")
+    if settled.trade_count:
+        print(f"  trades            : {settled.trade_count}   ₹{money(charges / settled.trade_count)} each")
+
+    # The whole point of the section. A fixed cost against a small risk budget
+    # is what decides whether a reward:risk is viable at all, and it is not
+    # visible anywhere else in this system.
+    if not risked or not rr:
+        return
+    per_trade_charge = charges / len(risked)
+    average_risk = sum(risked, start=Decimal("0")) / len(risked)
+    if average_risk <= 0:
+        return
+    win = average_risk * rr
+    required = (average_risk + per_trade_charge) / (win + average_risk) * 100
+    print()
+    print(f"  Charges are {per_trade_charge / average_risk * 100:.0f}% of the ₹{money(average_risk)} actually risked.")
+    print(f"  At {rr}R that makes the break-even win rate {required:.1f}%:")
+    print(
+        f"    a win pays ₹{money(win - per_trade_charge)} net, a loss costs ₹{money(average_risk + per_trade_charge)}"
+    )
+    print("  Compare that with the win rate this strategy actually achieves before trusting it.")
+
+
 async def main(args) -> int:
     settings = get_settings()
     session_date = args.date or datetime.now(MARKET_TIMEZONE).date()
@@ -166,6 +249,12 @@ async def main(args) -> int:
     print(RULE)
     entries = [row for row in rows if canonical(row, "orderType") in {"LIMIT", "MARKET"} and row.paper_signal_id]
     seen: set = set()
+    # Carried out of this loop for the charges section below: what was really
+    # risked per trade, and the reward:risk the signals were actually built to
+    # -- taken from the trade's own target and stop rather than from a setting,
+    # because a setting changed since is not what this day traded.
+    risked: list[Decimal] = []
+    reward_ratios: list[Decimal] = []
     for row in entries:
         signal = signals.get(row.paper_signal_id)
         if signal is None or signal.id in seen:
@@ -196,6 +285,17 @@ async def main(args) -> int:
                 f"    REAL risk         ₹{money(real_room * row.quantity)}"
                 f"   ({(real_room * row.quantity / budget * 100):.0f}% of the budget)"
             )
+            risked.append(real_room * row.quantity)
+        target = getattr(signal, "target_price", None)
+        if target and planned_room > 0:
+            reward_ratios.append(abs(Decimal(str(target)) - entry) / planned_room)
+
+    rr_used = (
+        (sum(reward_ratios, start=Decimal("0")) / len(reward_ratios)).quantize(Decimal("0.01"))
+        if reward_ratios
+        else None
+    )
+    await report_charges(session_date, risked, rr_used)
 
     if args.no_broker:
         return 0
