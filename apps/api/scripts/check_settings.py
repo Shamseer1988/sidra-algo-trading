@@ -352,14 +352,63 @@ async def main() -> int:
                 square_off = f"{own} -> capped at {deadline}"
                 flag = WARN
             line(flag, f"{name:30} enabled={configuration.enabled}  square-off={square_off}")
-            for label, key in (
-                ("rr", "minimum_rr"),
-                ("atr", "stop_atr_multiple"),
-                ("floor%", "min_stop_distance_percent"),
+
+            # The score threshold and the holding limit were missing from this
+            # section, which is the section an operator reads to confirm a
+            # change landed -- and those two are the ones most often changed.
+            # The account's minimum_score cannot be seen anywhere else at all,
+            # because every strategy overrides it unconditionally.
+            held = configuration.exit_rules.time_exit_minutes
+            print(
+                f"         {'score':7}: {configuration.minimum_score}"
+                f"   max trades/day: {configuration.max_trades_per_day}"
+                f"   sides: {','.join(configuration.allowed_sides)}"
+            )
+            print(f"         {'hold':7}: {f'{held} minutes' if held else 'no time limit'}")
+
+            for label, key, always_own in (
+                # minimum_rr, like minimum_score, is written into the effective
+                # controls unconditionally: the strategy's value is what acts
+                # whether or not it differs from the account's. Reporting the
+                # coincidence as "account" said a number was in charge that was
+                # not, which is the same fault the universe switch had.
+                ("rr", "minimum_rr", True),
+                ("atr", "stop_atr_multiple", False),
+                ("floor%", "min_stop_distance_percent", False),
             ):
                 value = effective.get(key)
-                source = "account" if value == base.get(key) else f"OVERRIDE (account {base.get(key)})"
+                account = base.get(key)
+                if always_own:
+                    source = "the strategy's own" + ("" if value == account else f" (account says {account})")
+                else:
+                    source = "account" if value == account else f"OVERRIDE (account {account})"
                 print(f"         {label:7}: {value}  {source}")
+
+        # One score threshold per strategy, and nothing shows them side by side
+        # anywhere else. Two strategies at different thresholds is a legitimate
+        # choice and an easy accident, so the comparison is made here.
+        enabled_scores = {
+            StrategyConfiguration.model_validate(item).name[:30]: StrategyConfiguration.model_validate(
+                item
+            ).minimum_score
+            for item in stored
+            if StrategyConfiguration.model_validate(item).enabled
+        }
+        if len(set(enabled_scores.values())) > 1:
+            warnings += 1
+            line(
+                WARN,
+                "Enabled strategies are using different score thresholds: "
+                + ", ".join(f"{name} {score}" for name, score in sorted(enabled_scores.items()))
+                + ". Deliberate is fine; identical was probably intended.",
+            )
+        account_score = base.get("minimum_score")
+        if account_score not in set(enabled_scores.values()) and enabled_scores:
+            line(
+                "      ",
+                f"The account's minimum_score ({account_score}) governs nothing: every strategy "
+                "carries its own and overrides it unconditionally.",
+            )
 
     heading("SUMMARY")
     if problems:
