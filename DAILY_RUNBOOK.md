@@ -216,6 +216,8 @@ Not part of the daily routine.
 | `backfill_broker_history.py` | Rebuilding the P&L calendar from the broker's reports after a purge. |
 | `purge_history.py` | Clearing local history. Destructive — read it first. |
 | `universe_applied.py` | Any day you want to know whether the watchlist ranking actually governed what was scanned, rather than what it ranked. Part of the 09:20 step above while the ranking is on. |
+| `backfill_history.py` | Loading past sessions of 1-minute candles so the Backtesting lab has something to replay. Long job; run it after 15:30. Safe to re-run — each candle is stored at most once. |
+| `candle_coverage.py` | Before trusting any backtest. Counts what history is actually stored per session, against the 375 candles a full NSE session has. |
 | `why_no_trade.py` | A day that traded less than you expected. Groups every evaluation by the reason it stopped there. |
 | `watchlist.py` | After changing `UPSTOX_SUBSCRIPTIONS`. Lists what is actually being watched, with tick sizes and last stored close. |
 

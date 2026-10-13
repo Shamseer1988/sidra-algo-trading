@@ -85,9 +85,37 @@ async def main() -> int:
     )
     for row in accepted:
         print(
-            f"    {ist(row).strftime('%H:%M')}  {names.get(row.instrument_token, row.instrument_token)}  "
-            f"{row.side or ''}  score {row.score}"
+            f"    {ist(row).strftime('%H:%M')}  {names.get(row.instrument_token, row.instrument_token):<12} "
+            f"{row.side or '':<6} score {row.score:>3}  {row.strategy_name}"
         )
+
+    # Which strategy is doing the work, which is not answerable from the
+    # reason counts: four strategies share most of their refusal wording, and
+    # turning one off or on is a decision about where the signals come from.
+    # 8 October ran four and accepted 8; the three that were disabled after it
+    # had been producing most of the opportunity, and nothing said which.
+    heading("WHO IS WORKING — per strategy, over this window")
+    by_strategy: dict[str, Counter] = {}
+    for row in considered:
+        counts = by_strategy.setdefault(row.strategy_name, Counter())
+        counts[row.status] += 1
+        counts["total"] += 1
+        if row.score:
+            counts["scored"] += 1
+            counts["score_sum"] += int(row.score)
+    print(f"  {'strategy':<26}{'evaluations':>12}{'accepted':>10}{'reached scoring':>17}{'best score':>12}")
+    best: dict[str, int] = {}
+    for row in considered:
+        if row.score:
+            best[row.strategy_name] = max(best.get(row.strategy_name, 0), int(row.score))
+    for name, counts in sorted(by_strategy.items(), key=lambda item: -item[1]["total"]):
+        print(
+            f"  {name[:25]:<26}{counts['total']:>12,}{counts.get('ACCEPTED', 0):>10}"
+            f"{counts.get('scored', 0):>17,}{best.get(name, 0):>12}"
+        )
+    print()
+    print("  'reached scoring' is the one to read: a strategy whose setups never get as far")
+    print("  as a score is not being refused by the threshold, it is not finding setups.")
 
     heading("WHY EACH ONE STOPPED, most common first")
     for reason, count in Counter(row.reason for row in considered).most_common(12):
@@ -101,7 +129,7 @@ async def main() -> int:
         for row in near:
             print(
                 f"  {ist(row).strftime('%H:%M')}  {names.get(row.instrument_token, row.instrument_token):<12} "
-                f"score {row.score:>3}  {row.reason}"
+                f"score {row.score:>3}  {row.strategy_name[:22]:<23} {row.reason}"
             )
     else:
         heading("CLOSEST THINGS TO A SIGNAL")
