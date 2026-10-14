@@ -36,6 +36,7 @@ from sqlalchemy import select  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
 from app.db.models import LiveOrderSubmission, PaperSignal  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
+from app.services.trade_counter import LIVE_PLACED_STATUSES as PLACED_STATUSES  # noqa: E402
 from app.services.trade_counter import session_bounds_utc  # noqa: E402
 from app.services.trading_calendar import MARKET_TIMEZONE  # noqa: E402
 
@@ -265,10 +266,19 @@ async def main(args) -> int:
             f"  at {money(row.average_fill_price)}"
         )
         if row.failure_message or row.failure_name or row.failure_code:
-            print(
-                f"    REFUSAL      [{row.failure_name or ''}{'/' if row.failure_name and row.failure_code else ''}"
-                f"{row.failure_code or ''}] {row.failure_message or ''}"
+            # The column is named failure_message, and it holds whatever the
+            # broker said -- "Accepted as 2610140000546650" included. Labelling
+            # that REFUSAL printed the word on every successful order on
+            # 14 October, which teaches an operator to skip the line that
+            # exists to be read. The label follows the status instead.
+            code = (
+                f"[{row.failure_name or ''}{'/' if row.failure_name and row.failure_code else ''}"
+                f"{row.failure_code or ''}] "
+                if (row.failure_name or row.failure_code)
+                else ""
             )
+            label = "broker said" if row.status in PLACED_STATUSES else "REFUSAL    "
+            print(f"    {label}  {code}{row.failure_message or ''}")
         if row.resolution_detail:
             print(f"    resolution   {row.resolution_detail}")
 
