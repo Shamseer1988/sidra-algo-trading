@@ -32,6 +32,7 @@ import argparse
 import asyncio
 import sys
 import time
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -77,6 +78,92 @@ def completed(row: MarketCandle) -> CompletedCandle:
     )
 
 
+async def _ranked_only(
+    by_instrument: dict[str, list[CompletedCandle]],
+    app_settings,  # noqa: ANN001 - the Settings model
+) -> dict[str, list[CompletedCandle]]:
+    """Drop the candles the live scanner would never have seen.
+
+    The replay has no universe gate, so a backtest trades every instrument it
+    is handed -- including the low-ATR large caps the daily ranking refuses.
+    On 13 October those were BANKBARODA, BHARTIARTL, ICICIBANK, RELIANCE and
+    SBIN: exactly the shares where a 1.2% target sits outside the day's range,
+    which is the failure the ATR band exists to prevent. A sweep that includes
+    them is not measuring the system that runs.
+
+    No engine change is needed for this. The replay skips any session an
+    instrument has fewer than three candles for, so removing the candles for a
+    session the ranking rejected is the same as gating it.
+
+    The ranking is **recomputed** per session rather than read from
+    ``scan_universe``, which only holds rows for the few days since the
+    feature was switched on. It is recomputed with the real ``rank_universe``
+    from daily candles collapsed out of the stored minutes, so the filter here
+    is the filter that runs live rather than another implementation of it.
+    """
+    from app.services.backtesting import _session_daily_candle
+    from app.services.universe import UniverseControls, _stored_controls, rank_universe
+
+    controls = UniverseControls.from_settings(app_settings, await _stored_controls())
+
+    # Per instrument: one daily candle per session, and the session's open.
+    daily: dict[str, dict[date, CompletedCandle]] = {}
+    opens: dict[str, dict[date, object]] = {}
+    sessions: set[date] = set()
+    for token, rows in by_instrument.items():
+        by_date: dict[date, list[CompletedCandle]] = {}
+        for candle in rows:
+            by_date.setdefault(candle.session_date, []).append(candle)
+        daily[token] = {day: _session_daily_candle(items) for day, items in by_date.items() if items}
+        opens[token] = {
+            day: sorted(items, key=lambda candle: candle.opened_at)[0].open for day, items in by_date.items() if items
+        }
+        sessions |= set(by_date)
+
+    history = max(int(getattr(app_settings, "daily_history_sessions", 10) or 10), 2)
+    ordered = sorted(sessions)
+    selected_by_session: dict[date, set[str]] = {}
+    for day in ordered:
+        prior = [earlier for earlier in ordered if earlier < day][-history:]
+        if not prior:
+            # Nothing to rank on. The live gate fails open in this position, so
+            # the backtest does too rather than silently trading nothing.
+            selected_by_session[day] = {token for token in by_instrument if day in daily.get(token, {})}
+            continue
+        candidates = {
+            token: [daily[token][earlier] for earlier in prior if earlier in daily[token]]
+            for token in by_instrument
+            if day in daily.get(token, {})
+        }
+        session_opens = {token: opens[token][day] for token in candidates if day in opens[token]}
+        ranked = rank_universe(candidates, session_opens, controls)
+        selected_by_session[day] = {item.instrument_token for item in ranked if item.selected}
+
+    kept: dict[str, list[CompletedCandle]] = {}
+    dropped = 0
+    for token, rows in by_instrument.items():
+        mine = [candle for candle in rows if token in selected_by_session.get(candle.session_date, set())]
+        dropped += len(rows) - len(mine)
+        if mine:
+            kept[token] = mine
+
+    per_session = [len(value) for value in selected_by_session.values()]
+    average = sum(per_session) / len(per_session) if per_session else 0
+    print()
+    print("  RANKED ONLY — replaying what the live scanner would have scanned")
+    print(f"    ranking recomputed for {len(selected_by_session)} session(s)")
+    print(
+        f"    instruments selected : {min(per_session, default=0)}-{max(per_session, default=0)}"
+        f" per session, {average:.1f} on average of {len(by_instrument)}"
+    )
+    print(f"    candles dropped      : {dropped:,}")
+    print(f"    instruments remaining: {len(kept)}")
+    if not kept:
+        print("    Nothing survived the filter. Check universe_min_atr_percent -- at this setting")
+        print("    the ranking refuses everything, which is a finding about the setting.")
+    return kept
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--score", type=numbers, help="minimum_score values, e.g. 60,65,71,75")
@@ -92,6 +179,15 @@ async def main() -> int:
     parser.add_argument("--strategy", help="Strategy id to sweep. Default: the first enabled one.")
     parser.add_argument("--timeframe", type=int, default=60)
     parser.add_argument("--validation-fraction", type=float, default=0.35)
+    parser.add_argument(
+        "--ranked-only",
+        action="store_true",
+        help=(
+            "Replay only the instruments the daily ranking would have selected on each session, "
+            "which is what the live scanner trades. Off, every instrument is replayed, including "
+            "the ones the ATR band refuses."
+        ),
+    )
     parser.add_argument("--memory-budget-mb", type=int, default=700, help="Refuse a run estimated above this.")
     parser.add_argument("--force", action="store_true", help="Run anyway. On a small machine this may be killed.")
     args = parser.parse_args()
@@ -235,6 +331,9 @@ async def main() -> int:
     benchmark = max(benchmark_series.values(), key=len, default=[])
     if not benchmark:
         print("  No benchmark (NIFTY) candles in this range; market-confirmation scoring will be degraded.")
+
+    if args.ranked_only:
+        by_instrument = await _ranked_only(by_instrument, app_settings)
 
     from app.services.backtest_sweep import STRATEGY_PARAMS
 
