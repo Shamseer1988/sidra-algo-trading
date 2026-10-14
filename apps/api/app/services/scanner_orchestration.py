@@ -1,6 +1,7 @@
 """Paper scanner orchestration: state, duplicate prevention, persistence and alerts."""
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import structlog
@@ -25,6 +26,23 @@ from app.services.trade_counter import count_filled_entries
 from app.services.trading_symbols import resolve_symbol
 
 STATE_TTL_SECONDS = 60 * 60 * 18
+
+
+@dataclass(frozen=True)
+class PaperOutcome:
+    """What the paper side of a signal did, and whether live may proceed.
+
+    ``queued`` is the paper journal's own answer: the risk was reserved and the
+    paper entry order is in the queue. ``blocks_live`` is deliberately not its
+    opposite. A paper engine that *refused* has decided something about the
+    paper ledger, which the live engine answers for itself from live data; a
+    paper engine that *raised* has established nothing, and nothing is not a
+    reason to send real money.
+    """
+
+    queued: bool
+    blocks_live: bool
+    reason: str
 
 
 class PaperScannerOrchestrator:
@@ -349,6 +367,44 @@ class PaperScannerOrchestrator:
             ),
         )
 
+    async def _reserve_paper(self, signal: PaperSignal) -> PaperOutcome:
+        """Reserve the paper risk and queue the paper entry. Refusals are paper's.
+
+        Separated from the live offer because the two are no longer the same
+        decision. Everything the paper engine *decides* is a fact about the
+        paper ledger -- its allocation, its open positions, its exposure, its
+        own halted day -- or about the share, and the live engine now answers
+        each of those from live data. So a decision withholds the paper order
+        and nothing else.
+
+        An exception is different and still withholds the live order. A refusal
+        is the engine working; a raise is the engine not working, and a signal
+        whose paper side failed for a reason nobody has established is not a
+        signal to put real money behind on the strength of the gates that did
+        answer.
+        """
+        try:
+            risk = await PaperRiskEngine().reserve_signal(signal)
+        except Exception:
+            await self._mark_signal_risk_block(signal, "Paper risk reservation unavailable")
+            self._logger.exception("scanner.paper_risk_reservation_failed", signal_id=str(signal.id))
+            return PaperOutcome(False, True, "Paper risk reservation unavailable")
+        if not risk.allowed:
+            await self._mark_signal_risk_block(signal, risk.reason)
+            self._logger.info("scanner.paper_signal_risk_rejected", signal_id=str(signal.id), reason=risk.reason)
+            return PaperOutcome(False, False, risk.reason)
+        try:
+            await PaperOrderManager().queue_signal(signal)
+        except Exception:
+            # The reservation is ACTIVE and the paper order is not queued, so
+            # the signal is marked for the operator exactly as before. The live
+            # order is withheld for the same reason as a raised reservation:
+            # the paper side broke rather than decided.
+            await self._mark_signal_risk_block(signal, "Paper order could not be queued")
+            self._logger.exception("scanner.paper_order_queue_failed", signal_id=str(signal.id))
+            return PaperOutcome(False, True, "Paper order could not be queued")
+        return PaperOutcome(True, False, risk.reason)
+
     async def _offer_live_entry(self, signal: PaperSignal) -> None:
         """Hand the signal to the live path, if this deployment has one.
 
@@ -552,28 +608,35 @@ class PaperScannerOrchestrator:
         signal = await self._record(candle, decision, indicators, strategy, strategy_snapshot)
         if signal is None:
             return
-        try:
-            risk = await PaperRiskEngine().reserve_signal(signal)
-            if not risk.allowed:
-                await self._mark_signal_risk_block(signal, risk.reason)
-                self._logger.info("scanner.paper_signal_risk_rejected", signal_id=str(signal.id), reason=risk.reason)
-                return
-            await PaperOrderManager().queue_signal(signal)
-        except Exception:
-            await self._mark_signal_risk_block(signal, "Paper risk reservation unavailable")
-            self._logger.exception("scanner.paper_order_queue_failed", signal_id=str(signal.id))
-            return
-        await self._redis.set(
-            f"scanner:last_signal:{candle.instrument_token}",
-            json.dumps({"signal_id": str(signal.id), "at": datetime.now(UTC).isoformat()}),
-            ex=STATE_TTL_SECONDS,
-        )
-        await self._alert(signal)
+        paper = await self._reserve_paper(signal)
+        if paper.queued:
+            await self._redis.set(
+                f"scanner:last_signal:{candle.instrument_token}",
+                json.dumps({"signal_id": str(signal.id), "at": datetime.now(UTC).isoformat()}),
+                ex=STATE_TTL_SECONDS,
+            )
+            await self._alert(signal)
         # After the paper record and the paper alert, never before. The
         # operator's record is the system of record and completes regardless;
         # this call cannot raise, so a live-path failure costs the live order
         # and nothing else.
-        await self._offer_live_entry(signal)
+        #
+        # Offered even when the paper engine refused. Until this change a paper
+        # refusal returned here, which meant the live account's position,
+        # exposure and daily-allocation limits were in practice the paper
+        # ledger's: on 14 October the operator's live day ended after one trade
+        # because paper had reached its own ceiling. The live engine now
+        # enforces each of those from the live account, and the one refusal
+        # that was a fact about the share rather than about the paper ledger --
+        # the operator's price band -- it enforces too. What a paper refusal
+        # still withholds is a paper order, which is the only thing it was ever
+        # about.
+        if paper.blocks_live:
+            self._logger.warning("scanner.live_entry_withheld", signal_id=str(signal.id), reason=paper.reason)
+        else:
+            await self._offer_live_entry(signal)
+        if not paper.queued:
+            return
         await self._redis.publish(
             SCANNER_EVENTS_CHANNEL,
             json.dumps(

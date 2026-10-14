@@ -33,6 +33,13 @@ enforced only by the paper risk engine, which meant the live account was bounded
 by a simulation. The two agree while nothing diverges and are unrelated the
 moment anything does: a paper position for an order the broker refused held a
 live slot, and a live fill the paper engine never saw held none.
+
+The operator's share-price band is checked here as well, through the shared
+``price_band`` module — two numbers and a comparison, no ledger of either kind.
+It was enforced only in the paper risk engine while that engine was the one
+every signal had to pass; the scanner now offers the live path an entry the
+paper engine refused, so a band left behind in paper would stop applying to the
+one account where it costs money.
 """
 
 from dataclasses import asdict, dataclass, field
@@ -261,9 +268,50 @@ async def live_risk_allocated_today(session: AsyncSession, session_date: date) -
     return sum(per_trade.values(), start=Decimal("0")), len(per_trade)
 
 
+async def _price_band_check(controls: Any, order: BrokerOrder) -> LiveRiskCheck:
+    """Whether this share is inside the price band the operator typed.
+
+    The band used to be enforced only in the paper risk engine -- the engine
+    every signal had to pass. That stopped being true when the live path was
+    allowed to proceed past a paper refusal, and a band enforced only in paper
+    would let the live account buy exactly the shares the operator excluded:
+    the ₹1,818 BHARTIARTL entry of 7 October again, in real money.
+
+    Read from the order's own price, which is the limit the broker will be
+    asked for -- and, on a market entry, the price the signal was found at. A
+    price that cannot be read refuses while a band is configured: a cap that
+    cannot be checked is not a cap. Zero on both sides means unbounded, and
+    then there is nothing to check and nothing to refuse.
+    """
+    from app.services.price_band import outside_price_band
+
+    high = Decimal(str(getattr(controls, "universe_max_share_price", 0) or 0))
+    low = Decimal(str(getattr(controls, "universe_min_share_price", 0) or 0))
+    if high <= 0 and low <= 0:
+        return LiveRiskCheck("price_band", True, "No share-price band is configured.")
+
+    try:
+        price = Decimal(str(order.price))
+    except (ArithmeticError, TypeError, ValueError):
+        price = Decimal("0")
+    if price <= 0:
+        return LiveRiskCheck(
+            "price_band",
+            False,
+            f"The order carries no usable price ({order.price!r}), so the {low}-{high} band cannot be checked.",
+        )
+
+    outside = outside_price_band(price, controls)
+    numbers = {"price": str(price), "floor": str(low), "cap": str(high)}
+    if outside:
+        return LiveRiskCheck("price_band", False, f"{outside}.", numbers)
+    return LiveRiskCheck("price_band", True, f"Share price {price} is inside the operator's band.", numbers)
+
+
 _CONTROLS_UNREADABLE = (
-    "The saved trading controls could not be read, so the day's limits and the live account's own "
-    "position, exposure and daily-allocation limits cannot be established."
+    "The saved trading controls could not be read, so the day's limits, the operator's share-price "
+    "band and the live account's own position, exposure and daily-allocation limits cannot be "
+    "established."
 )
 
 
@@ -484,10 +532,11 @@ async def authorize_live_order(
     # engine whose contract is to say no.
     controls = await _live_controls(session)
     if controls is None:
-        for key in ("daily_limit", "live_allocation", "live_positions"):
+        for key in ("daily_limit", "price_band", "live_allocation", "live_positions"):
             checks.append(LiveRiskCheck(key, False, _CONTROLS_UNREADABLE))
     else:
         checks.append(await _daily_limit_check(session, adapter, controls, record=record_halt))
+        checks.append(await _price_band_check(controls, order))
         # The live account's own limits, from the live account. These three were
         # enforced only by the paper risk engine, so the real money was bounded
         # by a simulation: the two agree while nothing diverges and are

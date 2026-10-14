@@ -257,6 +257,21 @@ def test_the_shared_limit_module_reads_no_paper_ledger() -> None:
     assert "PaperFill" not in names
 
 
+def test_the_shared_price_band_touches_no_ledger_and_no_database() -> None:
+    """Both engines import this. It must stay two numbers and a comparison.
+
+    The band began inside the paper risk engine, and moved out the day the
+    scanner was allowed to offer a live entry past a paper refusal: a band left
+    behind in paper would have stopped applying to the one account where it
+    costs money. What makes it safe to share is that it is narrower than an
+    engine -- no P&L, no ledger, no session. This fails the moment it is not.
+    """
+    tree = parse("services/price_band.py")
+    names = referenced_names(tree) | imported_names(tree)
+    assert not {"PaperPosition", "PaperOrder", "PaperFill", "PaperSignal", "RiskReservation"} & names
+    assert not {"SessionLocal", "AsyncSession", "select", "PaperRiskEngine"} & names
+
+
 def test_live_risk_reaches_no_paper_model_and_no_paper_engine() -> None:
     tree = parse("services/live_risk.py")
     imported = imported_names(tree)

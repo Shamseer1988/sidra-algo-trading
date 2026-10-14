@@ -706,6 +706,84 @@ async def test_saved_controls_that_cannot_be_read_refuse_both_limits(
     session = FakeSession(reconciliation(), None, limits(), controls_raise=RuntimeError("settings row is corrupt"))
     decision = await authorize(monkeypatch, session=session)
     assert decision.authorized is False
-    for key in ("live_allocation", "live_positions"):
+    for key in ("daily_limit", "price_band", "live_allocation", "live_positions"):
         assert check(decision, key).passed is False
         assert "could not be read" in check(decision, key).detail
+
+
+# --- the operator's share-price band --------------------------------------
+#
+# It lived only in the paper risk engine, which was fine while that was the
+# engine every signal had to pass. The scanner now offers the live path an
+# entry the paper engine refused, so a band left behind in paper would stop
+# applying to the one account where it costs money -- the ₹1,818 BHARTIARTL
+# entry of 7 October, in real money this time.
+
+
+async def test_no_band_configured_leaves_the_gate_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero on both sides means unbounded, exactly as it does for paper."""
+    decision = await authorize(monkeypatch)
+    assert check(decision, "price_band").passed is True
+    assert decision.authorized is True
+
+
+async def test_a_share_above_the_operators_cap_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    decision = await authorize(monkeypatch, controls=limits(universe_max_share_price=400.0))
+    band = check(decision, "price_band")
+    assert decision.authorized is False
+    assert band.passed is False
+    assert "above the 400" in band.detail
+
+
+async def test_a_share_below_the_operators_floor_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    decision = await authorize(monkeypatch, controls=limits(universe_min_share_price=500.0))
+    assert check(decision, "price_band").passed is False
+    assert "below the 500" in check(decision, "price_band").detail
+
+
+async def test_a_share_inside_the_band_authorises(monkeypatch: pytest.MonkeyPatch) -> None:
+    decision = await authorize(
+        monkeypatch, controls=limits(universe_min_share_price=100.0, universe_max_share_price=1500.0)
+    )
+    assert check(decision, "price_band").passed is True
+    assert check(decision, "price_band").data == {"price": "418", "floor": "100.0", "cap": "1500.0"}
+    assert decision.authorized is True
+
+
+async def test_the_cap_itself_is_inside_the_band(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same boundary as paper: at the cap is allowed, above it is not."""
+    decision = await authorize(monkeypatch, controls=limits(universe_max_share_price=418.0))
+    assert check(decision, "price_band").passed is True
+
+
+@pytest.mark.parametrize("price", [Decimal("0"), "abc", None])
+async def test_a_price_that_cannot_be_read_refuses_while_a_band_is_set(
+    monkeypatch: pytest.MonkeyPatch, price: object
+) -> None:
+    """A cap that cannot be checked is not a cap."""
+    decision = await authorize(monkeypatch, controls=limits(universe_max_share_price=400.0), price=price)
+    band = check(decision, "price_band")
+    assert band.passed is False
+    assert "cannot be checked" in band.detail
+
+
+@pytest.mark.parametrize("price", [Decimal("0"), "abc"])
+async def test_an_unreadable_price_is_not_invented_into_a_refusal_with_no_band(
+    monkeypatch: pytest.MonkeyPatch, price: object
+) -> None:
+    """With no band there is nothing to check, so there is nothing to refuse.
+
+    The quantity gate and the broker's own margin reply are what catch a
+    malformed order; this gate only answers the question it was given.
+    """
+    decision = await authorize(monkeypatch, price=price)
+    assert check(decision, "price_band").passed is True
+
+
+async def test_the_live_band_is_the_same_function_paper_uses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two implementations of one number would drift, and the drift would show
+    up as paper and live disagreeing about which shares are tradable."""
+    from app.services.price_band import outside_price_band
+    from app.services.risk_engine import outside_price_band as paper_side
+
+    assert paper_side is outside_price_band
