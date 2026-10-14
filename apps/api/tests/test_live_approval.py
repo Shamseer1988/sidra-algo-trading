@@ -10,11 +10,12 @@ believes an order was sent.
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete, select
 
-from app.db.models import LiveActivation, LiveOrderApproval, LiveOrderSubmission
+from app.db.models import LiveActivation, LiveOrderApproval, LiveOrderSubmission, PaperSignal
 from app.db.session import SessionLocal
 from app.services.broker_adapter import BrokerOrderDescription, UpstoxAdapter
 from app.services.live_approval import (
@@ -121,6 +122,7 @@ async def clean(session) -> None:  # noqa: ANN001
     await session.execute(delete(LiveOrderSubmission))
     await session.execute(delete(LiveOrderApproval))
     await session.execute(delete(LiveActivation))
+    await session.execute(delete(PaperSignal).where(PaperSignal.instrument_token == REQUEST.instrument_token))
     await session.commit()
 
 
@@ -466,3 +468,79 @@ async def test_an_approval_for_another_broker_is_refused(monkeypatch: pytest.Mon
 def test_approved_is_not_the_same_as_submitted() -> None:
     """Distinct states, because a yes that the system then refused is not a send."""
     assert APPROVED != SUBMITTED
+
+
+# --- what the approved order plans to risk --------------------------------
+#
+# The approval row holds the order, not the budget it was sized from, so the
+# planned risk is read from the signal behind it at the moment the operator
+# answers. An approval path that passed nothing would check the day's live
+# allocation against every order except the one being approved.
+
+
+async def signal_row(session, risk: str) -> PaperSignal:  # noqa: ANN001
+    record = PaperSignal(
+        signal_key=f"approval-{uuid4()}",
+        instrument_token=REQUEST.instrument_token,
+        session_date=datetime.now(UTC).date(),
+        candle_opened_at=datetime.now(UTC),
+        strategy_version="orb-retest-v1@15",
+        side="LONG",
+        entry_price=REQUEST.price,
+        stop_price=Decimal("410"),
+        target_price=Decimal("430"),
+        quantity=REQUEST.quantity,
+        risk_amount=Decimal(risk),
+        score=90,
+        score_breakdown={},
+        strategy_snapshot={},
+        indicator_snapshot={},
+    )
+    session.add(record)
+    await session.commit()
+    await session.refresh(record)
+    return record
+
+
+async def test_an_approved_order_over_the_days_allocation_is_blocked_on_revalidation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capital 10000 at the default 4% is 400 for the day; this signal risks 500.
+
+    The operator said yes, and the live allocation says no. Revalidation is
+    where that is caught, which is the whole reason an approval is not
+    permission to submit later.
+    """
+    patch_green(monkeypatch)
+    client = FakeClient()
+    async with SessionLocal() as session:
+        await clean(session)
+        await arm(session)
+        signal = await signal_row(session, "500")
+        approval = await pending_approval(session)
+        approval.paper_signal_id = signal.id
+        await session.commit()
+        result = await decide(session, client, approval.reference_id, "approve")
+        assert result.status == BLOCKED
+        assert "this order needs 500" in result.detail
+        assert client.placements == []
+        await clean(session)
+
+
+async def test_an_approved_order_inside_the_days_allocation_still_sends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reservation must not block the order it is reserving for."""
+    patch_green(monkeypatch)
+    client = FakeClient()
+    async with SessionLocal() as session:
+        await clean(session)
+        await arm(session)
+        signal = await signal_row(session, "86.08")
+        approval = await pending_approval(session)
+        approval.paper_signal_id = signal.id
+        await session.commit()
+        result = await decide(session, client, approval.reference_id, "approve")
+        assert result.status == SUBMITTED
+        assert len(client.placements) == 1
+        await clean(session)

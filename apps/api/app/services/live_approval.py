@@ -38,7 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.db.models import LiveOrderApproval, LiveOrderSubmission
+from app.db.models import LiveOrderApproval, LiveOrderSubmission, PaperSignal
 from app.services.broker_adapter import BrokerAdapter, BrokerOrderDescription
 from app.services.live_execution import submit_live_order
 from app.services.live_orders import LiveOrderRequest
@@ -270,6 +270,20 @@ async def decide_live_approval(
     approval.status = APPROVED
     await session.commit()
 
+    # The planned risk of the order being approved, read now rather than stored
+    # with the question: the approval row holds the order, not the budget it was
+    # sized from. An approval with no signal behind it has no planned risk to
+    # declare, and passing None charges the day's allocation nothing for it --
+    # the allocation check then bounds it by what is already spent, which is the
+    # only honest reading when the order's own risk is unknown.
+    candidate_risk: Decimal | None = None
+    if approval.paper_signal_id is not None:
+        candidate_risk = await session.scalar(
+            select(PaperSignal.risk_amount).where(PaperSignal.id == approval.paper_signal_id)
+        )
+        if candidate_risk is not None:
+            candidate_risk = Decimal(str(candidate_risk))
+
     decision, submission = await submit_live_order(
         session,
         settings,
@@ -280,6 +294,7 @@ async def decide_live_approval(
         operator_approved=True,
         paper_signal_id=approval.paper_signal_id,
         approval_reference=approval.reference_id,
+        candidate_risk=candidate_risk,
     )
 
     approval = await session.scalar(select(LiveOrderApproval).where(LiveOrderApproval.reference_id == reference_id))

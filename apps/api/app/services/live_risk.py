@@ -24,10 +24,19 @@ broker's own position book rather than the paper ledger. They are the same two
 numbers an operator set for paper, and they are deliberately measured from a
 different source: paper P&L is a simulation, and refusing a real order because a
 simulation had a good morning is a refusal nobody could act on.
+
+For the same reason, the three remaining portfolio limits — concurrent open
+positions, open exposure, and the day's risk allocation — are enforced here from
+live data: open positions and exposure from the broker's own book, allocation
+from the risk the day's live submissions were sized from. They were previously
+enforced only by the paper risk engine, which meant the live account was bounded
+by a simulation. The two agree while nothing diverges and are unrelated the
+moment anything does: a paper position for an order the broker refused held a
+live slot, and a live fill the paper engine never saw held none.
 """
 
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -35,10 +44,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
-from app.db.models import ApplicationSetting, ExecutionReconciliation
+from app.db.models import ApplicationSetting, ExecutionReconciliation, LiveOrderSubmission
 from app.services import daily_limits
 from app.services.broker_adapter import BrokerAdapter, BrokerOrder, BrokerOrderDescription
 from app.services.live_readiness import inspect_live_readiness
+from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
 
 # A reconciliation older than this tells us about an account that may since have
 # changed. Short enough that a stale pass cannot authorise a whole session.
@@ -142,6 +152,7 @@ async def _symbol_check(description: BrokerOrderDescription) -> LiveRiskCheck:
 async def _daily_limit_check(
     session: AsyncSession,
     adapter: BrokerAdapter,
+    controls: Any,
     *,
     record: bool,
 ) -> LiveRiskCheck:
@@ -163,12 +174,6 @@ async def _daily_limit_check(
     refused, but a path that cannot place an order must not be able to close the
     live day either.
     """
-    # Imported inside the function: the settings route imports live modules for
-    # its own types, and a module-level import here would close the cycle.
-    from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
-
-    setting = await session.get(ApplicationSetting, TRADING_KEY)
-    controls = TradingControls.model_validate(setting.value if setting else DEFAULT_TRADING_CONTROLS)
     if not (controls.daily_loss_limit or controls.daily_profit_target):
         return LiveRiskCheck("daily_limit", True, "No daily profit target or loss limit is configured.")
 
@@ -216,6 +221,203 @@ async def _daily_limit_check(
     return LiveRiskCheck("daily_limit", False, f"{verdict.reason} at {session_pnl}.", numbers)
 
 
+async def live_risk_allocated_today(session: AsyncSession, session_date: date) -> tuple[Decimal, int]:
+    """Risk committed to the live account today, and how many trades carry it.
+
+    Read from ``live_order_submissions`` and nothing else. No paper position,
+    no paper fill, no paper verdict, and -- deliberately -- no join into
+    ``paper_signals`` either: the figure is written onto the live row when the
+    order is prepared, so the live account's real budget never depends on a
+    simulation's table. ``planned_risk`` is what the order was *sized to*
+    risk, which is why an exit and a protective stop carry none.
+
+    Counted per trade rather than per row. One trade writes three submissions
+    -- the entry, the protective stop behind it, and the exit that closes it --
+    and charging a single round trip three times would close the day after a
+    third of it. Rows sharing a signal are therefore one trade, at the largest
+    risk any of them declared; a row with no signal behind it is its own trade,
+    because nothing links it to another.
+    """
+    start, end = session_bounds_utc(session_date)
+    rows = (
+        await session.execute(
+            select(
+                LiveOrderSubmission.id,
+                LiveOrderSubmission.paper_signal_id,
+                LiveOrderSubmission.planned_risk,
+            ).where(
+                LiveOrderSubmission.created_at >= start,
+                LiveOrderSubmission.created_at < end,
+                LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
+                LiveOrderSubmission.planned_risk.is_not(None),
+            )
+        )
+    ).all()
+    per_trade: dict[Any, Decimal] = {}
+    for row_id, signal_id, risk in rows:
+        key = signal_id if signal_id is not None else row_id
+        declared = Decimal(str(risk))
+        per_trade[key] = max(per_trade.get(key, declared), declared)
+    return sum(per_trade.values(), start=Decimal("0")), len(per_trade)
+
+
+_CONTROLS_UNREADABLE = (
+    "The saved trading controls could not be read, so the day's limits and the live account's own "
+    "position, exposure and daily-allocation limits cannot be established."
+)
+
+
+async def _live_controls(session: AsyncSession) -> Any | None:
+    """The saved trading controls, or None if they cannot be read.
+
+    Imported inside the function for the same reason the daily-limit check does
+    it: the settings route imports this module back.
+
+    A stored value that no longer validates must not make this engine raise --
+    it refuses instead, which is the behaviour every other check here has. The
+    defaults are used only when nothing has ever been saved; a row that exists
+    and fails validation is a refusal rather than a quiet fall back to numbers
+    the operator never chose.
+    """
+    from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
+
+    try:
+        setting = await session.get(ApplicationSetting, TRADING_KEY)
+        return TradingControls.model_validate(setting.value if setting else DEFAULT_TRADING_CONTROLS)
+    except Exception:  # noqa: BLE001 - this engine refuses, it does not raise
+        return None
+
+
+async def _live_allocation_check(session: AsyncSession, controls: Any, candidate_risk: Decimal | None) -> LiveRiskCheck:
+    """Whether the day's live risk budget has room for this order.
+
+    maximum_daily_risk_percent was enforced only by the paper risk engine,
+    which meant the live account's budget was policed by a simulation: a day
+    whose paper ledger and live account had drifted apart was bounded by the
+    wrong one of the two. This reads live submissions.
+    """
+    budget = Decimal(str(controls.account_capital)) * Decimal(str(controls.maximum_daily_risk_percent)) / Decimal("100")
+    if budget <= 0:
+        return LiveRiskCheck("live_allocation", True, "No daily risk allocation limit is configured.")
+    allocated, trades = await live_risk_allocated_today(session, datetime.now(UTC).date())
+    wanted = candidate_risk or Decimal("0")
+    numbers = {"allocated": str(allocated), "budget": str(budget), "candidate": str(wanted), "trades": trades}
+    if allocated + wanted > budget:
+        return LiveRiskCheck(
+            "live_allocation",
+            False,
+            f"The day's live risk budget is spent: {allocated} of {budget} allocated across {trades} "
+            f"live trade(s), and this order needs {wanted}.",
+            numbers,
+        )
+    return LiveRiskCheck(
+        "live_allocation",
+        True,
+        f"{allocated} of {budget} of the day's live risk is allocated across {trades} live trade(s).",
+        numbers,
+    )
+
+
+async def _live_position_check(
+    adapter: BrokerAdapter, controls: Any, order: BrokerOrder, description: BrokerOrderDescription | None
+) -> LiveRiskCheck:
+    """Concurrent live positions and live exposure, read from the account.
+
+    Both limits existed only in the paper risk engine, so the live account was
+    capped by how many *simulated* positions were open. Those two agree while
+    nothing diverges and are unrelated the moment anything does -- a paper
+    position for an order the broker refused held a live slot, and a live fill
+    the paper engine never saw held none.
+
+    Fails closed on an unreadable book, like the daily limit above: a position
+    count that cannot be established is not a reason to send another order.
+    An order that closes or reduces an existing position is exempt, because
+    refusing those would trap a position open with no way out.
+    """
+    limit = int(controls.maximum_open_positions or 0)
+    exposure_percent = Decimal(str(controls.maximum_open_exposure_percent or 0))
+    if limit <= 0 and exposure_percent <= 0:
+        return LiveRiskCheck("live_positions", True, "No concurrent position or exposure limit is configured.")
+
+    try:
+        positions = await adapter.normalised_positions()
+    except Exception as exc:  # noqa: BLE001 - this engine refuses, it does not raise
+        return LiveRiskCheck("live_positions", False, f"Broker positions could not be read: {exc}")
+
+    unreadable = [item.symbol for item in positions if item.net_quantity is None]
+    if unreadable:
+        return LiveRiskCheck(
+            "live_positions",
+            False,
+            f"Broker reported an unreadable quantity for {', '.join(sorted(unreadable))}; "
+            "the open position count cannot be established.",
+        )
+
+    open_rows = [item for item in positions if item.net_quantity and item.net_quantity != 0]
+    # The canonical token from the order, and the broker-facing name from the
+    # description -- which is where it lives: a BrokerOrder has no symbol and a
+    # BrokerOrderDescription has no token, so taking both from one of them
+    # matches on nothing.
+    token = getattr(order, "instrument_token", None)
+    symbol = getattr(description, "symbol", None)
+    # An order against a token we already hold is adding to, reducing or
+    # closing that position, not opening another one.
+    mine = [item for item in open_rows if item.identifies(token, symbol)]
+    already_held = bool(mine)
+    # Opposite to the position it names, so it can only make the book smaller.
+    # Exempt from the exposure ceiling for the reason exits bypass these gates
+    # entirely: a limit that refuses the order which would bring the account
+    # back inside it traps the position it was meant to protect against.
+    side = str(getattr(order, "side", "") or "").strip().upper()
+    reduces = any(
+        (item.net_quantity > 0 and side in {"SELL", "S"}) or (item.net_quantity < 0 and side in {"BUY", "B"})
+        for item in mine
+        if item.net_quantity is not None
+    )
+
+    held = len(open_rows)
+    exposure = sum(
+        (
+            abs(item.net_quantity or Decimal("0")) * Decimal(str(item.last_price or item.average_price or 0))
+            for item in open_rows
+        ),
+        start=Decimal("0"),
+    )
+    numbers = {"open_positions": held, "limit": limit, "exposure": str(exposure)}
+
+    if limit > 0 and not already_held and held >= limit:
+        return LiveRiskCheck(
+            "live_positions",
+            False,
+            f"{held} live position(s) are already open and the limit is {limit}: "
+            f"{', '.join(sorted(item.symbol for item in open_rows))}.",
+            numbers,
+        )
+
+    if exposure_percent > 0:
+        leverage = (
+            Decimal(str(controls.intraday_leverage_multiplier))
+            if getattr(controls, "intraday_leverage_enabled", False)
+            else Decimal("1")
+        )
+        ceiling = Decimal(str(controls.account_capital)) * exposure_percent * leverage / Decimal("100")
+        numbers["exposure_ceiling"] = str(ceiling)
+        if ceiling > 0 and exposure > ceiling and not reduces:
+            return LiveRiskCheck(
+                "live_positions",
+                False,
+                f"Live exposure {exposure} already exceeds the ceiling of {ceiling}.",
+                numbers,
+            )
+
+    return LiveRiskCheck(
+        "live_positions",
+        True,
+        f"{held} of {limit} live position(s) open, exposure {exposure}.",
+        numbers,
+    )
+
+
 async def authorize_live_order(
     session: AsyncSession,
     settings: Settings,
@@ -225,6 +427,7 @@ async def authorize_live_order(
     order: BrokerOrder,
     description: BrokerOrderDescription,
     record_halt: bool = False,
+    candidate_risk: Decimal | None = None,
 ) -> LiveRiskDecision:
     """Decide whether one specific order may be submitted right now.
 
@@ -232,6 +435,12 @@ async def authorize_live_order(
     rather than fixing objections one at a time. Authorisation requires all of
     them; the result is computed from the collected checks rather than tracked in
     a flag that a later edit could forget to clear.
+
+    ``candidate_risk`` is what this order plans to risk, so the day's live
+    allocation can be checked with it included rather than only after it is
+    spent. Omitted, the budget is still enforced against what is already
+    allocated -- a caller that cannot say what the order risks does not get to
+    skip the limit, it only loses the reservation for its own order.
     """
     checked_at = datetime.now(UTC)
     checks: list[LiveRiskCheck] = []
@@ -268,8 +477,23 @@ async def authorize_live_order(
     )
 
     checks.append(await _symbol_check(description))
-    checks.append(await _daily_limit_check(session, adapter, record=record_halt))
     checks.append(await _margin_check(adapter, order, description))
+
+    # The operator's saved numbers, loaded once so every limit below answers to
+    # the same ones. Unreadable refuses all four rather than raising out of an
+    # engine whose contract is to say no.
+    controls = await _live_controls(session)
+    if controls is None:
+        for key in ("daily_limit", "live_allocation", "live_positions"):
+            checks.append(LiveRiskCheck(key, False, _CONTROLS_UNREADABLE))
+    else:
+        checks.append(await _daily_limit_check(session, adapter, controls, record=record_halt))
+        # The live account's own limits, from the live account. These three were
+        # enforced only by the paper risk engine, so the real money was bounded
+        # by a simulation: the two agree while nothing diverges and are
+        # unrelated the moment anything does.
+        checks.append(await _live_allocation_check(session, controls, candidate_risk))
+        checks.append(await _live_position_check(adapter, controls, order, description))
 
     failures = [check for check in checks if not check.passed]
     return LiveRiskDecision(

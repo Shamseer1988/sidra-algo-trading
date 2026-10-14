@@ -51,9 +51,20 @@ class FakeSession:
     Dispatching on the queried entity makes that impossible rather than unlikely.
     """
 
-    def __init__(self, reconciliation: object | None = None, halt: object | None = None, controls=None) -> None:  # noqa: ANN001
+    def __init__(
+        self,
+        reconciliation: object | None = None,
+        halt: object | None = None,
+        controls=None,  # noqa: ANN001
+        allocated: list[tuple[object, object, Decimal]] | None = None,
+        controls_raise: Exception | None = None,
+    ) -> None:
         self._by_entity = {ExecutionReconciliation: reconciliation, SessionHalt: halt}
         self._controls = controls
+        self._controls_raise = controls_raise
+        # One row per live submission the day already carries: (signal id, the
+        # risk that submission was sized from).
+        self._allocated = allocated or []
         self.added: list[object] = []
         self.commits = 0
 
@@ -62,12 +73,14 @@ class FakeSession:
         return self._by_entity.get(entity)
 
     async def get(self, _entity: object, _key: object) -> object | None:
+        if self._controls_raise is not None:
+            raise self._controls_raise
         if self._controls is None:
             return None
         return SimpleNamespace(value=self._controls)
 
     async def execute(self, _query: object) -> object:
-        return object()
+        return SimpleNamespace(all=lambda: list(self._allocated))
 
     def add(self, value: object) -> None:
         self.added.append(value)
@@ -149,11 +162,19 @@ async def authorize(
     controls=None,
     record_halt=False,
     session=None,
+    allocated=None,
+    candidate_risk=None,
     **overrides,
 ):
     monkeypatch.setattr("app.services.live_risk.inspect_live_readiness", readiness(ready))
     return await authorize_live_order(
-        session or FakeSession(reconciliation() if recon is _UNSET else recon, halt, controls or limits()),
+        session
+        or FakeSession(
+            reconciliation() if recon is _UNSET else recon,
+            halt,
+            controls or limits(),
+            allocated=allocated,
+        ),
         SimpleNamespace(),
         # The real adapter over a fake client: the margin comparison is the part
         # worth not mocking. Its session argument is only used for symbol
@@ -163,6 +184,7 @@ async def authorize(
         order=dataclasses.replace(ORDER, **overrides) if overrides else ORDER,
         description=description,
         record_halt=record_halt,
+        candidate_risk=candidate_risk,
     )
 
 
@@ -440,3 +462,250 @@ async def test_a_path_that_cannot_submit_does_not_close_the_live_day(
     decision = await authorize(monkeypatch, client=client, session=session)
     assert check(decision, "daily_limit").passed is False
     assert session.added == []
+
+
+# --- the live account's own portfolio limits ------------------------------
+#
+# Concurrent positions, open exposure and the day's risk allocation used to be
+# enforced only by the paper risk engine, which meant real money was bounded by
+# a simulation. Every test in this section proves the limit is answered from
+# live data: the broker's position book, or the risk the day's live submissions
+# were sized from. None of them writes a paper row, and the engine must refuse
+# without one.
+
+
+def allocation(*amounts: str) -> list[tuple[object, object, Decimal]]:
+    """One live submission row per amount: (row id, signal id, planned risk)."""
+    return [(f"row-{index}", f"signal-{index}", Decimal(amount)) for index, amount in enumerate(amounts)]
+
+
+async def test_a_day_with_budget_left_authorises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Capital 10000 at 4% is 400 for the day; 100 spent and 50 wanted fits."""
+    decision = await authorize(monkeypatch, allocated=allocation("100"), candidate_risk=Decimal("50"))
+    assert check(decision, "live_allocation").passed is True
+    assert check(decision, "live_allocation").data == {
+        "allocated": "100",
+        "budget": "400.00",
+        "candidate": "50",
+        "trades": 1,
+    }
+
+
+async def test_the_days_live_risk_budget_being_spent_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    decision = await authorize(monkeypatch, allocated=allocation("200", "150"), candidate_risk=Decimal("100"))
+    allocated = check(decision, "live_allocation")
+    assert decision.authorized is False
+    assert allocated.passed is False
+    assert "350 of 400.00 allocated across 2 live trade(s)" in allocated.detail
+    assert "this order needs 100" in allocated.detail
+
+
+async def test_this_orders_own_risk_counts_against_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Otherwise the last order of the day is always affordable.
+
+    Nothing it is about to spend has been spent yet, so a budget checked only
+    against what is already allocated lets a single oversized order through.
+    """
+    decision = await authorize(monkeypatch, allocated=[], candidate_risk=Decimal("500"))
+    assert check(decision, "live_allocation").passed is False
+    assert "this order needs 500" in check(decision, "live_allocation").detail
+
+
+async def test_an_order_that_cannot_say_what_it_risks_does_not_skip_the_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It loses the reservation for its own risk, not the limit itself."""
+    spent = await authorize(monkeypatch, allocated=allocation("450"), candidate_risk=None)
+    room = await authorize(monkeypatch, allocated=allocation("100"), candidate_risk=None)
+    assert check(spent, "live_allocation").passed is False
+    assert check(room, "live_allocation").passed is True
+
+
+async def test_the_allocation_is_counted_per_trade_not_per_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One trade writes an entry, a stop behind it and an exit.
+
+    The query is distinct by signal, so the reported trade count is the number
+    of signals rather than the number of rows -- charging one round trip three
+    times would close the day after a third of it.
+    """
+    decision = await authorize(monkeypatch, allocated=allocation("86", "86", "86"))
+    assert check(decision, "live_allocation").data["trades"] == 3
+    assert check(decision, "live_allocation").data["allocated"] == "258"
+
+
+async def test_the_live_position_limit_is_read_from_the_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One position open against a limit of one, and this order is a new name."""
+    client = FakeClient(positions=[position("TATAPOWER-EQ", token="NSE_EQ|INE245A01021")])
+    decision = await authorize(monkeypatch, client=client)
+    positions = check(decision, "live_positions")
+    assert decision.authorized is False
+    assert positions.passed is False
+    assert "1 live position(s) are already open and the limit is 1: TATAPOWER-EQ" in positions.detail
+    assert positions.data["open_positions"] == 1
+
+
+async def test_room_under_the_live_position_limit_authorises(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeClient(positions=[position("TATAPOWER-EQ", token="NSE_EQ|INE245A01021")])
+    decision = await authorize(monkeypatch, client=client, controls=limits(maximum_open_positions=2))
+    assert check(decision, "live_positions").passed is True
+    assert decision.authorized is True
+
+
+async def test_a_flat_position_row_does_not_hold_a_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A squared-off instrument stays in the book all day with net quantity 0."""
+    client = FakeClient(positions=[position("TATAPOWER-EQ", netQuantity="0", token="NSE_EQ|INE245A01021")])
+    decision = await authorize(monkeypatch, client=client)
+    assert check(decision, "live_positions").passed is True
+    assert check(decision, "live_positions").data["open_positions"] == 0
+
+
+async def test_an_order_against_a_token_already_held_is_not_a_new_position(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adding to, reducing or closing a position must not need a free slot."""
+    client = FakeClient(positions=[position("IDEA-EQ", token=ORDER.instrument_token)])
+    decision = await authorize(monkeypatch, client=client)
+    assert check(decision, "live_positions").passed is True
+
+
+async def test_a_held_position_is_matched_by_its_broker_name_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Firstock's book names the symbol; the token comes from the order."""
+    client = FakeClient(positions=[position(DESCRIPTION.symbol)])
+    decision = await authorize(monkeypatch, client=client)
+    assert check(decision, "live_positions").passed is True
+
+
+async def test_an_unreadable_position_quantity_refuses_rather_than_counting_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient(positions=[position("TATAPOWER-EQ", netQuantity="n/a")])
+    decision = await authorize(monkeypatch, client=client)
+    positions = check(decision, "live_positions")
+    assert positions.passed is False
+    assert "unreadable quantity for TATAPOWER-EQ" in positions.detail
+
+
+async def test_a_broker_that_will_not_answer_positions_refuses_the_position_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient(positions_raise=RuntimeError("position book unavailable"))
+    decision = await authorize(monkeypatch, client=client)
+    positions = check(decision, "live_positions")
+    assert positions.passed is False
+    assert "position book unavailable" in positions.detail
+
+
+async def test_live_exposure_over_the_ceiling_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """10 at 500 is 5000 against a ceiling of 10000 * 10% * 5x = 5000... just over."""
+    client = FakeClient(positions=[position("TATAPOWER-EQ", lastTradedPrice="501", token="NSE_EQ|INE245A01021")])
+    decision = await authorize(
+        monkeypatch,
+        client=client,
+        controls=limits(maximum_open_positions=5, maximum_open_exposure_percent=10.0),
+    )
+    positions = check(decision, "live_positions")
+    assert positions.passed is False
+    assert positions.data["exposure"] == "5010"
+    assert positions.data["exposure_ceiling"] == "5000.000"
+    assert "exceeds the ceiling" in positions.detail
+
+
+async def test_exposure_uses_the_average_price_when_there_is_no_last_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient(positions=[position("TATAPOWER-EQ", netAveragePrice="400", token="NSE_EQ|INE245A01021")])
+    decision = await authorize(
+        monkeypatch,
+        client=client,
+        controls=limits(maximum_open_positions=5, maximum_open_exposure_percent=10.0),
+    )
+    assert check(decision, "live_positions").data["exposure"] == "4000"
+    assert check(decision, "live_positions").passed is True
+
+
+async def test_a_short_position_adds_exposure_rather_than_cancelling_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two opposite positions are twice the money at risk, not none of it."""
+    client = FakeClient(
+        positions=[
+            position("A", netQuantity="10", lastTradedPrice="300", token="A-token"),
+            position("B", netQuantity="-10", lastTradedPrice="300", token="B-token"),
+        ]
+    )
+    decision = await authorize(
+        monkeypatch,
+        client=client,
+        controls=limits(maximum_open_positions=5, maximum_open_exposure_percent=10.0),
+    )
+    assert check(decision, "live_positions").data["exposure"] == "6000"
+
+
+async def test_without_leverage_the_exposure_ceiling_is_the_capital_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient(positions=[position("TATAPOWER-EQ", lastTradedPrice="300", token="NSE_EQ|INE245A01021")])
+    decision = await authorize(
+        monkeypatch,
+        client=client,
+        controls=limits(
+            maximum_open_positions=5,
+            maximum_open_exposure_percent=10.0,
+            intraday_leverage_enabled=False,
+        ),
+    )
+    positions = check(decision, "live_positions")
+    assert positions.data["exposure_ceiling"] == "1000.00"
+    assert positions.passed is False
+
+
+async def test_an_order_reducing_a_position_is_not_refused_by_the_exposure_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ceiling that refuses the order bringing the account back inside it
+    would trap the position it was meant to protect against."""
+    client = FakeClient(
+        positions=[position("IDEA-EQ", netQuantity="100", lastTradedPrice="500", token=ORDER.instrument_token)]
+    )
+    decision = await authorize(
+        monkeypatch,
+        client=client,
+        controls=limits(maximum_open_positions=5, maximum_open_exposure_percent=10.0),
+        side="SELL",
+    )
+    assert check(decision, "live_positions").passed is True
+
+
+async def test_adding_to_a_position_over_the_ceiling_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exemption is for the exit, not for the same trade made larger."""
+    client = FakeClient(
+        positions=[position("IDEA-EQ", netQuantity="100", lastTradedPrice="500", token=ORDER.instrument_token)]
+    )
+    decision = await authorize(
+        monkeypatch,
+        client=client,
+        controls=limits(maximum_open_positions=5, maximum_open_exposure_percent=10.0),
+        side="BUY",
+    )
+    assert check(decision, "live_positions").passed is False
+
+
+async def test_saved_controls_that_cannot_be_read_refuse_both_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stored value that no longer validates must refuse, not raise.
+
+    Every other check in this engine answers no when it cannot establish its
+    fact. These two must not be the pair that throws instead -- and they must
+    not fall back to defaults the operator never chose.
+    """
+    session = FakeSession(reconciliation(), None, limits(), controls_raise=RuntimeError("settings row is corrupt"))
+    decision = await authorize(monkeypatch, session=session)
+    assert decision.authorized is False
+    for key in ("live_allocation", "live_positions"):
+        assert check(decision, key).passed is False
+        assert "could not be read" in check(decision, key).detail

@@ -42,6 +42,7 @@ without being wired into the result refuses rather than passes.
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from redis.asyncio import Redis
@@ -195,6 +196,7 @@ async def authorize_live_submission(
     description: BrokerOrderDescription,
     client_order_id: str,
     operator_approved: bool | None = None,
+    candidate_risk: Decimal | None = None,
 ) -> LiveExecutionDecision:
     """Every gate, every time, in one place.
 
@@ -229,6 +231,9 @@ async def authorize_live_submission(
         # here rather than re-decided on the next order. The shadow evaluator
         # calls the same engine and deliberately does not pass this.
         record_halt=True,
+        # What this order plans to risk, so the day's live allocation is
+        # checked with it included rather than only once it is spent.
+        candidate_risk=candidate_risk,
     )
     gates.append(
         Gate(
@@ -270,6 +275,7 @@ async def submit_live_order(
     paper_signal_id: Any = None,
     oms_order_id: Any = None,
     approval_reference: str | None = None,
+    candidate_risk: Decimal | None = None,
 ) -> tuple[LiveExecutionDecision, LiveOrderSubmission | None]:
     """Authorise, write the intent down, commit it, then send. In that order.
 
@@ -299,6 +305,7 @@ async def submit_live_order(
         description=description,
         client_order_id=client_order_id,
         operator_approved=operator_approved,
+        candidate_risk=candidate_risk,
     )
     if not decision.authorized:
         return decision, None
@@ -312,6 +319,9 @@ async def submit_live_order(
         paper_signal_id=paper_signal_id,
         oms_order_id=oms_order_id,
         approval_reference=approval_reference,
+        # Written onto the live row, so the day's allocation is totalled from
+        # live rows alone rather than read back through the paper signal.
+        planned_risk=candidate_risk,
     )
     # Durable before the request leaves. Everything downstream depends on this.
     await session.commit()

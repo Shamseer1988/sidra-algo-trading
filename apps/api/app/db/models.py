@@ -849,6 +849,16 @@ class LiveOrderSubmission(Base):
     price: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
     trigger_price: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=0)
 
+    # What this order was sized to risk: entry minus stop, times quantity, as
+    # the strategy planned it. Recorded on the live row rather than looked up
+    # through the paper signal, because the live risk engine must bound the live
+    # account from live data only -- a join into paper_signals would make the
+    # day's real budget depend on a simulation's table. Null on an exit, a
+    # protective stop, and on every row written before this column existed:
+    # those risk nothing new, and a null is counted as nothing rather than
+    # guessed at.
+    planned_risk: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+
     status: Mapped[str] = mapped_column(String(30), default="PREPARED", index=True)
     broker_order_numbers: Mapped[list] = mapped_column(JSON, default=list)
     # Never contains jKey. The redaction happens before the snapshot is stored.

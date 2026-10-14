@@ -563,6 +563,10 @@ async def _offer(
         approval_mode=mode,
         request=request,
         paper_signal_id=signal.id,
+        # The live day's risk allocation is checked with this order included.
+        # Without it the last order of the day is always affordable, because
+        # nothing it is about to spend has been spent yet.
+        candidate_risk=Decimal(str(signal.risk_amount or 0)),
     )
     logger.info(
         "live_entry_bridge.submitted signal_id=%s authorized=%s status=%s",

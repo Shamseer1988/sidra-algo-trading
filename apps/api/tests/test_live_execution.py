@@ -139,6 +139,7 @@ async def authorize(monkeypatch, **overrides):
             description=await adapter_for(client).describe(request.to_broker_order("sidra-test")),
             client_order_id="sidra-test",
             operator_approved=overrides.pop("operator_approved", None),
+            candidate_risk=overrides.pop("candidate_risk", None),
         )
         await clean(session)
         return decision
@@ -501,3 +502,48 @@ def test_the_gate_and_the_recovery_sweep_share_one_window() -> None:
     from app.services.scheduler import RESOLUTION_SETTLE_SECONDS as scheduled
 
     assert IN_FLIGHT_SECONDS is owned is scheduled
+
+
+# --- what this order plans to risk reaches the live risk engine ------------
+#
+# The engine's own tests prove the budget; these prove the number gets there.
+# A gate that is only ever handed None enforces the day's allocation against
+# everything except the order being decided, which is the one order that can
+# still be stopped.
+
+
+async def test_the_orders_own_risk_reaches_the_allocation_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Capital 10000 at the default 4% is 400 for the day; this order wants 500."""
+    decision = await authorize(monkeypatch, candidate_risk=Decimal("500"))
+    assert decision.authorized is False
+    assert "this order needs 500" in gate(decision, "live_risk").detail
+
+
+async def test_an_order_inside_the_days_allocation_is_authorised(monkeypatch: pytest.MonkeyPatch) -> None:
+    decision = await authorize(monkeypatch, candidate_risk=Decimal("86.08"))
+    assert decision.authorized is True
+
+
+async def test_the_submission_path_passes_the_risk_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """submit_live_order owns the transaction, so it must forward it itself."""
+    patch_everything_green(monkeypatch)
+    client = FakeClient()
+    async with SessionLocal() as session:
+        await clean(session)
+        await arm(session)
+        decision, record = await submit_live_order(
+            session,
+            SimpleNamespace(),
+            adapter_for(client),
+            FakeRedis(),
+            approval_mode="AUTOMATIC",
+            request=REQUEST,
+            candidate_risk=Decimal("500"),
+        )
+        rows = list((await session.scalars(select(LiveOrderSubmission))).all())
+        await clean(session)
+    assert decision.authorized is False
+    assert "this order needs 500" in gate(decision, "live_risk").detail
+    assert record is None
+    assert client.placements == []
+    assert rows == []

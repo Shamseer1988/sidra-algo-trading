@@ -194,6 +194,7 @@ async def prepare_submission(
     paper_signal_id: Any = None,
     oms_order_id: Any = None,
     approval_reference: str | None = None,
+    planned_risk: Decimal | None = None,
 ) -> LiveOrderSubmission:
     """Write the intent down. The caller must commit before sending.
 
@@ -204,6 +205,11 @@ async def prepare_submission(
     Takes the resolved ``description`` rather than resolving it here, so the row
     records the order in the broker's own words — and so a symbol that cannot be
     named is refused before anything is written, not discovered mid-send.
+
+    ``planned_risk`` is what this order was sized to risk, and it is recorded
+    here so the live risk engine can total the day's allocation from live rows
+    alone. Omitted on an exit and on a protective stop: those risk nothing new,
+    and repeating the entry's figure would charge one trade twice.
     """
     record = LiveOrderSubmission(
         client_order_id=client_order_id,
@@ -220,6 +226,7 @@ async def prepare_submission(
         quantity=request.quantity,
         price=request.price,
         trigger_price=request.trigger_price,
+        planned_risk=planned_risk,
         status=PREPARED,
         request_snapshot={
             "broker": broker,

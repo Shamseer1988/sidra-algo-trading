@@ -139,8 +139,10 @@ def wiring(monkeypatch: pytest.MonkeyPatch):
         state.requested = SimpleNamespace(request=request, broker=broker, signal=paper_signal_id)
         return SimpleNamespace(reference_id="ref-1", status="PENDING")
 
-    async def submit(_session, _settings, _adapter, _redis, *, approval_mode, request, paper_signal_id):
-        state.submitted = SimpleNamespace(request=request, mode=approval_mode, signal=paper_signal_id)
+    async def submit(_session, _settings, _adapter, _redis, *, approval_mode, request, paper_signal_id, candidate_risk):
+        state.submitted = SimpleNamespace(
+            request=request, mode=approval_mode, signal=paper_signal_id, candidate_risk=candidate_risk
+        )
         return SimpleNamespace(authorized=True, reason="Authorised"), SimpleNamespace(status="SENT")
 
     state.controls = controls()
@@ -819,3 +821,17 @@ def test_every_refusal_this_module_can_return_is_classified() -> None:
 
 def test_the_two_refusal_sets_do_not_overlap() -> None:
     assert not (module.ANNOUNCED_REFUSALS & module.SILENT_REFUSALS)
+
+
+@pytest.mark.asyncio
+async def test_the_signals_planned_risk_goes_with_the_order(wiring) -> None:
+    """The live account's daily allocation is checked with this order included.
+
+    Without it the last order of the day is always affordable, because nothing
+    it is about to spend has been spent yet. The number is the signal's own
+    risk_amount -- the budget the quantity was sized from -- and never a paper
+    position or a paper P&L.
+    """
+    wiring.controls = controls(approval="AUTOMATIC")
+    await run(wiring, sig=signal(risk="86.08"))
+    assert wiring.submitted.candidate_risk == Decimal("86.08")
