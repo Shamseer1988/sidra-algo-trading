@@ -36,7 +36,12 @@ from app.db.models import (
     MarketCandle,  # noqa: E402
 )
 from app.db.session import SessionLocal  # noqa: E402
-from app.services.trading_symbols import instrument_tick_size, resolve_script_names  # noqa: E402
+from app.services.price_ticks import TICK  # noqa: E402
+from app.services.trading_symbols import (  # noqa: E402
+    instrument_master_symbols,
+    instrument_tick_size,
+    resolve_script_names,
+)
 from app.services.upstox_market_data import configured_subscriptions, feed_subscriptions  # noqa: E402
 
 RULE = "=" * 74
@@ -88,6 +93,12 @@ async def main() -> int:
         high = Decimal(str(controls.universe_max_share_price))
         low = Decimal(str(controls.universe_min_share_price))
         ticks = {key: await instrument_tick_size(session, key) for key in equities}
+        # Membership in the master, not a comparison of resolved names.
+        # resolve_script_name returns the key only for an ISIN-form token: a
+        # subscription written as NSE_EQ|SBIN resolves to "SBIN" whether or not
+        # the broker has ever heard of it, so a name test would have found the
+        # real deployment's ISIN keys and quietly missed every other spelling.
+        known = set(await instrument_master_symbols(session))
         # The last completed candle this deployment stored, which is what the
         # band will be applied to on the next signal. Asking the broker would
         # be a live price; this is the price the system itself has, and a
@@ -108,9 +119,18 @@ async def main() -> int:
     width = max((len(names.get(key, key)) for key in streamed), default=18)
     blocked: list[str] = []
     unseen: list[str] = []
+    # Gathered rather than left for the reader to spot among 28 rows, and
+    # always with the key: the only way to act on either finding is to edit
+    # UPSTOX_SUBSCRIPTIONS, and that needs the key rather than the symbol.
+    tickless: list[tuple[str, str]] = []
+    nameless: list[str] = []
     for key in equities:
         name = names.get(key, key)
+        if key not in known:
+            nameless.append(key)
         tick = ticks.get(key)
+        if tick is None:
+            tickless.append((name, key))
         grid = f"tick ₹{tick}" if tick is not None else "tick unknown — a price may be refused"
         close = closes.get(key)
         if close is None:
@@ -129,7 +149,10 @@ async def main() -> int:
             print(f"  {names.get(key, key):<{width}}  " + (key if args.tokens else ""))
 
     heading("WHAT STILL NARROWS THIS")
-    if not settings.universe_enabled:
+    # From the saved controls, not the environment. The switch moved onto the
+    # Settings screen, and reading .env here told an operator who had turned
+    # the ranking on that every instrument was being scanned every candle.
+    if not getattr(controls, "universe_enabled", settings.universe_enabled):
         print("  universe_enabled is off, so every instrument above is scanned every candle.")
         print("  The turnover, ATR and liquidity ranking is not running.")
     else:
@@ -158,12 +181,30 @@ async def main() -> int:
         print(f"         {', '.join(sorted(unseen))}")
         print("         Either they were subscribed only just now, or the feed is not reaching them.")
 
-    unknown = [names.get(key, key) for key, tick in ticks.items() if tick is None]
-    if unknown:
+    # Printed last and with the keys, because these two are the only findings
+    # here whose remedy is to remove a line from UPSTOX_SUBSCRIPTIONS.
+    if nameless:
         print()
-        print(f"  [WARN] {len(unknown)} instrument(s) have no tick size in the stored master:")
-        print(f"         {', '.join(sorted(unknown))}")
-        print("         Their orders fall back to ₹0.05 and may be refused on price.")
+        print(f"  [BAD]  {len(nameless)} subscribed key(s) are not in the broker's instrument master:")
+        for key in sorted(nameless):
+            print(f"         {key}")
+        print("         The master is downloaded for every subscribed key, so a key missing from")
+        print("         it is a key the broker does not recognise -- delisted, mistyped, or from")
+        print("         another exchange. It cannot be named in an order, so the live gate's")
+        print("         instrument check refuses every signal on it. It still consumes a feed")
+        print("         slot and is scanned every candle. Remove it from UPSTOX_SUBSCRIPTIONS.")
+    remaining = [(name, key) for name, key in tickless if key not in set(nameless)]
+    if remaining:
+        print()
+        print(f"  [WARN] {len(remaining)} instrument(s) have no tick size in the master:")
+        for name, key in sorted(remaining):
+            print(f"         {name}  {key}")
+        print(f"         Prices for these fall back to ₹{TICK}, which is a multiple of ₹0.01 and")
+        print("         ₹0.05 but not of ₹0.10 or coarser. On a coarser grid roughly half of all")
+        print("         prices are unsendable, so the cost is a refused order -- a lost trade,")
+        print("         never an unprotected position. Re-run the instrument master first; if")
+        print("         the tick is still missing, remove it from UPSTOX_SUBSCRIPTIONS.")
+
     return 0
 
 
