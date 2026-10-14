@@ -103,6 +103,18 @@ def parse_day(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
+def is_reference_key(key: str, settings) -> bool:  # noqa: ANN001
+    """Whether this subscription is an index rather than something orderable.
+
+    Decided by what the key is, not by how it reached the feed: the benchmark
+    and VIX are force-added when absent but may also be listed by hand, as this
+    deployment lists NIFTY. watchlist.py decides the same way for the same
+    reason.
+    """
+    configured = {k for k in (settings.upstox_nifty_benchmark_key, settings.upstox_india_vix_key) if k}
+    return key in configured or key.startswith("NSE_INDEX|") or key.startswith("BSE_INDEX|")
+
+
 async def saved_universe_enabled(settings) -> tuple[bool, str]:  # noqa: ANN001
     """Whether the daily watchlist ranking is on, and which source said so.
 
@@ -168,8 +180,20 @@ async def main(args) -> int:
 
     async with SessionLocal() as session:
         heading("3. Database")
-        version = await session.scalar(text("select version_num from alembic_version"))
-        print(f"  alembic head           : {version}")
+        # A database provisioned by AUTO_CREATE_SCHEMA has no alembic_version
+        # table at all, which is the supported local-development shape -- and
+        # this query raised there, taking the whole snapshot down before it
+        # printed anything useful. A diagnostic reports what it cannot find.
+        try:
+            version = await session.scalar(text("select version_num from alembic_version"))
+        except Exception:  # noqa: BLE001 - a diagnostic reports, it does not fail
+            await session.rollback()
+            version = None
+            print("  alembic head           : no alembic_version table")
+            print("                           the schema was created directly rather than by")
+            print("                           migrations, which is AUTO_CREATE_SCHEMA in development.")
+        else:
+            print(f"  alembic head           : {version}")
         counts = {
             "paper_signals": PaperSignal,
             "live_order_submissions": LiveOrderSubmission,
@@ -233,6 +257,28 @@ async def main(args) -> int:
             print(f"  instruments in file    : {master.instrument_count:,}")
             print(f"  subscribed + stored    : {len(entries)}")
             print(f"  with a tick size       : {len(with_tick)}")
+            # The two counts differing by the number of subscribed indices is
+            # correct and used to be left for the reader to work out. An index
+            # is never ordered, so it has no price grid; printing 28 and 27 with
+            # nothing between them reads as one instrument quietly broken, and
+            # the obvious remedy -- dropping it from UPSTOX_SUBSCRIPTIONS --
+            # would take the benchmark out of the feed and score relative
+            # strength and the NIFTY regime at zero.
+            without = sorted(set(entries) - set(with_tick))
+            reference = [key for key in without if is_reference_key(key, settings)]
+            tradable = [key for key in without if key not in set(reference)]
+            if reference:
+                print(f"  of those, indices      : {len(reference)}  ({', '.join(reference)})")
+                print("                           an index is never ordered, so it has no price grid.")
+            if tradable:
+                problems += 1
+                print(f"  {BAD} {len(tradable)} tradable key(s) have no tick size:")
+                for key in tradable:
+                    print(f"         {key}")
+                print("         Their prices fall back to the default grid. Refresh the instrument")
+                print("         master; if a tick is still missing, see scripts/watchlist.py.")
+            elif not reference:
+                print("  [OK]   Every subscribed instrument that can be ordered has a price grid.")
             if master.missing_keys:
                 print(f"  {WARN} not found in the master: {', '.join(master.missing_keys[:5])}")
             if not with_tick:

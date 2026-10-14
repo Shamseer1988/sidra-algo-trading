@@ -76,3 +76,43 @@ async def test_a_saved_row_without_the_field_falls_back_to_the_environment() -> 
         session.add(ApplicationSetting(key=TRADING_KEY, value={"account_capital": 10000.0}))
         await session.commit()
     assert await snapshot.saved_universe_enabled(env(True)) == (True, "environment; nothing saved")
+
+
+# --- the tick-size count, and the gap that is not a fault -----------------
+#
+# Section 6 printed "subscribed + stored : 28" and "with a tick size : 27" with
+# nothing between them. The missing one was NSE_INDEX|Nifty 50, which is never
+# ordered and therefore has no price grid -- but the gap read as one instrument
+# quietly broken, and the obvious remedy would have taken the benchmark out of
+# the feed and scored relative strength and the NIFTY regime at zero.
+
+
+def feed(benchmark: str = "NSE_INDEX|Nifty 50", vix: str = ""):
+    return type(
+        "Settings",
+        (),
+        {"upstox_nifty_benchmark_key": benchmark, "upstox_india_vix_key": vix},
+    )()
+
+
+def test_the_configured_benchmark_is_reference_however_it_is_spelled() -> None:
+    assert snapshot.is_reference_key("NSE_INDEX|Nifty 50", feed()) is True
+    # Listed by hand under a key the prefix test alone would miss.
+    assert snapshot.is_reference_key("NSE_INDEX_OPT|CUSTOM", feed(benchmark="NSE_INDEX_OPT|CUSTOM")) is True
+
+
+def test_an_index_is_reference_even_when_it_is_not_the_benchmark() -> None:
+    assert snapshot.is_reference_key("NSE_INDEX|India VIX", feed()) is True
+    assert snapshot.is_reference_key("BSE_INDEX|SENSEX", feed()) is True
+
+
+def test_an_equity_is_never_reference() -> None:
+    """The one that matters: a tradable key missing a tick is a real finding."""
+    assert snapshot.is_reference_key("NSE_EQ|INE040A01034", feed()) is False
+    assert snapshot.is_reference_key("NSE_EQ|INE066F01020", feed()) is False
+
+
+def test_an_unset_vix_key_does_not_make_everything_reference() -> None:
+    """An empty configured key must not match an empty-ish anything."""
+    assert snapshot.is_reference_key("", feed(vix="")) is False
+    assert snapshot.is_reference_key("NSE_EQ|INE002A01018", feed(vix="")) is False
