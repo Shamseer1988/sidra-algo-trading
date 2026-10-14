@@ -103,6 +103,25 @@ def parse_day(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
+async def saved_universe_enabled(settings) -> tuple[bool, str]:  # noqa: ANN001
+    """Whether the daily watchlist ranking is on, and which source said so.
+
+    The saved control governs; the environment value is a deployment default
+    that the Settings screen overrides. Returned with its source because the
+    two disagreeing is exactly the case this exists to make visible.
+    """
+    from app.api.routes.settings import TRADING_KEY
+
+    try:
+        async with SessionLocal() as session:
+            row = await session.get(ApplicationSetting, TRADING_KEY)
+        if row and isinstance(row.value, dict) and "universe_enabled" in row.value:
+            return bool(row.value["universe_enabled"]), "saved controls"
+    except Exception:  # noqa: BLE001 - a diagnostic falls back, it does not fail
+        return bool(settings.universe_enabled), "environment (the database could not be read)"
+    return bool(settings.universe_enabled), "environment; nothing saved"
+
+
 async def main(args) -> int:
     settings = get_settings()
     session_date = args.date or datetime.now(MARKET_TIMEZONE).date()
@@ -129,7 +148,14 @@ async def main(args) -> int:
     print(f"  application_mode       : {settings.application_mode}")
     print(f"  live_trading_enabled   : {yes(settings.live_trading_enabled)}")
     print(f"  live_shadow_enabled    : {yes(settings.live_shadow_enabled)}")
-    print(f"  universe_enabled       : {yes(settings.universe_enabled)}")
+    # Read from the saved controls, with the environment only as a fallback.
+    # The switch moved onto the Settings screen, and this line still read the
+    # environment file: on 14 October it printed "no" while the saved value was
+    # True and the ranking had in fact selected 18 instruments that morning.
+    # A diagnostic contradicting the system it describes is worse than one line
+    # short.
+    universe_on, universe_source = await saved_universe_enabled(settings)
+    print(f"  universe_enabled       : {yes(universe_on)}   (from the {universe_source})")
     print()
     print("  credentials (presence only; no value is ever printed)")
     print(f"    upstox               : {yes(settings.upstox_is_configured)}")
