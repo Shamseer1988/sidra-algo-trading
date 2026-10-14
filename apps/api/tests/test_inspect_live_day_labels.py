@@ -1,4 +1,7 @@
-"""The broker's message is labelled by what happened, not by its column name.
+"""What the live-day report tells an operator to do next, and what it calls things.
+
+Two findings from the 14 October report, both in prose rather than in a
+figure, and both of which cost the operator something.
 
 ``failure_message`` holds whatever the broker said, and on a successful order
 that is "Accepted as 261014000054665". The script printed every one of those
@@ -6,6 +9,12 @@ under the word REFUSAL, so the 14 October report showed five submissions and
 five refusals while all five had in fact been accepted. A warning that appears
 on every success is a warning an operator learns to skip, which costs the real
 one when it comes.
+
+And the empty charges section named a job that does not exist and pointed at
+the backfill script. Run on the evening of the day in question, that script
+asks the broker for a session it has not settled, returns the nine days that
+had settled, and leaves out the only day being asked about -- so the advice
+read as a failure and cost a command that could not have worked.
 """
 
 import sys
@@ -20,6 +29,7 @@ from sqlalchemy import delete
 from app.db.models import LiveOrderSubmission
 from app.db.session import SessionLocal
 from app.services.trade_counter import session_bounds_utc
+from app.services.trading_calendar import MARKET_TIMEZONE
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -27,9 +37,17 @@ import inspect_live_day  # noqa: E402
 
 DAY = date(2096, 10, 14)
 AT = datetime(2096, 10, 14, 4, 9, tzinfo=UTC)
+# A day the broker has had time to settle. Separate from DAY because the advice
+# under an empty charges section turns on exactly that: today is waiting for
+# settlement, an older day is not -- and DAY is deliberately far in the future
+# so the label tests cannot touch a real session.
+SETTLED_DAY = date(2019, 10, 14)
+SETTLED_AT = datetime(2019, 10, 14, 4, 9, tzinfo=UTC)
 
 
-async def submission(*, status: str, message: str, name: str | None = None, code: str | None = None) -> None:
+async def submission(
+    *, status: str, message: str, name: str | None = None, code: str | None = None, when: datetime | None = None
+) -> None:
     async with SessionLocal() as session:
         session.add(
             LiveOrderSubmission(
@@ -46,7 +64,7 @@ async def submission(*, status: str, message: str, name: str | None = None, code
                 failure_message=message,
                 failure_name=name,
                 failure_code=code,
-                created_at=AT,
+                created_at=when or AT,
             )
         )
         await session.commit()
@@ -54,12 +72,13 @@ async def submission(*, status: str, message: str, name: str | None = None, code
 
 async def clean() -> None:
     async with SessionLocal() as session:
-        start, end = session_bounds_utc(DAY)
-        await session.execute(
-            delete(LiveOrderSubmission).where(
-                LiveOrderSubmission.created_at >= start, LiveOrderSubmission.created_at < end
+        for day in (DAY, SETTLED_DAY):
+            start, end = session_bounds_utc(day)
+            await session.execute(
+                delete(LiveOrderSubmission).where(
+                    LiveOrderSubmission.created_at >= start, LiveOrderSubmission.created_at < end
+                )
             )
-        )
         await session.commit()
 
 
@@ -70,8 +89,8 @@ async def reset():
     await clean()
 
 
-async def run(capsys: pytest.CaptureFixture) -> str:
-    args = type("Args", (), {"date": DAY, "no_broker": True})()
+async def run(capsys: pytest.CaptureFixture, day: date = DAY) -> str:
+    args = type("Args", (), {"date": day, "no_broker": True})()
     assert await inspect_live_day.main(args) == 0
     return capsys.readouterr().out
 
@@ -107,3 +126,29 @@ async def test_an_unresolved_order_is_not_called_an_acceptance(capsys: pytest.Ca
     await submission(status="UNKNOWN", message="placeOrder timed out")
     out = await run(capsys)
     assert "REFUSAL" in out
+
+
+# --- what the empty charges section tells an operator to do ----------------
+
+
+async def test_today_is_not_sent_to_the_backfill_script(capsys: pytest.CaptureFixture) -> None:
+    """Asking the broker for an unsettled session returns nothing by design.
+
+    The hint has to say that, because an operator who runs the command and
+    sees the day missing from its output reads it as something broken.
+    """
+    args = type("Args", (), {"date": datetime.now(MARKET_TIMEZONE).date(), "no_broker": True})()
+    await inspect_live_day.main(args)
+    out = capsys.readouterr().out
+    assert "not published until the broker settles" in out
+    assert "backfill_broker_history" not in out
+    assert "18:15" not in out
+
+
+async def test_an_older_day_still_gets_the_backfill_advice(capsys: pytest.CaptureFixture) -> None:
+    """There the broker has settled, so the script is the right answer."""
+    await submission(status="ACCEPTED", message="Accepted as 1", when=SETTLED_AT)
+    out = await run(capsys, day=SETTLED_DAY)
+    assert "backfill_broker_history" in out
+    assert "08:40 catch-up" in out
+    assert "18:15" not in out

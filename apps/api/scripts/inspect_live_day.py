@@ -118,10 +118,18 @@ async def report_charges(day: date, risked: list[Decimal], rr: Decimal | None) -
     cannot be asked. On a 100 risk budget the difference between 11 and 46 of
     charges is the difference between needing to win 45% of trades and 61%.
 
-    The figures are the broker's, from ``broker_day_snapshots``, written by the
-    18:15 settlement job. They settle over hours, so a day fetched too early
-    has a row with a null ``charges`` and that is reported as waiting rather
-    than as zero -- a zero here would be a claim the broker never made.
+    The figures are the broker's, from ``broker_day_snapshots``. Two scheduled
+    jobs write them: the 18:00 IST pass after the close, which usually gets the
+    realised figure and no charges, and the 08:40 IST catch-up the next
+    morning, which is when Upstox has actually settled them. A day fetched too
+    early has a row with a null ``charges``, and that is reported as waiting
+    rather than as zero -- a zero here would be a claim the broker never made.
+
+    The empty case said "the 18:15 job writes it" and pointed at the backfill
+    script, which was wrong twice over: there is no 18:15 job, and the backfill
+    cannot help before the broker has settled the day. Running it on the
+    evening of 14 October returned ten days and recorded nine of them,
+    correctly leaving out the only day the operator was asking about.
     """
     from sqlalchemy import desc
 
@@ -145,8 +153,16 @@ async def report_charges(day: date, risked: list[Decimal], rr: Decimal | None) -
 
     if not snapshots:
         print("  Nothing fetched for this day.")
-        print("  The 18:15 job writes it. If the day is older than that and this is still empty:")
-        print("    docker compose exec api python scripts/backfill_broker_history.py")
+        if day >= datetime.now(MARKET_TIMEZONE).date():
+            # Asking the broker now returns nothing, so sending an operator to
+            # the backfill here wastes a command and reads as a failure.
+            print("  Today's charges are not published until the broker settles the session.")
+            print("  The 18:00 job takes the realised figure tonight and the 08:40 catch-up")
+            print("  fills the charges tomorrow morning. Nothing to do.")
+        else:
+            print("  The 18:00 job writes it and the 08:40 catch-up fills the charges the next")
+            print("  morning. If the day is older than that and this is still empty:")
+            print("    docker compose exec api python scripts/backfill_broker_history.py")
         return
 
     settled = next((item for item in snapshots if item.charges is not None), None)
