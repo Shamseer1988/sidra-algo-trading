@@ -190,6 +190,12 @@ async def test_signal_block_reason_handles_zero_cooldown_per_side_and_daily_ceil
         # Zero cooldown + empty ledger: no UnboundLocalError, nothing blocks the signal.
         assert await orchestrator._signal_block_reason(_candle(0), strategy, long_decision, controls) is None
 
+        # An accepted evaluation on its own blocks nothing. It is written
+        # before the risk engine is asked, so counting it spent a strategy's
+        # trade on a signal that could still be refused -- which at two open
+        # positions is what happens whenever both slots are full. On
+        # 14 October this strategy accepted three signals, traded one, and was
+        # finished for the day.
         async with SessionLocal() as session:
             session.add(
                 ScannerEvaluation(
@@ -212,12 +218,49 @@ async def test_signal_block_reason_handles_zero_cooldown_per_side_and_daily_ceil
                 )
             )
             await session.commit()
+        assert await orchestrator._signal_block_reason(_candle(1), strategy, long_decision, controls) is None
 
-        # One accepted LONG already: the per-side cap blocks another LONG but not a SHORT.
-        assert (
-            await orchestrator._signal_block_reason(_candle(1), strategy, long_decision, controls)
-            == "Strategy maximum long paper trades reached"
-        )
+        # A LONG entry that actually filled: now the per-side cap blocks
+        # another LONG, and still not a SHORT.
+        async with SessionLocal() as session:
+            filled_long = PaperSignal(
+                signal_key="p0-block-filled-long",
+                instrument_token="NSE_EQ|BLOCK",
+                session_date=session_date,
+                candle_opened_at=datetime(2031, 3, 4, 4, 0, tzinfo=UTC),
+                strategy_version=f"{strategy.strategy_type}@{strategy.version}",
+                side="LONG",
+                entry_price=Decimal("100"),
+                stop_price=Decimal("99"),
+                target_price=Decimal("102"),
+                quantity=1,
+                risk_amount=Decimal("1"),
+                score=100,
+            )
+            session.add(filled_long)
+            await session.commit()
+            await session.refresh(filled_long)
+            session.add(
+                PaperOrder(
+                    paper_signal_id=filled_long.id,
+                    client_order_id="p0-block-filled-long-entry",
+                    instrument_token="NSE_EQ|BLOCK",
+                    session_date=session_date,
+                    strategy_version=filled_long.strategy_version,
+                    side="BUY",
+                    order_type="MARKET",
+                    order_role="ENTRY",
+                    quantity=1,
+                    filled_quantity=1,
+                    status="FILLED",
+                    eligible_after=datetime(2031, 3, 4, 4, 0, tzinfo=UTC),
+                )
+            )
+            await session.commit()
+
+        reason = await orchestrator._signal_block_reason(_candle(1), strategy, long_decision, controls)
+        assert reason is not None
+        assert reason.startswith("Strategy maximum long trades reached")
         assert await orchestrator._signal_block_reason(_candle(1), strategy, short_decision, controls) is None
 
         # Signals alone do not spend the day's budget. This used to be the
@@ -244,18 +287,24 @@ async def test_signal_block_reason_handles_zero_cooldown_per_side_and_daily_ceil
             await session.commit()
         assert await orchestrator._signal_block_reason(_candle(2), strategy, short_decision, controls) is None
 
-        # Two ENTRY orders with fills: now the account-wide ceiling blocks every side.
+        # A second ENTRY with a fill: with the LONG one above that is two, and
+        # now the account-wide ceiling blocks every side.
         async with SessionLocal() as session:
             # One ENTRY per signal: the schema enforces it, which conveniently
             # makes "distinct filled entries" the same count as "signals that
-            # actually traded".
+            # actually traded". Restricted to the signals seeded just above,
+            # because the LONG one already carries its own entry and the
+            # constraint would refuse a second.
             signals = list(
                 (
                     await session.scalars(
                         select(PaperSignal)
-                        .where(PaperSignal.session_date == session_date)
+                        .where(
+                            PaperSignal.session_date == session_date,
+                            PaperSignal.signal_key.startswith("p0-block-signal-"),
+                        )
                         .order_by(PaperSignal.signal_key)
-                        .limit(2)
+                        .limit(1)
                     )
                 ).all()
             )

@@ -156,26 +156,29 @@ class PaperScannerOrchestrator:
             taken = await count_filled_entries(session, candle.session_date)
             if taken.total >= ceiling:
                 return f"Daily trade ceiling reached: {taken.explain(ceiling)}"
-            accepted = await session.scalar(
-                select(func.count(ScannerEvaluation.id)).where(
-                    ScannerEvaluation.session_date == candle.session_date,
-                    ScannerEvaluation.strategy_id == strategy.id,
-                    ScannerEvaluation.status == "ACCEPTED",
-                )
-            )
-            if int(accepted or 0) >= strategy.max_trades_per_day:
-                return "Strategy maximum paper trades reached"
+            # From fills, for the same reason the ceiling above is. These two
+            # counted accepted evaluations, and an evaluation is written before
+            # the risk engine is asked: a signal refused for "Maximum
+            # concurrent paper positions reached" spent one of the strategy's
+            # trades without becoming one. At one open position that refusal
+            # was rare; at two it is what happens whenever both slots are full,
+            # so the strategy's budget drained fastest on the days it traded
+            # least.
+            mine = await count_filled_entries(session, candle.session_date, strategy_type=strategy.strategy_type)
+            if mine.total >= strategy.max_trades_per_day:
+                return f"Strategy maximum trades reached: {mine.explain(strategy.max_trades_per_day)}"
             if strategy.max_trades_per_side and decision.side:
-                side_accepted = await session.scalar(
-                    select(func.count(ScannerEvaluation.id)).where(
-                        ScannerEvaluation.session_date == candle.session_date,
-                        ScannerEvaluation.strategy_id == strategy.id,
-                        ScannerEvaluation.status == "ACCEPTED",
-                        ScannerEvaluation.side == decision.side,
-                    )
+                per_side = await count_filled_entries(
+                    session, candle.session_date, strategy_type=strategy.strategy_type, side=decision.side
                 )
-                if int(side_accepted or 0) >= strategy.max_trades_per_side:
-                    return f"Strategy maximum {decision.side.lower()} paper trades reached"
+                if per_side.total >= strategy.max_trades_per_side:
+                    return (
+                        f"Strategy maximum {decision.side.lower()} trades reached: "
+                        f"{per_side.explain(strategy.max_trades_per_side)}"
+                    )
+            # The cooldown still reads accepted signals rather than fills, on
+            # purpose: it paces how often the strategy may *fire*, and a signal
+            # that was accepted and then refused downstream is still a firing.
             if strategy.cooldown_minutes:
                 latest = await session.scalar(
                     select(func.max(ScannerEvaluation.candle_opened_at)).where(

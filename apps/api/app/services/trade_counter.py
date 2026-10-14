@@ -45,7 +45,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import LiveOrderSubmission, PaperOrder
+from app.db.models import LiveOrderSubmission, PaperOrder, PaperSignal
 from app.services.trading_calendar import MARKET_TIMEZONE
 
 # A broker outcome that means an order exists at the exchange. RESOLVED_PLACED
@@ -109,14 +109,57 @@ class TradeCount:
         return f"{self.total} of {ceiling} used — {detail}."
 
 
-async def count_filled_entries(session: AsyncSession, session_date: date) -> TradeCount:
+async def count_filled_entries(
+    session: AsyncSession,
+    session_date: date,
+    *,
+    strategy_type: str | None = None,
+    side: str | None = None,
+) -> TradeCount:
     """Today's trades, counted from fills rather than intentions.
 
     The keys are read rather than counted, because the two tables overlap and
     only the keys can say by how much. On a live deployment the scanner queues a
     paper entry for every signal it accepts *and* the live path submits the same
     signal, so summing two counts charged one trade to the budget twice.
+
+    ``strategy_type`` and ``side`` narrow it to one strategy's own budget. The
+    per-strategy caps used to count accepted *evaluations*, which is the thing
+    this function exists not to do: an evaluation is written before the risk
+    engine is asked, so a signal refused for "Maximum concurrent paper
+    positions reached" spent one of the strategy's trades without ever becoming
+    one. With two positions allowed that refusal is routine -- it is what
+    happens whenever both slots are full -- so the strategy's budget drained
+    fastest on the days it traded least, which is exactly backwards.
+
+    Narrowed by strategy *type* rather than by the configuration's id, because
+    a signal does not carry the id: it stores ``"{type}@{version}"``, and the
+    version moves whenever the operator saves a setting. Matching the whole
+    string would restart the day's count mid-session on an afternoon edit --
+    13 October's settings change took this strategy from v12 to v15. The type
+    alone is stable, and it separates the four strategies here because each is
+    a different type. Two enabled configurations of the *same* type would share
+    a budget under this count; nothing in the system creates that today, and a
+    signal would have to carry its configuration's id for it to be fixable.
+
+    A live order with no signal behind it cannot be attributed to a strategy,
+    so it is left out of a narrowed count. It still reaches the account-wide
+    ceiling, where an order resting at the exchange belongs however it got
+    there.
     """
+    narrowed = strategy_type is not None or side is not None
+    signal_ids: set[str] | None = None
+    if narrowed:
+        conditions = [PaperSignal.session_date == session_date]
+        if strategy_type is not None:
+            conditions.append(PaperSignal.strategy_version.startswith(f"{strategy_type}@"))
+        if side is not None:
+            conditions.append(PaperSignal.side == side)
+        rows = await session.scalars(select(PaperSignal.id).where(*conditions))
+        signal_ids = {str(value) for value in rows.all()}
+        if not signal_ids:
+            return TradeCount(paper_fills=0, live_submissions=0, both=0)
+
     paper_rows = await session.scalars(
         select(PaperOrder.paper_signal_id).where(
             PaperOrder.session_date == session_date,
@@ -128,6 +171,8 @@ async def count_filled_entries(session: AsyncSession, session_date: date) -> Tra
         )
     )
     paper_keys = {str(value) for value in paper_rows if value is not None}
+    if signal_ids is not None:
+        paper_keys &= signal_ids
 
     start, end = session_bounds_utc(session_date)
     # Distinct signals, not rows. One trade now writes three submissions -- the
@@ -148,6 +193,8 @@ async def count_filled_entries(session: AsyncSession, session_date: date) -> Tra
         .distinct()
     )
     live_keys = {str(value) for value in live_rows if value is not None}
+    if signal_ids is not None:
+        live_keys &= signal_ids
 
     return TradeCount(
         paper_fills=len(paper_keys),

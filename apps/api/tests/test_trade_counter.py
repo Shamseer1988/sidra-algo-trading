@@ -433,3 +433,122 @@ async def test_a_live_order_with_no_paper_entry_still_uses_a_trade() -> None:
     signal = await new_signal()
     await live_submission_for(signal.id)
     assert await count() == 1
+
+
+# --- one strategy's own budget -------------------------------------------
+
+
+async def signal_for(strategy_type: str, *, side: str = "LONG", version: int = 15) -> PaperSignal:
+    async with SessionLocal() as session:
+        signal = PaperSignal(
+            signal_key=f"count-{uuid4()}",
+            instrument_token=TOKEN,
+            session_date=SESSION,
+            candle_opened_at=datetime(2026, 9, 24, 4, 0, tzinfo=UTC),
+            strategy_version=f"{strategy_type}@{version}",
+            side=side,
+            entry_price=Decimal("100"),
+            stop_price=Decimal("98"),
+            target_price=Decimal("103"),
+            quantity=10,
+            risk_amount=Decimal("20"),
+            score=90,
+            score_breakdown={},
+            strategy_snapshot={},
+            indicator_snapshot={},
+        )
+        session.add(signal)
+        await session.commit()
+        await session.refresh(signal)
+        return signal
+
+
+async def fill_for(signal: PaperSignal, *, filled: int = 10) -> None:
+    async with SessionLocal() as session:
+        session.add(
+            PaperOrder(
+                paper_signal_id=signal.id,
+                client_order_id=f"count-{uuid4()}",
+                instrument_token=TOKEN,
+                session_date=SESSION,
+                strategy_version=signal.strategy_version,
+                side="BUY",
+                order_type="MARKET",
+                order_role="ENTRY",
+                quantity=10,
+                filled_quantity=filled,
+                status="FILLED",
+                eligible_after=datetime(2026, 9, 24, 4, 0, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
+
+async def test_a_signal_that_never_reached_an_order_costs_the_strategy_nothing() -> None:
+    """The leak this narrowing exists for.
+
+    An evaluation is marked ACCEPTED before the risk engine is asked, so a
+    signal refused for "Maximum concurrent paper positions reached" used to
+    spend one of the strategy's daily trades without becoming one. At two open
+    positions that refusal is routine, so the budget drained fastest on the
+    days that traded least.
+    """
+    await signal_for("orb-retest-v1")  # accepted, then refused: no order at all
+    async with SessionLocal() as session:
+        count = await count_filled_entries(session, SESSION, strategy_type="orb-retest-v1")
+    assert count.total == 0
+
+
+async def test_each_strategy_counts_only_its_own_fills() -> None:
+    await fill_for(await signal_for("orb-retest-v1"))
+    await fill_for(await signal_for("orb-retest-v1"))
+    await fill_for(await signal_for("vwap-pullback-v1"))
+    async with SessionLocal() as session:
+        orb = await count_filled_entries(session, SESSION, strategy_type="orb-retest-v1")
+        vwap = await count_filled_entries(session, SESSION, strategy_type="vwap-pullback-v1")
+        everything = await count_filled_entries(session, SESSION)
+    assert orb.total == 2
+    assert vwap.total == 1
+    assert everything.total == 3
+
+
+async def test_a_version_change_does_not_restart_the_day() -> None:
+    """A signal records "{type}@{version}" and the version moves whenever a
+    setting is saved -- 13 October took this strategy from v12 to v15. Matching
+    the whole string would have reset the count on an afternoon edit and handed
+    the strategy a fresh budget."""
+    await fill_for(await signal_for("orb-retest-v1", version=12))
+    await fill_for(await signal_for("orb-retest-v1", version=15))
+    async with SessionLocal() as session:
+        count = await count_filled_entries(session, SESSION, strategy_type="orb-retest-v1")
+    assert count.total == 2
+
+
+async def test_the_side_cap_counts_only_that_side() -> None:
+    await fill_for(await signal_for("orb-retest-v1", side="LONG"))
+    await fill_for(await signal_for("orb-retest-v1", side="LONG"))
+    await fill_for(await signal_for("orb-retest-v1", side="SHORT"))
+    async with SessionLocal() as session:
+        longs = await count_filled_entries(session, SESSION, strategy_type="orb-retest-v1", side="LONG")
+        shorts = await count_filled_entries(session, SESSION, strategy_type="orb-retest-v1", side="SHORT")
+    assert longs.total == 2
+    assert shorts.total == 1
+
+
+async def test_a_strategy_with_nothing_filled_reads_zero_without_touching_the_orders() -> None:
+    await fill_for(await signal_for("orb-retest-v1"))
+    async with SessionLocal() as session:
+        count = await count_filled_entries(session, SESSION, strategy_type="ema-momentum-v1")
+    assert count.total == 0
+
+
+async def test_a_live_order_with_no_signal_reaches_the_ceiling_but_not_a_strategy() -> None:
+    """It cannot be attributed to a strategy, and excluding it from the
+    account-wide ceiling would let an order at the exchange escape the day's
+    limit entirely."""
+    await live_submission(status="ACCEPTED")
+    async with SessionLocal() as session:
+        everything = await count_filled_entries(session, SESSION)
+        orb = await count_filled_entries(session, SESSION, strategy_type="orb-retest-v1")
+    assert everything.total == 1
+    assert orb.total == 0
