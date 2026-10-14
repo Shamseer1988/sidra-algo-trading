@@ -237,3 +237,51 @@ async def test_a_symbol_form_key_the_broker_does_not_know_is_flagged_too(
     out = await run(monkeypatch, capsys, settings(f"{BENCHMARK},{NAMED},{SYMBOL_FORM}"))
     assert "not in the broker's instrument master" in out
     assert SYMBOL_FORM in out
+
+
+# --- what an out-of-band name actually costs ------------------------------
+#
+# The advice said "scanned every candle ... drop them from
+# UPSTOX_SUBSCRIPTIONS" whatever the ranking was doing. With the ranking on,
+# the ranking applies the same band to the prior close and the scanner returns
+# before any strategy runs for an instrument it did not select -- so the four
+# names flagged on this deployment were costing nothing, and the advice was to
+# fix nothing.
+
+
+async def test_with_the_ranking_on_an_out_of_band_name_needs_no_action(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    await seed_master({NAMED: {"trading_symbol": "HAL-EQ", "tick_size": 10}})
+    await save_controls(universe_enabled=True, universe_max_share_price=2000.0)
+    await seed_candle(NAMED, "4933")
+    out = await run(monkeypatch, capsys, settings(f"{BENCHMARK},{NAMED}"))
+    assert "OUTSIDE THE BAND" in out
+    assert "there is nothing to do about them" in out
+    assert "drop them from" not in out
+    # Not a warning, because nothing is wrong.
+    assert "[NOTE]" in out
+
+
+async def test_with_the_ranking_off_the_name_really_is_scanned_every_candle(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """There the old advice was right, and it is kept."""
+    await seed_master({NAMED: {"trading_symbol": "HAL-EQ", "tick_size": 10}})
+    await save_controls(universe_enabled=False, universe_max_share_price=2000.0)
+    await seed_candle(NAMED, "4933")
+    out = await run(monkeypatch, capsys, settings(f"{BENCHMARK},{NAMED}"))
+    assert "scanned every candle" in out
+    assert "UPSTOX_SUBSCRIPTIONS" in out
+    assert "[WARN]" in out
+
+
+async def test_a_name_inside_the_band_is_not_flagged_either_way(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    await seed_master({NAMED: {"trading_symbol": "HDFCBANK-EQ", "tick_size": 5}})
+    await save_controls(universe_enabled=True, universe_max_share_price=2000.0)
+    await seed_candle(NAMED, "710.70")
+    out = await run(monkeypatch, capsys, settings(f"{BENCHMARK},{NAMED}"))
+    assert "OUTSIDE THE BAND" not in out
+    assert "last traded outside the band" not in out

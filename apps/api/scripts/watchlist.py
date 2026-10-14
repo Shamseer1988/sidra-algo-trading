@@ -152,7 +152,8 @@ async def main() -> int:
     # From the saved controls, not the environment. The switch moved onto the
     # Settings screen, and reading .env here told an operator who had turned
     # the ranking on that every instrument was being scanned every candle.
-    if not getattr(controls, "universe_enabled", settings.universe_enabled):
+    ranking_on = bool(getattr(controls, "universe_enabled", settings.universe_enabled))
+    if not ranking_on:
         print("  universe_enabled is off, so every instrument above is scanned every candle.")
         print("  The turnover, ATR and liquidity ranking is not running.")
     else:
@@ -171,10 +172,25 @@ async def main() -> int:
 
     if blocked:
         print()
-        print(f"  [WARN] {len(blocked)} instrument(s) last traded outside the band:")
+        print(f"  {'[NOTE]' if ranking_on else '[WARN]'} {len(blocked)} instrument(s) last traded outside the band:")
         print(f"         {', '.join(sorted(blocked))}")
-        print("         They are scanned every candle and a signal on them is refused on price.")
-        print("         Raise the band, or drop them from UPSTOX_SUBSCRIPTIONS.")
+        # What these cost depends entirely on the ranking, and saying "scanned
+        # every candle" regardless was wrong in the case this deployment is in.
+        # The ranking applies the same band to the prior close and the scanner
+        # returns before any strategy runs for an instrument it did not select,
+        # so with the ranking on these are not scanned at all -- and advising
+        # that they be dropped was advice to fix nothing.
+        if ranking_on:
+            print("         The daily ranking applies the same band, so it excludes them and the")
+            print("         scanner never evaluates them. They cost a feed slot and nothing else;")
+            print("         there is nothing to do about them.")
+            print("         It ranks on the prior close, while a signal is refused on the live")
+            print("         price, so a name that gaps across the band in either direction is")
+            print("         caught by whichever gate sees it first.")
+        else:
+            print("         The ranking is off, so they are scanned every candle and a signal on")
+            print("         them is refused on price. Raise the band, or drop them from")
+            print("         UPSTOX_SUBSCRIPTIONS.")
     if unseen:
         print()
         print(f"  [WARN] {len(unseen)} instrument(s) have no stored candle at all:")
