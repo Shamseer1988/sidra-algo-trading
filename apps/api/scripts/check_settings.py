@@ -12,6 +12,12 @@ overshot by a single market move before it can latch. A per-strategy value
 overrides an account one without saying so. None of those is an error anywhere;
 each is a number quietly meaning something other than what was typed.
 
+Section 6 answers the question that replaced those once the live path got its
+own caps: one number, two accounts. maximum_open_positions is three positions
+in the paper ledger *and* three at the broker, counted from different sources
+that need not agree -- so a day can end on one and not the other, and an
+operator reading one figure was reading the wrong account's.
+
 Read-only. It changes nothing and is safe to run during a session.
 """
 
@@ -24,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.db.models import ApplicationSetting  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
+from app.services.live_usage import cap_lines, live_usage  # noqa: E402
 
 OK, WARN, BAD = (
     "[OK]  ",
@@ -409,6 +416,33 @@ async def main() -> int:
                 f"The account's minimum_score ({account_score}) governs nothing: every strategy "
                 "carries its own and overrides it unconditionally.",
             )
+
+        heading("6. Which account each portfolio limit bounds")
+        print("  One number, two accounts, two sources. Each limit below is enforced twice:")
+        print("  once against the paper ledger and once against the live account.")
+        print()
+        print(f"  {'limit':<30}{'paper reads':<26}live reads")
+        for label, paper_source, live_source in (
+            ("maximum_daily_risk_percent", "risk reservations", "live submissions' planned risk"),
+            ("maximum_open_positions", "open paper positions", "the broker's position book"),
+            ("maximum_open_exposure_pct", "open paper positions", "the broker's position book"),
+            ("daily_loss_limit / target", "the paper ledger's P&L", "the broker's P&L"),
+            ("universe share-price band", "the signal's entry price", "the order's own price"),
+        ):
+            print(f"  {label:<30}{paper_source:<26}{live_source}")
+        print()
+        line(OK, "Live is not bounded by the paper ledger. Until 15 October it was: all three")
+        line("      ", "portfolio limits lived only in the paper risk engine, and a paper refusal")
+        line("      ", "returned before the live path was offered the signal at all.")
+        print()
+        print("  So these two accounts can stop on different days and for different reasons,")
+        print("  which is the point: a simulation having a good morning is not a reason to")
+        print("  refuse a real order, and a simulation's full book is not a real one.")
+        usage = await live_usage(session)
+        print()
+        print(f"  Today's live account, {usage.session_date}:")
+        for text in cap_lines(usage):
+            print(f"    {text}" if text else "")
 
     heading("SUMMARY")
     if problems:

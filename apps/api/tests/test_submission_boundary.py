@@ -272,6 +272,21 @@ def test_the_shared_price_band_touches_no_ledger_and_no_database() -> None:
     assert not {"SessionLocal", "AsyncSession", "select", "PaperRiskEngine"} & names
 
 
+def test_the_live_usage_report_reaches_no_paper_model_and_cannot_submit() -> None:
+    """It reports the live caps, so it must read the live account and only that.
+
+    A report is the easiest place for a paper figure to creep back in: nobody
+    is bounded by a printed number, so a wrong source here would be noticed
+    only when it contradicted a refusal. And a reporting module handed a broker
+    adapter must not be able to place anything with it.
+    """
+    tree = parse("services/live_usage.py")
+    names = referenced_names(tree) | imported_names(tree)
+    assert not {"PaperPosition", "PaperOrder", "PaperFill", "PaperSignal", "RiskReservation"} & names
+    assert not {"PaperRiskEngine"} & names
+    assert not (set(SUBMISSION_CLIENTS) & names)
+
+
 def test_live_risk_reaches_no_paper_model_and_no_paper_engine() -> None:
     tree = parse("services/live_risk.py")
     imported = imported_names(tree)

@@ -42,6 +42,7 @@ paper engine refused, so a band left behind in paper would stop applying to the
 one account where it costs money.
 """
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -228,6 +229,53 @@ async def _daily_limit_check(
     return LiveRiskCheck("daily_limit", False, f"{verdict.reason} at {session_pnl}.", numbers)
 
 
+def allocation_budget(controls: Any) -> Decimal:
+    """What the day's live risk may add up to. Zero means unbounded.
+
+    Exported so the gate and the report cannot disagree about the number: two
+    places computing one budget is two places to be wrong, and the one an
+    operator reads would be the one that was not enforcing anything.
+    """
+    return Decimal(str(controls.account_capital)) * Decimal(str(controls.maximum_daily_risk_percent)) / Decimal("100")
+
+
+def exposure_ceiling(controls: Any) -> Decimal:
+    """What the open live book may add up to, leverage included if it is on."""
+    leverage = (
+        Decimal(str(controls.intraday_leverage_multiplier))
+        if getattr(controls, "intraday_leverage_enabled", False)
+        else Decimal("1")
+    )
+    percent = Decimal(str(controls.maximum_open_exposure_percent or 0))
+    return Decimal(str(controls.account_capital)) * percent * leverage / Decimal("100")
+
+
+def live_exposure(positions: Iterable[Any]) -> Decimal:
+    """Money in the open live book, from the broker's own rows.
+
+    Absolute quantity, because two opposite positions are twice the money at
+    risk rather than none of it. Last traded price where the broker gives one,
+    the average entry price otherwise -- and a row it prices at neither counts
+    as nothing, which is the honest reading of a row with no price at all.
+    """
+    return sum(
+        (
+            abs(item.net_quantity or Decimal("0")) * Decimal(str(item.last_price or item.average_price or 0))
+            for item in positions
+        ),
+        start=Decimal("0"),
+    )
+
+
+def open_positions(positions: Iterable[Any]) -> list[Any]:
+    """The rows that are actually a position.
+
+    A squared-off instrument stays in the book all day at net quantity zero,
+    and counting those would fill the day's slots with trades that are over.
+    """
+    return [item for item in positions if item.net_quantity and item.net_quantity != 0]
+
+
 async def live_risk_allocated_today(session: AsyncSession, session_date: date) -> tuple[Decimal, int]:
     """Risk committed to the live account today, and how many trades carry it.
 
@@ -315,7 +363,7 @@ _CONTROLS_UNREADABLE = (
 )
 
 
-async def _live_controls(session: AsyncSession) -> Any | None:
+async def live_controls(session: AsyncSession) -> Any | None:
     """The saved trading controls, or None if they cannot be read.
 
     Imported inside the function for the same reason the daily-limit check does
@@ -344,7 +392,7 @@ async def _live_allocation_check(session: AsyncSession, controls: Any, candidate
     whose paper ledger and live account had drifted apart was bounded by the
     wrong one of the two. This reads live submissions.
     """
-    budget = Decimal(str(controls.account_capital)) * Decimal(str(controls.maximum_daily_risk_percent)) / Decimal("100")
+    budget = allocation_budget(controls)
     if budget <= 0:
         return LiveRiskCheck("live_allocation", True, "No daily risk allocation limit is configured.")
     allocated, trades = await live_risk_allocated_today(session, datetime.now(UTC).date())
@@ -401,7 +449,7 @@ async def _live_position_check(
             "the open position count cannot be established.",
         )
 
-    open_rows = [item for item in positions if item.net_quantity and item.net_quantity != 0]
+    open_rows = open_positions(positions)
     # The canonical token from the order, and the broker-facing name from the
     # description -- which is where it lives: a BrokerOrder has no symbol and a
     # BrokerOrderDescription has no token, so taking both from one of them
@@ -424,13 +472,7 @@ async def _live_position_check(
     )
 
     held = len(open_rows)
-    exposure = sum(
-        (
-            abs(item.net_quantity or Decimal("0")) * Decimal(str(item.last_price or item.average_price or 0))
-            for item in open_rows
-        ),
-        start=Decimal("0"),
-    )
+    exposure = live_exposure(open_rows)
     numbers = {"open_positions": held, "limit": limit, "exposure": str(exposure)}
 
     if limit > 0 and not already_held and held >= limit:
@@ -443,12 +485,7 @@ async def _live_position_check(
         )
 
     if exposure_percent > 0:
-        leverage = (
-            Decimal(str(controls.intraday_leverage_multiplier))
-            if getattr(controls, "intraday_leverage_enabled", False)
-            else Decimal("1")
-        )
-        ceiling = Decimal(str(controls.account_capital)) * exposure_percent * leverage / Decimal("100")
+        ceiling = exposure_ceiling(controls)
         numbers["exposure_ceiling"] = str(ceiling)
         if ceiling > 0 and exposure > ceiling and not reduces:
             return LiveRiskCheck(
@@ -530,7 +567,7 @@ async def authorize_live_order(
     # The operator's saved numbers, loaded once so every limit below answers to
     # the same ones. Unreadable refuses all four rather than raising out of an
     # engine whose contract is to say no.
-    controls = await _live_controls(session)
+    controls = await live_controls(session)
     if controls is None:
         for key in ("daily_limit", "price_band", "live_allocation", "live_positions"):
             checks.append(LiveRiskCheck(key, False, _CONTROLS_UNREADABLE))

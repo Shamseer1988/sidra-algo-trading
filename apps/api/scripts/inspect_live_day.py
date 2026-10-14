@@ -191,6 +191,36 @@ async def report_charges(day: date, risked: list[Decimal], rr: Decimal | None) -
     print("  Compare that with the win rate this strategy actually achieves before trusting it.")
 
 
+async def report_live_caps(session_date: date, *, adapter) -> None:  # noqa: ANN001
+    """The live account's own caps, and what this day has used against them.
+
+    The three limits the live risk engine enforces -- the day's risk
+    allocation, concurrent positions, open exposure -- plus the operator's
+    share-price band. They used to live only in the paper risk engine, so an
+    operator asking why a live day ended early was reading the wrong account's
+    numbers. Printed from the gate's own arithmetic rather than recomputed.
+
+    The allocation is this system's own record and is always readable; the
+    other two come from the broker's book, so they are reported as missing
+    rather than as zero when no adapter was handed in.
+    """
+    from app.services.live_usage import cap_lines, live_usage
+
+    print()
+    print(RULE)
+    print(f"LIVE CAPS AND WHAT {session_date} HAS USED")
+    print(RULE)
+    async with SessionLocal() as session:
+        usage = await live_usage(session, adapter=adapter, session_date=session_date)
+    hint = (
+        "Re-run without --no-broker to have those read from the account."
+        if adapter is None
+        else "The gate reads these itself before every entry, and refuses if the book cannot be read."
+    )
+    for text in cap_lines(usage, missing_hint=hint):
+        print(f"  {text}" if text else "")
+
+
 async def main(args) -> int:
     settings = get_settings()
     session_date = args.date or datetime.now(MARKET_TIMEZONE).date()
@@ -298,6 +328,10 @@ async def main(args) -> int:
     await report_charges(session_date, risked, rr_used)
 
     if args.no_broker:
+        # Without the broker, the day's live allocation is still readable: it
+        # is totalled from this system's own live rows, not from the account.
+        # The other two caps need the book and are reported as missing.
+        await report_live_caps(session_date, adapter=None)
         return 0
 
     # --- the broker's own books ---------------------------------------------
@@ -370,6 +404,11 @@ async def main(args) -> int:
             )
         if not positions:
             print("  (flat)")
+
+        # The caps the live risk engine will apply to the next entry, against
+        # what this account has already used. Read with the same adapter the
+        # positions above came from, so the two cannot disagree.
+        await report_live_caps(session_date, adapter=adapter)
     return 0
 
 
