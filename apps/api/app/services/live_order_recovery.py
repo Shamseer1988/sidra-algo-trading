@@ -47,6 +47,17 @@ RESOLVED_PLACED = "RESOLVED_PLACED"
 NEEDS_REVIEW = "NEEDS_REVIEW"
 UNKNOWN = "UNKNOWN"
 PREPARED = "PREPARED"
+# How long a PREPARED row is treated as in flight rather than unresolved.
+#
+# The row is written one line before the order is sent, so for the moment
+# between those two lines it exists with no broker answer against it -- which
+# is not an open question, it is an order being placed. Both the scheduled
+# resolution sweep and the authorization gate need the same answer to "is this
+# one still in flight", so the number lives here, once, rather than in each of
+# them. It was in the scheduler alone, and the gate had no equivalent: on
+# 14 October that refused a second live order because the first one's
+# protective stop had been written a second earlier and was still PREPARED.
+IN_FLIGHT_SECONDS = 120
 
 # The two states a lookup can still settle.
 #

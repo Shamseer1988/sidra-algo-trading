@@ -41,16 +41,17 @@ without being wired into the result refuses rather than passes.
 
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import LiveActivation, LiveOrderSubmission
 from app.services.broker_adapter import BrokerAdapter, BrokerOrderDescription
+from app.services.live_order_recovery import IN_FLIGHT_SECONDS
 from app.services.live_orders import (
     LiveOrderRequest,
     SubmissionOutcome,
@@ -65,7 +66,14 @@ from app.services.safety import emergency_stop_state
 logger = logging.getLogger(__name__)
 
 # Submission states that mean an earlier attempt is still open.
-BLOCKING_SUBMISSION_STATES = ("PREPARED", "UNKNOWN", "NEEDS_REVIEW")
+# A broker answer we do not have. UNKNOWN may already be exposure; NEEDS_REVIEW
+# is where recovery puts something once it has decided a person must look. Both
+# block however old they are.
+BLOCKING_SUBMISSION_STATES = ("UNKNOWN", "NEEDS_REVIEW")
+# PREPARED is not one of those. It is the state of an order being sent right
+# now -- the row is written one line before the request goes out -- so it
+# blocks only once it is old enough that it cannot still be in flight.
+IN_FLIGHT_STATE = "PREPARED"
 
 
 @dataclass(frozen=True)
@@ -112,11 +120,41 @@ async def _emergency_stop_gate(redis: Redis) -> Gate:
 
 
 async def _unresolved_submission_gate(session: AsyncSession) -> Gate:
+    """Refuse while an earlier order's outcome is genuinely open.
+
+    Sending another while one may already be live is how a position doubles,
+    so UNKNOWN and NEEDS_REVIEW block at any age.
+
+    A PREPARED row is different and used to be treated the same, which cost a
+    trade on 14 October. The row is written one line before the request is
+    sent: for the moment between those two lines it carries no broker answer
+    because the order has not been placed yet, not because anything is wrong.
+    Two signals arrived a second apart, the first one's protective stop was
+    mid-flight, and the second order was refused by a gate reporting the stop
+    as unresolved. With one position allowed that could never happen; at two
+    it is the normal case, so the setting was quietly inoperative.
+
+    ``live_order_recovery`` already drew this distinction -- its scheduled
+    sweep skips rows newer than ``IN_FLIGHT_SECONDS`` precisely so it does not
+    ask the broker about an order still being placed -- and this gate now uses
+    the same window from the same constant. A PREPARED row older than that is
+    not in flight any more, so it still blocks: an order that never got an
+    answer is exactly what this gate is for.
+    """
+    now = datetime.now(UTC)
     rows = list(
         (
             await session.scalars(
                 select(LiveOrderSubmission.client_order_id)
-                .where(LiveOrderSubmission.status.in_(BLOCKING_SUBMISSION_STATES))
+                .where(
+                    or_(
+                        LiveOrderSubmission.status.in_(BLOCKING_SUBMISSION_STATES),
+                        and_(
+                            LiveOrderSubmission.status == IN_FLIGHT_STATE,
+                            LiveOrderSubmission.created_at < now - timedelta(seconds=IN_FLIGHT_SECONDS),
+                        ),
+                    )
+                )
                 .limit(5)
             )
         ).all()

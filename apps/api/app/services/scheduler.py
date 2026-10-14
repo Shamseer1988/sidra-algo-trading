@@ -289,7 +289,9 @@ SETTLEMENT_LOOKBACK_DAYS = 7
 # broker about it. A PREPARED row is written one line before the order is sent,
 # so looking immediately would be asking about an order that is still in flight
 # and counting the miss against a budget of three attempts.
-RESOLUTION_SETTLE_SECONDS = 120
+# Kept as a name because the scheduler reads it, but owned by the module that
+# decides what "in flight" means, so the gate and this sweep cannot disagree.
+from app.services.live_order_recovery import IN_FLIGHT_SECONDS as RESOLUTION_SETTLE_SECONDS  # noqa: E402
 
 
 def _make_submission_recovery_job(settings: Settings):

@@ -17,6 +17,7 @@ from app.db.models import LiveActivation, LiveOrderSubmission
 from app.db.session import SessionLocal
 from app.services.broker_adapter import UpstoxAdapter
 from app.services.live_execution import authorize_live_submission, submit_live_order
+from app.services.live_order_recovery import IN_FLIGHT_SECONDS
 from app.services.live_orders import LiveOrderRequest
 from app.services.upstox_orders import UpstoxTransportUnknown
 
@@ -398,3 +399,105 @@ async def test_the_snapshot_is_serialisable_for_the_audit_trail(
 
     decision = await authorize(monkeypatch, armed=False)
     assert json.loads(json.dumps(decision.snapshot()))["authorized"] is False
+
+
+# --- a row still in flight is not an unresolved one -----------------------
+
+
+def _submission(client_order_id: str, status: str, *, age_seconds: int = 0) -> LiveOrderSubmission:
+    return LiveOrderSubmission(
+        client_order_id=client_order_id,
+        exchange="NSE",
+        trading_symbol="HDFCBANK-EQ",
+        product="I",
+        price_type="SL-M",
+        transaction_type="S",
+        quantity=15,
+        price=Decimal("0"),
+        status=status,
+        created_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
+    )
+
+
+async def _authorize(session) -> object:  # noqa: ANN001
+    return await authorize_live_submission(
+        session,
+        SimpleNamespace(),
+        adapter_for(FakeClient()),
+        FakeRedis(),
+        approval_mode="AUTOMATIC",
+        request=REQUEST,
+        description=await adapter_for(FakeClient()).describe(REQUEST.to_broker_order("sidra-test")),
+        client_order_id="sidra-test",
+    )
+
+
+async def test_an_order_being_sent_right_now_does_not_block_the_next_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """14 October, exactly. Two signals a second apart: the first order was
+    accepted, its protective stop was written one line before being sent, and
+    the second order was refused because that stop row was PREPARED.
+
+    A PREPARED row carries no broker answer because the order has not been
+    placed yet, not because anything is open. With one position allowed this
+    could never happen; at two it is the normal case, which made the setting
+    quietly inoperative.
+    """
+    patch_everything_green(monkeypatch)
+    async with SessionLocal() as session:
+        await clean(session)
+        await arm(session)
+        session.add(_submission("sidra-ef9ce51a61e944ad", "PREPARED", age_seconds=1))
+        await session.commit()
+        decision = await _authorize(session)
+        await clean(session)
+    assert decision.authorized is True
+    assert gate(decision, "unresolved_submissions").passed is True
+
+
+async def test_a_prepared_row_that_cannot_still_be_in_flight_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason the state blocks at all. An order written but never answered
+    is exactly what this gate is for; past the in-flight window it is not
+    being placed any more, it is stuck."""
+    patch_everything_green(monkeypatch)
+    async with SessionLocal() as session:
+        await clean(session)
+        await arm(session)
+        session.add(_submission("sidra-stuck-prepared", "PREPARED", age_seconds=IN_FLIGHT_SECONDS + 60))
+        await session.commit()
+        decision = await _authorize(session)
+        await clean(session)
+    assert decision.authorized is False
+    assert "sidra-stuck-prepared" in gate(decision, "unresolved_submissions").detail
+
+
+@pytest.mark.parametrize("status", ["UNKNOWN", "NEEDS_REVIEW"])
+async def test_a_genuinely_open_outcome_blocks_however_fresh_it_is(
+    monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """The grace is for PREPARED alone. UNKNOWN may already be exposure and
+    NEEDS_REVIEW is where recovery puts something once it has decided a person
+    must look -- neither becomes acceptable by being recent."""
+    patch_everything_green(monkeypatch)
+    async with SessionLocal() as session:
+        await clean(session)
+        await arm(session)
+        session.add(_submission(f"sidra-fresh-{status.lower()}", status, age_seconds=0))
+        await session.commit()
+        decision = await _authorize(session)
+        await clean(session)
+    assert decision.authorized is False
+    assert f"sidra-fresh-{status.lower()}" in gate(decision, "unresolved_submissions").detail
+
+
+def test_the_gate_and_the_recovery_sweep_share_one_window() -> None:
+    """They disagreed, and that disagreement was the defect: the sweep skipped
+    rows newer than its window while the gate blocked on them. One constant,
+    imported by both."""
+    from app.services.live_order_recovery import IN_FLIGHT_SECONDS as owned
+    from app.services.scheduler import RESOLUTION_SETTLE_SECONDS as scheduled
+
+    assert IN_FLIGHT_SECONDS is owned is scheduled
