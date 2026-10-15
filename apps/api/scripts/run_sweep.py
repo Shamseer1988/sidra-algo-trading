@@ -46,6 +46,10 @@ from app.services.market_calculations import CompletedCandle  # noqa: E402
 
 RULE = "=" * 110
 BYTES_PER_CANDLE = 680
+# Rows fetched per round trip while loading. Large enough that the streaming
+# costs no measurable time against a local database, small enough that the
+# batch itself never matters beside the candles being kept.
+CANDLE_BATCH = 5_000
 
 
 def heading(text: str) -> None:
@@ -63,7 +67,24 @@ def numbers(value: str) -> list[float]:
     return out
 
 
-def completed(row: MarketCandle) -> CompletedCandle:
+# Every column ``completed`` reads, and no more. session_date is deliberately
+# absent: CompletedCandle derives it from opened_at, and selecting it would be
+# a second source for a value the dataclass already computes.
+CANDLE_COLUMNS = (
+    MarketCandle.instrument_token,
+    MarketCandle.timeframe_seconds,
+    MarketCandle.opened_at,
+    MarketCandle.closed_at,
+    MarketCandle.open,
+    MarketCandle.high,
+    MarketCandle.low,
+    MarketCandle.close,
+    MarketCandle.volume,
+    MarketCandle.tick_count,
+)
+
+
+def completed(row) -> CompletedCandle:  # noqa: ANN001 - a MarketCandle or a Row of its columns
     return CompletedCandle(
         instrument_token=row.instrument_token,
         timeframe_seconds=row.timeframe_seconds,
@@ -306,28 +327,38 @@ async def main() -> int:
         return 1
 
     print("\n  Loading candles...")
-    async with SessionLocal() as session:
-        rows = (
-            await session.scalars(
-                select(MarketCandle)
-                .where(
-                    MarketCandle.instrument_token.in_(wanted),
-                    MarketCandle.timeframe_seconds == args.timeframe,
-                    MarketCandle.session_date >= start,
-                    MarketCandle.session_date <= end,
-                )
-                .order_by(MarketCandle.instrument_token, MarketCandle.opened_at)
-            )
-        ).all()
-
     by_instrument: dict[str, list[CompletedCandle]] = {token: [] for token in tradeable}
     benchmark_series: dict[str, list[CompletedCandle]] = {key: [] for key in benchmark_keys}
-    for row in rows:
-        candle = completed(row)
-        if row.instrument_token in by_instrument:
-            by_instrument[row.instrument_token].append(candle)
-        elif row.instrument_token in benchmark_series:
-            benchmark_series[row.instrument_token].append(candle)
+    async with SessionLocal() as session:
+        # Columns rather than entities, streamed in batches, and converted one
+        # row at a time. Selecting MarketCandle itself built a mapped instance
+        # per row and held every one of them -- in a list and in the session's
+        # identity map -- while this loop built the CompletedCandle list beside
+        # it. On 630,432 candles that is roughly a gigabyte of objects created
+        # and immediately discarded, on top of the 409 MB the replay actually
+        # needs. The estimate above counts only the latter, so a run passed the
+        # 700 MB budget and was then killed by the kernel inside the first
+        # replay: precisely the outcome the budget exists to prevent.
+        #
+        # A Row answers to the same attribute names, so ``completed`` is
+        # unchanged and still the single place the mapping lives.
+        stream = await session.stream(
+            select(*CANDLE_COLUMNS)
+            .where(
+                MarketCandle.instrument_token.in_(wanted),
+                MarketCandle.timeframe_seconds == args.timeframe,
+                MarketCandle.session_date >= start,
+                MarketCandle.session_date <= end,
+            )
+            .order_by(MarketCandle.instrument_token, MarketCandle.opened_at)
+            .execution_options(yield_per=CANDLE_BATCH)
+        )
+        async for row in stream:
+            candle = completed(row)
+            if row.instrument_token in by_instrument:
+                by_instrument[row.instrument_token].append(candle)
+            elif row.instrument_token in benchmark_series:
+                benchmark_series[row.instrument_token].append(candle)
     benchmark = max(benchmark_series.values(), key=len, default=[])
     if not benchmark:
         print("  No benchmark (NIFTY) candles in this range; market-confirmation scoring will be degraded.")
