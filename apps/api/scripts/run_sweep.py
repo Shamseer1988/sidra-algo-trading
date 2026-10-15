@@ -32,7 +32,7 @@ import argparse
 import asyncio
 import sys
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -43,6 +43,7 @@ from app.db.models import ApplicationSetting, MarketCandle  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.services.backtest_sweep import SWEEPABLE, build_combinations, run_parameter_sweep  # noqa: E402
 from app.services.market_calculations import CompletedCandle  # noqa: E402
+from app.services.trading_calendar import MARKET_TIMEZONE  # noqa: E402
 
 RULE = "=" * 110
 BYTES_PER_CANDLE = 680
@@ -50,6 +51,16 @@ BYTES_PER_CANDLE = 680
 # costs no measurable time against a local database, small enough that the
 # batch itself never matters beside the candles being kept.
 CANDLE_BATCH = 5_000
+
+
+def clock() -> str:
+    """Wall-clock time on each progress line.
+
+    Elapsed-and-remaining says how long a run should take; this says when each
+    step actually happened, which is what tells a stalled run from a slow one
+    when you come back to the log hours later.
+    """
+    return datetime.now(MARKET_TIMEZONE).strftime("%H:%M:%S")
 
 
 def heading(text: str) -> None:
@@ -186,6 +197,15 @@ async def _ranked_only(
 
 
 async def main() -> int:
+    # Line-buffered, because this runs for hours with its output redirected to
+    # a file and Python block-buffers a pipe. A run that was killed therefore
+    # lost whatever had not filled an 8 KB buffer, and the log's last line was
+    # the last flush rather than the last thing that happened -- so "it died at
+    # [1/4]" could not be told apart from "it died two hours later". A
+    # long-running job whose log goes quiet for hours has to be observable
+    # before it can be diagnosed.
+    sys.stdout.reconfigure(line_buffering=True)
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--score", type=numbers, help="minimum_score values, e.g. 60,65,71,75")
     parser.add_argument("--rr", type=numbers, help="minimum_rr values, e.g. 1.5,2.0,2.5")
@@ -400,7 +420,10 @@ async def main() -> int:
             first_finished.append(elapsed)
         each = elapsed / finished
         remaining = each * (total - finished)
-        print(f"  [{finished + 1}/{total}] {label}   ({each / 60:.1f} min each, about {remaining / 60:.0f} min left)")
+        print(
+            f"  [{finished + 1}/{total}] {clock()}  {label}   "
+            f"({each / 60:.1f} min each, about {remaining / 60:.0f} min left)"
+        )
 
     result = run_parameter_sweep(
         chosen,
