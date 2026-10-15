@@ -66,6 +66,22 @@ def session_bounds_utc(session_date: date) -> tuple[datetime, datetime]:
     return start_ist.astimezone(UTC), (start_ist + timedelta(days=1)).astimezone(UTC)
 
 
+def current_session_date() -> date:
+    """Today's trading date in IST, which is not today's UTC date all day.
+
+    IST is UTC+5:30, so between midnight and 05:30 IST the UTC calendar still
+    reads yesterday. Market hours are 09:15-15:30 IST (03:45-10:00 UTC) and the
+    two agree throughout, which is why reading the UTC date never broke a live
+    gate -- and why it survived unnoticed: the report simply spoke about the
+    wrong day to anyone looking after midnight, and a halt recorded in those
+    five hours would have filed under the session before it.
+
+    The rest of this codebase derives the session date in IST. These helpers
+    exist so the live risk engine does too, rather than agreeing by accident.
+    """
+    return datetime.now(MARKET_TIMEZONE).date()
+
+
 @dataclass(frozen=True)
 class TradeCount:
     """What the day has used, split by where it came from.

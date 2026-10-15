@@ -21,7 +21,7 @@ refuses on the first.
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -36,6 +36,7 @@ from app.services.live_risk import (
     live_risk_allocated_today,
     open_positions,
 )
+from app.services.trade_counter import current_session_date
 
 # Three states, not two. "I did not ask" and "I asked and could not tell" look
 # alike in a dataclass and mean opposite things to an operator: the first is a
@@ -206,7 +207,7 @@ async def live_usage(
     and exposure caps come back with state NOT_ASKED -- missing, not clear,
     and not a false alarm either.
     """
-    day = session_date or datetime.now(UTC).date()
+    day = session_date or current_session_date()
     # The gate's own loader, so the report is about the controls the gate
     # loads -- including its refusal to fall back to defaults the operator
     # never chose.

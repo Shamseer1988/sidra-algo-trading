@@ -56,7 +56,7 @@ from app.db.models import ApplicationSetting, ExecutionReconciliation, LiveOrder
 from app.services import daily_limits
 from app.services.broker_adapter import BrokerAdapter, BrokerOrder, BrokerOrderDescription
 from app.services.live_readiness import inspect_live_readiness
-from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
+from app.services.trade_counter import LIVE_PLACED_STATUSES, current_session_date, session_bounds_utc
 
 # A reconciliation older than this tells us about an account that may since have
 # changed. Short enough that a stale pass cannot authorise a whole session.
@@ -185,7 +185,7 @@ async def _daily_limit_check(
     if not (controls.daily_loss_limit or controls.daily_profit_target):
         return LiveRiskCheck("daily_limit", True, "No daily profit target or loss limit is configured.")
 
-    session_date = datetime.now(UTC).date()
+    session_date = current_session_date()
     halt = await daily_limits.existing_halt(session, session_date, daily_limits.LIVE)
     if halt is not None:
         # Read before the broker is asked: the day is already over, and a
@@ -395,7 +395,7 @@ async def _live_allocation_check(session: AsyncSession, controls: Any, candidate
     budget = allocation_budget(controls)
     if budget <= 0:
         return LiveRiskCheck("live_allocation", True, "No daily risk allocation limit is configured.")
-    allocated, trades = await live_risk_allocated_today(session, datetime.now(UTC).date())
+    allocated, trades = await live_risk_allocated_today(session, current_session_date())
     wanted = candidate_risk or Decimal("0")
     numbers = {"allocated": str(allocated), "budget": str(budget), "candidate": str(wanted), "trades": trades}
     if allocated + wanted > budget:

@@ -394,3 +394,58 @@ async def test_an_exit_order_is_named_as_one_rather_than_as_a_missing_signal(
     out = capsys.readouterr().out
     assert "carry no signal" in out
     assert "exits and protective stops" in out
+
+
+# --- which day is "today" -------------------------------------------------
+#
+# IST is UTC+5:30, so between midnight and 05:30 IST the UTC calendar still
+# reads yesterday. Reading the UTC date made the report speak about the
+# previous session to anyone looking in those five hours -- at 02:26 IST on
+# 16 October it reported "Today's live account, 2026-10-15" and showed that
+# day's 300.00 against the new 150.00 budget. Market hours (03:45-10:00 UTC)
+# fall on the same calendar date either way, which is why no live gate ever
+# refused wrongly, and why it went unnoticed.
+
+
+def test_the_session_date_is_the_ist_one_not_the_utc_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """02:26 IST on the 16th is 20:56 UTC on the 15th."""
+
+    from app.services import trade_counter
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            moment = datetime(2026, 10, 15, 20, 56, tzinfo=UTC)
+            return moment.astimezone(tz) if tz else moment
+
+    monkeypatch.setattr(trade_counter, "datetime", FrozenClock)
+    assert trade_counter.current_session_date() == date(2026, 10, 16)
+
+
+def test_during_market_hours_both_clocks_agree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """09:40 IST is 04:10 UTC on the same date, which is why this survived."""
+
+    from app.services import trade_counter
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: ANN001
+            moment = datetime(2026, 10, 15, 4, 10, tzinfo=UTC)
+            return moment.astimezone(tz) if tz else moment
+
+    monkeypatch.setattr(trade_counter, "datetime", FrozenClock)
+    assert trade_counter.current_session_date() == date(2026, 10, 15)
+    assert trade_counter.current_session_date() == FrozenClock.now(UTC).date()
+
+
+async def test_the_report_defaults_to_the_ist_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default the report takes when no date is passed is the IST one."""
+    from app.services import live_usage as module
+
+    monkeypatch.setattr(module, "current_session_date", lambda: DAY)
+    await save_controls()
+    await submission(signal_id=(await signal()).id, planned_risk="86.08")
+    async with SessionLocal() as session:
+        usage = await live_usage(session)
+    assert usage.session_date == DAY
+    assert usage.allocation.used == Decimal("86.08")
