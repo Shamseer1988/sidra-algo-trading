@@ -438,7 +438,17 @@ async def main() -> int:
         progress=report,
     )
     took = time.monotonic() - started
-    print(f"\n  Replays finished in {took / 60:.1f} min ({total / max(took, 1):,.0f} candles/second).")
+    # Per *replayed* candle, not per loaded one. --ranked-only drops the
+    # candles the live scanner would never have seen -- 40,188 of 52,188 on a
+    # five-session run -- and dividing by the loaded count reported a machine
+    # four times faster than it is. Anyone sizing a longer run from that figure
+    # would underestimate it several-fold, which is the mistake that turned an
+    # "hour of compute" into six.
+    replayed = sum(len(rows) for rows in by_instrument.values())
+    per_second = replayed * len(combinations) / max(took, 1)
+    print(f"\n  Replays finished in {took / 60:.1f} min ({per_second:,.0f} candles/second).")
+    if replayed != total:
+        print(f"  {replayed:,} of {total:,} candles replayed per combination; the rest the ranking dropped.")
 
     heading("RESULTS — ranked by validation return, which is the half it was not tuned on")
     print(
