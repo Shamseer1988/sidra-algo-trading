@@ -418,7 +418,13 @@ def _make_settlement_catchup_job(settings: Settings):
         begin = today - timedelta(days=SETTLEMENT_LOOKBACK_DAYS)
 
         async with SessionLocal() as db:
+            # Two ways a day can still be outstanding, and the second is the
+            # one 14 October fell into: a row whose charges have not settled,
+            # or no row at all because the evening pass asked the broker before
+            # it had settled the session and got nothing back. Asking only the
+            # first question left that day's charges unfetched for good.
             waiting = await broker_day_figures.dates_awaiting_charges(db, begin, today)
+            waiting |= await broker_day_figures.dates_missing_snapshot(db, begin, today)
         if not waiting:
             logger.info("scheduler.settlement_catchup_skipped", reason="nothing outstanding")
             return

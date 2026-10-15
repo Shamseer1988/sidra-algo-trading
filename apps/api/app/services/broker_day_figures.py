@@ -27,14 +27,16 @@ at the time is never edited.
 """
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import BrokerDaySnapshot
+from app.db.models import BrokerDaySnapshot, LiveOrderSubmission
+from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
+from app.services.trading_calendar import MARKET_TIMEZONE
 
 UPSTOX = "UPSTOX"
 SOURCE = "upstox:trade/profit-loss"
@@ -381,6 +383,50 @@ async def dates_awaiting_charges(
     """
     newest = await _newest_charges(session, from_date, to_date, broker=broker)
     return {session_date for session_date, charges in newest.items() if charges is None}
+
+
+async def dates_missing_snapshot(
+    session: AsyncSession, from_date: date, to_date: date, *, broker: str = UPSTOX
+) -> set[date]:
+    """Dates we placed live orders on and hold no snapshot for at all.
+
+    ``dates_awaiting_charges`` asks "which days have a row whose charges have
+    not settled". That misses the case that actually happened on 14 October.
+    The evening pass asks the broker for today, and the broker's P&L report
+    returns nothing at all for a session it has not settled -- so no row is
+    written. The next morning's catch-up then looks for rows lacking charges,
+    finds none for that date because there is no row, decides nothing is
+    outstanding, and makes no request. The day's charges are never fetched, and
+    nothing ever goes back for them: 14 October had five submissions, two
+    round trips and no figures, while 13 October had its charges only because
+    an operator happened to run the backfill by hand.
+
+    So the question is asked from our own side as well: a session this system
+    placed live orders on is a session the broker has charges for, whether or
+    not we managed to record them yet. Counted from the live submissions
+    themselves rather than from paper, because broker charges only exist for
+    orders that reached a broker.
+    """
+    start, _ = session_bounds_utc(from_date)
+    _, end = session_bounds_utc(to_date)
+    traded = (
+        await session.execute(
+            select(LiveOrderSubmission.created_at).where(
+                LiveOrderSubmission.created_at >= start,
+                LiveOrderSubmission.created_at < end,
+                LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
+            )
+        )
+    ).all()
+    # The IST calendar date of each submission, so a row stored just after
+    # midnight UTC files under the trading day it belongs to rather than the
+    # next one.
+    days = {
+        (created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC)).astimezone(MARKET_TIMEZONE).date()
+        for (created_at,) in traded
+    }
+    held = set(await _newest_charges(session, from_date, to_date, broker=broker))
+    return {day for day in days if from_date <= day <= to_date and day not in held}
 
 
 async def sync_days(
