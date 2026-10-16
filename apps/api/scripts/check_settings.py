@@ -23,6 +23,7 @@ Read-only. It changes nothing and is safe to run during a session.
 
 import asyncio
 import sys
+from datetime import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -32,6 +33,8 @@ from app.db.models import ApplicationSetting  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.services.live_usage import cap_lines, live_usage  # noqa: E402
 from app.services.settings_history import changed_on, revision_history  # noqa: E402
+from app.services.trade_counter import first_live_order_at  # noqa: E402
+from app.services.trading_calendar import MARKET_TIMEZONE  # noqa: E402
 
 OK, WARN, BAD = (
     "[OK]  ",
@@ -136,6 +139,15 @@ def best_day_available(
         f"{takeable} trade(s) x {per_trade:,.2f} risked x {reward} reward:risk = {best:,.2f}, every one "
         f"hitting its target, taken from {source}"
     )
+
+
+def _clock(value: str | None):
+    """An HH:MM setting as a time, or None when it cannot be read."""
+    try:
+        hour, minute = (int(part) for part in str(value).split(":"))
+        return time(hour, minute)
+    except (TypeError, ValueError):
+        return None
 
 
 def line(flag: str, text: str) -> None:
@@ -543,12 +555,26 @@ async def main() -> int:
         # and nothing on the screen said which case the reader was in.
         print("    The limits are the settings as saved now. The usage is totalled from orders already")
         print("    sent, each sized by the settings in force when it went out.")
+        # Bounded by the first live order of the day, because a limit saved
+        # before any order went out cannot have left the two halves of these
+        # rows describing different configurations. Without the bound this
+        # fired on every overnight edit -- 02:24 on a day whose window opens at
+        # 09:30 -- and a warning that fires every night is not read.
+        first_order = await first_live_order_at(session, usage.session_date)
+        bound = (
+            first_order.astimezone(MARKET_TIMEZONE).time()
+            if first_order is not None
+            else _clock(controls.trade_start_time)
+        )
         moved = changed_on(
-            await revision_history(session, TRADING_KEY, limit=200), usage.session_date, keys=PORTFOLIO_LIMITS
+            await revision_history(session, TRADING_KEY, limit=200),
+            usage.session_date,
+            keys=PORTFOLIO_LIMITS,
+            not_before=bound,
         )
         if moved:
             warnings += 1
-            line(WARN, "A limit this section compares against was saved today: " + ", ".join(moved) + ".")
+            line(WARN, "A limit these rows compare was saved while the day was live: " + ", ".join(moved) + ".")
             line("      ", "Any order sent before that was sized under the old figure, so the used and the")
             line("      ", "allowed sides of the rows below are two different configurations. The figures")
             line("      ", "agree again tomorrow.")

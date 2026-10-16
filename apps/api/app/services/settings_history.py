@@ -20,7 +20,7 @@ historical configuration by replaying diffs works until the one time it matters.
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, time
 from typing import Any
 
 from sqlalchemy import select
@@ -126,7 +126,13 @@ async def last_changed_per_key(session: AsyncSession, key: str) -> dict[str, str
     return stamps
 
 
-def changed_on(revisions: Iterable[SettingRevision], day: date, *, keys: Iterable[str]) -> list[str]:
+def changed_on(
+    revisions: Iterable[SettingRevision],
+    day: date,
+    *,
+    keys: Iterable[str],
+    not_before: time | None = None,
+) -> list[str]:
     """Which of ``keys`` moved in a save made on ``day``, with the time it moved.
 
     Exists for one question a report cannot otherwise answer honestly: a screen
@@ -144,6 +150,12 @@ def changed_on(revisions: Iterable[SettingRevision], day: date, *, keys: Iterabl
     Sorted by time internally, so the caller may hand revisions in either
     order. The day is an IST trading date; a revision written at 23:00 UTC
     belongs to the next one.
+
+    ``not_before`` drops the saves that cannot have mattered: pass the time the
+    day's first live order reached the broker, and an edit made before it is
+    silent. Without that bound this reported every overnight change -- 02:24 on
+    a day whose first entry was impossible before 09:30 -- and a warning that
+    fires on every ordinary run is one nobody reads by the third day.
     """
     wanted = {str(key) for key in keys}
     ordered = sorted((item for item in revisions if item.created_at is not None), key=lambda item: item.created_at)
@@ -151,6 +163,8 @@ def changed_on(revisions: Iterable[SettingRevision], day: date, *, keys: Iterabl
     for revision in ordered:
         local = revision.created_at.astimezone(MARKET_TIMEZONE)
         if local.date() != day:
+            continue
+        if not_before is not None and local.time() < not_before:
             continue
         for changed in revision.changed_keys or []:
             if str(changed) in wanted:

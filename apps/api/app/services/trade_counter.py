@@ -66,6 +66,25 @@ def session_bounds_utc(session_date: date) -> tuple[datetime, datetime]:
     return start_ist.astimezone(UTC), (start_ist + timedelta(days=1)).astimezone(UTC)
 
 
+async def first_live_order_at(session: AsyncSession, session_date: date) -> datetime | None:
+    """When the first live order of a session reached the broker, or None.
+
+    Exists so a report can tell an overnight settings edit from one made while
+    orders were live. A limit saved at 02:30 cannot have affected any order of
+    a day whose first entry is impossible before 09:30, and a report that
+    flagged every such edit would cry wolf on every run and be ignored by the
+    third one.
+    """
+    start, end = session_bounds_utc(session_date)
+    return await session.scalar(
+        select(func.min(LiveOrderSubmission.created_at)).where(
+            LiveOrderSubmission.created_at >= start,
+            LiveOrderSubmission.created_at < end,
+            LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
+        )
+    )
+
+
 def current_session_date() -> date:
     """Today's trading date in IST, which is not today's UTC date all day.
 

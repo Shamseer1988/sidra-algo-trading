@@ -55,8 +55,14 @@ from app.services.exit_quality import (  # noqa: E402
     tally,
 )
 from app.services.settings_history import changed_on, revision_history  # noqa: E402
-from app.services.trade_counter import LIVE_PLACED_STATUSES, current_session_date, session_bounds_utc  # noqa: E402
+from app.services.trade_counter import (  # noqa: E402
+    LIVE_PLACED_STATUSES,
+    current_session_date,
+    first_live_order_at,
+    session_bounds_utc,
+)
 from app.services.trade_history import LIVE, load_trades, summarise_days  # noqa: E402
+from app.services.trading_calendar import MARKET_TIMEZONE  # noqa: E402
 
 RULE = "=" * 96
 THIN = "-" * 96
@@ -89,6 +95,20 @@ def parse_day(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
+def _clock(value: str | None):
+    """An HH:MM setting as a time, or None when it cannot be read.
+
+    None rather than a guess: a midnight fallback would make every overnight
+    edit count as "while the day was live", which is the warning this bound
+    exists to silence.
+    """
+    try:
+        hour, minute = (int(part) for part in str(value).split(":"))
+        return datetime(2000, 1, 1, hour, minute).time()
+    except (TypeError, ValueError):
+        return None
+
+
 def heading(text: str) -> None:
     print("\n" + RULE + f"\n{text}\n" + RULE)
 
@@ -106,19 +126,55 @@ async def safety(session, day: date, records: list) -> int:  # noqa: ANN001
     heading(f"A. SAFETY — {day}")
     alarms = 0
 
-    still_open = [record for record in records if record.is_open]
-    if still_open:
+    # Three different states, and lumping them together under "still open"
+    # under-reported the worst of them. On 16 October a LONG of 5 showed a net
+    # of -5: not a position left open, a position exited for twice what was
+    # entered. The three need three sentences, because the action each one
+    # calls for is different.
+    over_exited = [record for record in records if record.open_quantity < 0]
+    left_open = [record for record in records if record.is_open and record.open_quantity > 0]
+    unfinished = [record for record in records if record.is_open and record.open_quantity == 0]
+
+    if over_exited:
         alarms += 1
-        print(f"  [ALARM] {len(still_open)} position(s) are still open after the close:")
-        for record in still_open:
+        print(f"  [ALARM] {len(over_exited)} position(s) were exited for MORE than was ever entered:")
+        for record in over_exited:
+            sold = record.quantity + abs(record.open_quantity)
+            print(
+                f"          {record.script_name}  {record.side}  entered {record.quantity}, "
+                f"closed {sold}, net {record.open_quantity}  charges {money(record.charges)}"
+            )
+        print("          This is not a position left open. Either two exits filled against one entry --")
+        print(
+            f"          in which case the account is really {'SHORT' if over_exited[0].side.upper() == 'LONG' else 'LONG'} "
+            "the difference, with no stop behind it --"
+        )
+        print("          or one exit was recorded twice and the broker is flat.")
+        print("          CHECK THE BROKER'S POSITIONS AND HOLDINGS BEFORE ANYTHING ELSE. An equity")
+        print("          short that reaches settlement is closed by exchange auction, and that bill is")
+        print(f"          not small. Then: inspect_live_day.py --date {day} shows every order and fill.")
+
+    if left_open:
+        alarms += 1
+        print(f"  [ALARM] {len(left_open)} position(s) are still open after the close:")
+        for record in left_open:
             print(
                 f"          {record.script_name}  {record.side}  {record.open_quantity} of "
                 f"{record.quantity} still open  charges so far {money(record.charges)}"
             )
         print("          Either the broker still holds it, or the exit filled and the ledger did not")
         print(f"          record it. Check the broker's app, then inspect_live_day.py --date {day}.")
-    else:
-        print("  [OK]    Every position opened on this date is closed in the ledger.")
+
+    if unfinished:
+        alarms += 1
+        print(f"  [ALARM] {len(unfinished)} position(s) have nothing left to close but are not marked closed:")
+        for record in unfinished:
+            print(f"          {record.script_name}  {record.side}  status {record.status}")
+        print("          The quantities balance, so the account is flat. The ledger did not finish")
+        print("          writing the exit, which means this trade is missing from every total above.")
+
+    if not (over_exited or left_open or unfinished):
+        print("  [OK]    Every position opened on this date is closed, and the quantities balance.")
 
     start, end = session_bounds_utc(day)
     rows = (
@@ -223,13 +279,21 @@ async def the_config(session, day: date) -> int:
 
     row = await session.get(ApplicationSetting, TRADING_KEY)
     controls = TradingControls(**(row.value if row else DEFAULT_TRADING_CONTROLS))
-    moved = changed_on(await revision_history(session, TRADING_KEY, limit=200), day, keys=WATCHED)
+    # Only a save that could have reached a live order counts. The first order
+    # of the day is the bound; with no order at all, the first minute an entry
+    # was permitted. An edit made at 02:24 on a day whose window opens at 09:30
+    # changed nothing that traded, and reporting it would make this warning
+    # fire on every ordinary night.
+    first = await first_live_order_at(session, day)
+    bound = first.astimezone(MARKET_TIMEZONE).time() if first is not None else _clock(controls.trade_start_time)
+    moved = changed_on(await revision_history(session, TRADING_KEY, limit=200), day, keys=WATCHED, not_before=bound)
     if moved:
-        print("  [NOTE]  Settings changed on this date: " + ", ".join(moved) + ".")
+        print("  [NOTE]  Settings changed while the day was live: " + ", ".join(moved) + ".")
         print("          The day above was traded under more than one configuration, so it cannot be")
         print("          compared against days either side of it. One change per decision, not per day.")
     else:
-        print("  [OK]    No setting that governs a trade moved on this date.")
+        when = "the first order went out" if first is not None else f"entries opened at {controls.trade_start_time}"
+        print(f"  [OK]    No setting that governs a trade moved after {when}.")
     print()
     print(
         f"  risk per trade             : {controls.risk_per_trade_percent}% of {money(Decimal(str(controls.account_capital)))}"
@@ -255,12 +319,7 @@ async def main() -> int:
 
         row = await session.get(ApplicationSetting, TRADING_KEY)
         controls = TradingControls(**(row.value if row else DEFAULT_TRADING_CONTROLS))
-        deadline = controls.session_square_off_time
-        try:
-            hour, minute = (int(part) for part in str(deadline).split(":"))
-            square_off = datetime(2000, 1, 1, hour, minute).time()
-        except (TypeError, ValueError):
-            square_off = None
+        square_off = _clock(controls.session_square_off_time)
 
         heading(f"DAILY REVIEW — {day}")
         print("  Run after the close. Paste the whole output; the decision is made from it.")

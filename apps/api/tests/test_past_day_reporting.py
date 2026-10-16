@@ -22,7 +22,7 @@ target untouched reads as a day the target allowed to run.
 """
 
 import sys
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -124,6 +124,33 @@ def test_the_latest_move_of_a_key_is_the_one_reported_whatever_the_order():
     ]
     assert changed_on(rows, TODAY, keys=("daily_loss_limit",)) == ["daily_loss_limit at 12:00"]
     assert changed_on(list(reversed(rows)), TODAY, keys=("daily_loss_limit",)) == ["daily_loss_limit at 12:00"]
+
+
+def test_an_overnight_edit_is_not_reported_as_a_mid_session_change():
+    """The false alarm this bound exists for. The operator edits settings at
+    02:30; the first entry of the day is impossible before 09:30, so that save
+    reached no order. Reporting it would fire this warning every night, and a
+    warning that fires every night is not read by the third day."""
+    overnight = revision(changed=["risk_per_trade_percent"], at=datetime(2026, 10, 15, 20, 54, tzinfo=UTC))
+    assert changed_on([overnight], TODAY, keys=("risk_per_trade_percent",)) == ["risk_per_trade_percent at 02:24"]
+    assert changed_on([overnight], TODAY, keys=("risk_per_trade_percent",), not_before=time(9, 30)) == []
+
+
+def test_a_save_made_while_orders_were_live_is_still_reported():
+    """The bound must not silence the case it was built around."""
+    midday = revision(changed=["maximum_daily_trades"], at=datetime(2026, 10, 16, 6, 20, tzinfo=UTC))
+    assert changed_on([midday], TODAY, keys=("maximum_daily_trades",), not_before=time(9, 30)) == [
+        "maximum_daily_trades at 11:50"
+    ]
+
+
+def test_a_save_in_the_same_minute_as_the_first_order_is_reported():
+    """Two events in one minute cannot be ordered from a timestamp, and the
+    safer reading is that the save may have reached the order."""
+    same = revision(changed=["daily_loss_limit"], at=datetime(2026, 10, 16, 4, 0, tzinfo=UTC))
+    assert changed_on([same], TODAY, keys=("daily_loss_limit",), not_before=time(9, 30)) == [
+        "daily_loss_limit at 09:30"
+    ]
 
 
 def test_every_limit_section_six_compares_is_watched():
