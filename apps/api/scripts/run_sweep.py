@@ -41,7 +41,11 @@ from sqlalchemy import func, select  # noqa: E402
 
 from app.db.models import ApplicationSetting, MarketCandle  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
-from app.services.backtest_sweep import SWEEPABLE, build_combinations, run_parameter_sweep  # noqa: E402
+from app.services.backtest_sweep import (  # noqa: E402
+    build_combinations,
+    run_parameter_sweep,
+    validate_grid,
+)
 from app.services.market_calculations import CompletedCandle  # noqa: E402
 from app.services.trading_calendar import MARKET_TIMEZONE  # noqa: E402
 
@@ -67,13 +71,25 @@ def heading(text: str) -> None:
     print("\n" + RULE + f"\n{text}\n" + RULE)
 
 
-def numbers(value: str) -> list[float]:
-    out: list[float] = []
+def numbers(value: str) -> list:
+    """Parse a comma-separated --param value.
+
+    Numbers stay numbers, and anything else stays text. Everything sweepable
+    used to be a number, so this called float() on every part -- which meant
+    ``trade_cutoff_time=13:30`` and ``trailing_rule=BREAKEVEN_AT_R`` crashed
+    before the grid was even built, and the two parameters most worth testing
+    could not be typed.
+    """
+    out: list = []
     for part in value.split(","):
         part = part.strip()
         if not part:
             continue
-        number = float(part)
+        try:
+            number = float(part)
+        except ValueError:
+            out.append(part)
+            continue
         out.append(int(number) if number.is_integer() else number)
     return out
 
@@ -213,7 +229,11 @@ async def main() -> int:
         "--param",
         action="append",
         default=[],
-        help="Any other sweepable parameter as key=v1,v2. Repeatable.",
+        help=(
+            "Any other sweepable parameter as key=v1,v2. Repeatable. Values may be text, "
+            "so --param trailing_rule=NONE,BREAKEVEN_AT_R and --param trade_cutoff_time=13:30,14:45 "
+            "both work."
+        ),
     )
     parser.add_argument("--sessions", type=int, default=60, help="How many of the most recent stored sessions.")
     parser.add_argument("--instrument", action="append", dest="instruments", help="Limit instruments; repeatable.")
@@ -247,10 +267,12 @@ async def main() -> int:
     if not grid:
         print("Nothing to sweep. Give at least --score, --rr or --param.")
         return 1
-    unknown = sorted(set(grid) - SWEEPABLE)
-    if unknown:
-        print(f"Not sweepable: {', '.join(unknown)}")
-        print(f"Sweepable parameters are: {', '.join(sorted(SWEEPABLE))}")
+    # One validator, shared with the API path, so a grid refused here is
+    # refused there for the same stated reason.
+    try:
+        validate_grid(grid)
+    except ValueError as error:
+        print(f"\n  {error}")
         return 1
 
     from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls

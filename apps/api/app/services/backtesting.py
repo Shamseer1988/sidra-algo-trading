@@ -13,6 +13,8 @@ from decimal import Decimal
 from hashlib import sha256
 
 from app.core.config import Settings
+from app.services.exit_rules import ExitRules, trail_to
+from app.services.exit_rules import from_controls as exit_rules_from
 from app.services.market_calculations import CompletedCandle, indicator_snapshot
 from app.services.paper_execution import (
     PaperExecutionControls,
@@ -115,17 +117,64 @@ def _exit_trade(
     candles: list[CompletedCandle],
     entry_index: int,
     execution_controls: PaperExecutionControls,
+    *,
+    entry_price: Decimal,
+    rules: ExitRules,
 ) -> tuple[Decimal, datetime, str]:
-    """Exit after the entry bar closes; simultaneous touches choose the protective stop."""
+    """Exit after the entry bar closes; simultaneous touches choose the protective stop.
+
+    The stop moves if the strategy's rules say it should. Until this existed the
+    backtest held one fixed stop for the whole trade, so a strategy with
+    break-even trailing switched on was measured as a strategy without it --
+    and a sweep over trailing values would have scored every variant
+    identically while appearing to test something.
+
+    ``trail_to`` is the paper and live engines' own function, called here with
+    the same arguments they pass: the entry *fill* for ``entry``, and
+    ``risk_per_unit`` from the signal's own entry and stop rather than from the
+    stop as it currently stands -- once the stop has moved, the distance to it
+    is no longer the R that "one R ahead" refers to.
+
+    The trail is applied **after** the candle's own hit check and from that
+    candle's close and extreme, which is what the paper engine does: it runs on
+    completed candles, so a level derived from a candle cannot also protect
+    that same candle. Inside one bar there is no way to know whether the
+    extreme came before or after the close, and assuming the favourable order
+    is how a backtest invents money.
+
+    ``atr`` is None on purpose. It is used only by ATR_TRAIL, which the live
+    path refuses to apply (``live_exit_manager``: moving a stop means cancel
+    and replace, so a rule that moves most minutes would leave the position
+    unprotected again and again). Passing None makes an ATR_TRAIL strategy
+    behave here the way it behaves live -- no trail -- rather than scoring a
+    backtest on an exit the account would never get.
+    """
     side = decision.side
     assert side and decision.stop_price and decision.target_price
+    stop = _decimal(decision.stop_price)
+    target = _decimal(decision.target_price)
+    # From the signal, like the paper engine, and fixed for the trade.
+    risk_per_unit = abs(_decimal(decision.entry_price) - _decimal(decision.stop_price))
+    trailed = False
     for candle in candles[entry_index + 1 :]:
-        stop_hit = candle.low <= decision.stop_price if side == "LONG" else candle.high >= decision.stop_price
-        target_hit = candle.high >= decision.target_price if side == "LONG" else candle.low <= decision.target_price
+        stop_hit = candle.low <= stop if side == "LONG" else candle.high >= stop
+        target_hit = candle.high >= target if side == "LONG" else candle.low <= target
         if stop_hit or target_hit:
-            reason = "STOP" if stop_hit else "TARGET"
-            reference = decision.stop_price if stop_hit else decision.target_price
+            reason = ("TRAIL_STOP" if trailed else "STOP") if stop_hit else "TARGET"
+            reference = stop if stop_hit else target
             return slipped_price(reference, exit_side(side), execution_controls.slippage_bps), candle.closed_at, reason
+        moved = trail_to(
+            side=side,
+            entry=entry_price,
+            current_stop=stop,
+            risk_per_unit=risk_per_unit,
+            candle_close=candle.close,
+            candle_extreme=candle.high if side == "LONG" else candle.low,
+            atr=None,
+            rules=rules,
+        )
+        if moved is not None:
+            stop, trailed = moved, True
     final_candle = candles[-1]
     return (
         slipped_price(final_candle.close, exit_side(side), execution_controls.slippage_bps),
@@ -294,7 +343,14 @@ def run_completed_candle_backtest(
                         entry_candle.open, entry_side(decision.side), execution_controls.slippage_bps
                     )
                     exit_price, exited_at, exit_reason = _exit_trade(
-                        decision, session_rows, index + 1, execution_controls
+                        decision,
+                        session_rows,
+                        index + 1,
+                        execution_controls,
+                        entry_price=entry_price,
+                        # The strategy's own rules, read the way paper reads
+                        # them, so a per-strategy override reaches the exit.
+                        rules=exit_rules_from(controls_for[key]),
                     )
                     entry_costs = transaction_costs(
                         entry_price, decision.quantity, entry_side(decision.side), execution_controls

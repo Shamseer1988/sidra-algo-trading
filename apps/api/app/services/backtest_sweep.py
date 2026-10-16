@@ -16,6 +16,7 @@ from itertools import product
 from types import SimpleNamespace
 
 from app.services.backtesting import run_completed_candle_backtest
+from app.services.exit_rules import ATR_TRAIL, BREAKEVEN_AT_R, NO_TRAIL
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_execution import PaperExecutionControls
 from app.services.strategy_registry import StrategyConfiguration
@@ -30,9 +31,32 @@ STRATEGY_PARAMS = {
     "max_trades_per_day",
     "cooldown_minutes",
 }
-CONTROL_PARAMS = {"stop_atr_multiple", "min_stop_distance_percent", "risk_per_trade_percent"}
+CONTROL_PARAMS = {
+    "stop_atr_multiple",
+    "min_stop_distance_percent",
+    "risk_per_trade_percent",
+    # When entries stop being taken. Already obeyed by every strategy through
+    # _inside_trade_window, so sweeping it needs no second implementation.
+    "trade_cutoff_time",
+}
 SETTINGS_PARAMS = {"opening_range_minutes", "ema_fast_period", "ema_slow_period", "atr_period"}
-SWEEPABLE = STRATEGY_PARAMS | CONTROL_PARAMS | SETTINGS_PARAMS
+# Carried by the strategy, but nested one level down in ``exit_rules`` rather
+# than sitting on the model itself -- so they cannot be applied by the flat
+# model_copy that every other strategy parameter uses, and they are kept apart
+# to make that difference visible rather than surprising.
+#
+# trailing_atr_multiple is deliberately absent: it only means anything to
+# ATR_TRAIL, and ATR_TRAIL is refused below.
+EXIT_PARAMS = {"trailing_rule", "trailing_trigger_r"}
+SWEEPABLE = STRATEGY_PARAMS | CONTROL_PARAMS | SETTINGS_PARAMS | EXIT_PARAMS
+
+# The trailing rules the live path will actually apply. live_exit_manager moves
+# a stop only for BREAKEVEN_AT_R; ATR_TRAIL is logged and ignored, because
+# moving a stop at the broker is a cancel and a replace, and a rule that moves
+# most minutes of the day would leave the position unprotected again and again.
+# Tuning a rule the account never executes is worse than not tuning at all, so
+# the sweep refuses it rather than reporting a result nobody can trade.
+LIVE_TRAILING_RULES = (NO_TRAIL, BREAKEVEN_AT_R)
 _SETTINGS_FIELDS = (
     "opening_range_minutes",
     "ema_fast_period",
@@ -67,10 +91,57 @@ class SweepResult:
     best_index: int | None
 
 
-def _normalise(value: float | int) -> float | int:
-    """Integral values become ``int`` so they can index candle lists and EMA periods."""
-    number = float(value)
+def _normalise(value: object) -> object:
+    """Integral values become ``int`` so they can index candle lists and EMA periods.
+
+    Text passes through untouched. Every sweepable parameter used to be a
+    number, so this coerced with float() -- which made a grid carrying
+    ``trailing_rule=NONE`` or ``trade_cutoff_time=13:30`` raise here, inside
+    the de-duplication, long before anything could explain why.
+    """
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return value
     return int(number) if number.is_integer() else number
+
+
+def validate_grid(grid: dict[str, list]) -> None:
+    """Refuse a grid that would tune something the live account cannot use.
+
+    Raises ValueError with the reason. Called before any replay starts, because
+    the whole cost of a sweep is paid before a wrong answer is printed.
+    """
+    unknown = sorted(set(grid) - SWEEPABLE)
+    if unknown:
+        raise ValueError(f"Not sweepable: {', '.join(unknown)}. Sweepable: {', '.join(sorted(SWEEPABLE))}")
+
+    for value in grid.get("trailing_rule", []):
+        rule = str(value).strip().upper()
+        if rule == ATR_TRAIL:
+            raise ValueError(
+                "trailing_rule=ATR_TRAIL cannot be swept: the live path never applies it. "
+                "live_exit_manager moves a stop only for BREAKEVEN_AT_R, because moving one at "
+                "the broker means cancelling the resting order and placing another, and a rule "
+                "that moves most minutes of the day would leave the position unprotected over "
+                "and over. A backtest of it would score an exit the account would never get. "
+                f"Sweep {' or '.join(LIVE_TRAILING_RULES)} instead."
+            )
+        if rule not in LIVE_TRAILING_RULES:
+            raise ValueError(f"trailing_rule={value!r} is not a rule: use {' or '.join(LIVE_TRAILING_RULES)}.")
+
+    for value in grid.get("trade_cutoff_time", []):
+        text = str(value).strip()
+        try:
+            hour, minute = (int(part) for part in text.split(":"))
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError
+        except ValueError as error:
+            raise ValueError(
+                f"trade_cutoff_time={value!r} must be HH:MM in IST, for example 13:30. "
+                "It is compared as text against each candle's IST time, so a different "
+                "spelling would silently compare wrongly rather than fail."
+            ) from error
 
 
 def build_combinations(grid: dict[str, list], maximum: int) -> list[dict]:
@@ -212,6 +283,9 @@ def run_parameter_sweep(
     and one that prints nothing until it is done is one an operator kills
     because they cannot tell it from a hang.
     """
+    # Before anything is replayed: a sweep costs hours, and a grid that was
+    # never going to produce a usable answer should say so in a second.
+    validate_grid(grid)
     combos = build_combinations(grid, maximum_combinations)
     session_dates = sorted({candle.session_date for rows in candles_by_instrument.values() for candle in rows})
     in_sample_dates, validation_dates = _partition_dates(session_dates, validation_fraction)
@@ -226,6 +300,12 @@ def run_parameter_sweep(
     # A grid touching CONTROL_PARAMS or SETTINGS_PARAMS cannot share a pass:
     # those change the controls dict or the indicator periods, which the
     # replay takes once for the whole run. Those still go one at a time.
+    #
+    # EXIT_PARAMS are excluded too, though a strategy does carry them and they
+    # could in principle share. One replay per variant costs minutes and
+    # cannot be subtly wrong; sharing one would put the nested exit_rules
+    # rebuild on a second code path, and a variant that quietly kept the base
+    # rules would score as a difference that is not there.
     if combos and len(combos) > 1 and set(grid) <= STRATEGY_PARAMS:
         return _one_pass(
             base_strategy,
@@ -248,6 +328,15 @@ def run_parameter_sweep(
         strategy_variant = base_strategy.model_copy(
             update={key: value for key, value in combo.items() if key in STRATEGY_PARAMS}
         )
+        # exit_rules is a model inside the model, so a flat update cannot reach
+        # it: model_copy would attach the loose keys to the strategy, where
+        # nothing reads them, and every variant would replay identically while
+        # appearing to test something.
+        exit_overrides = {key: value for key, value in combo.items() if key in EXIT_PARAMS}
+        if exit_overrides:
+            strategy_variant = strategy_variant.model_copy(
+                update={"exit_rules": strategy_variant.exit_rules.model_copy(update=exit_overrides)}
+            )
         controls_variant = {
             **base_controls,
             **{key: value for key, value in combo.items() if key in CONTROL_PARAMS},
