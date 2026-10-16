@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import func, select  # noqa: E402
 
-from app.db.models import ApplicationSetting, LiveOrderSubmission, PaperPosition  # noqa: E402
+from app.db.models import ApplicationSetting, LiveOrderSubmission, PaperOrder, PaperPosition  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.services.execution_quality import (  # noqa: E402
     cost_of_trading,
@@ -121,6 +121,39 @@ def figure(value: Decimal | None, width: int = 8) -> str:
     return f"{'—':>{width}}" if value is None else f"{value:>{width},.2f}"
 
 
+async def paper_orders(session, record) -> None:  # noqa: ANN001
+    """Every simulated order behind one position, oldest first.
+
+    Printed only for a position whose quantities do not balance, because that
+    is the one case where the totals cannot be trusted and the question is
+    which orders filled. Reading the engine cannot answer it -- the one-cancels-
+    other is written to fire when a fill brings the quantity to exactly zero,
+    so a fill that takes it past zero leaves the counterpart alive, and which
+    fill did that is a fact about these rows and not about the code.
+
+    These are the simulator's own orders. The live orders that went to the
+    broker are a separate record; inspect_live_day.py prints those.
+    """
+    rows = (
+        await session.scalars(
+            select(PaperOrder)
+            .where(PaperOrder.paper_signal_id == record.signal_id)
+            .order_by(PaperOrder.created_at.asc())
+        )
+    ).all()
+    for order in rows:
+        trail = (order.simulation_snapshot or {}).get("trail")
+        note = (order.simulation_snapshot or {}).get("reason") or order.rejection_reason or ""
+        print(
+            f"            {order.order_role:<7}{order.order_type:<8}{order.status:<12}"
+            f"qty {order.quantity:<4}filled {order.filled_quantity:<4}"
+            f"at {'—' if order.average_fill_price is None else f'{order.average_fill_price:,.2f}':<10}"
+            f"{order.created_at.astimezone(MARKET_TIMEZONE).strftime('%H:%M')}"
+            f"{'  trailed ' + str(len(trail)) + 'x' if trail else ''}"
+            f"{'  ' + note if note else ''}"
+        )
+
+
 async def safety(session, day: date, records: list) -> int:  # noqa: ANN001
     """What must be looked at before the next session. Returns the alarm count."""
     heading(f"A. SAFETY — {day}")
@@ -153,6 +186,9 @@ async def safety(session, day: date, records: list) -> int:  # noqa: ANN001
         print("          CHECK THE BROKER'S POSITIONS AND HOLDINGS BEFORE ANYTHING ELSE. An equity")
         print("          short that reaches settlement is closed by exchange auction, and that bill is")
         print(f"          not small. Then: inspect_live_day.py --date {day} shows every order and fill.")
+        for record in over_exited:
+            print(f"          the simulator's orders behind {record.script_name}:")
+            await paper_orders(session, record)
 
     if left_open:
         alarms += 1
@@ -172,6 +208,9 @@ async def safety(session, day: date, records: list) -> int:  # noqa: ANN001
             print(f"          {record.script_name}  {record.side}  status {record.status}")
         print("          The quantities balance, so the account is flat. The ledger did not finish")
         print("          writing the exit, which means this trade is missing from every total above.")
+        for record in unfinished:
+            print(f"          the simulator's orders behind {record.script_name}:")
+            await paper_orders(session, record)
 
     if not (over_exited or left_open or unfinished):
         print("  [OK]    Every position opened on this date is closed, and the quantities balance.")
@@ -249,6 +288,7 @@ async def the_record(session, day: date) -> None:
     records = await load_trades(session, first, day, execution_mode=LIVE)
     days = await summarise_days(session, records, first, day, execution_mode=LIVE)
     total = summarise_r(records, label="ALL")
+    excluded = [record for record in records if record.is_open]
     if not total.trades:
         print("  No closed live trades on record.")
         return
@@ -267,6 +307,22 @@ async def the_record(session, day: date) -> None:
     print(f"  charges                    : {money(cost.total)}" + ("" if cost.is_complete else "  (partly estimated)"))
     print(f"  net                        : {money(total.net_pnl)}")
     print(f"  -> {r_verdict(total)}")
+    if excluded:
+        # Said out loud because the alternative is a record that is quietly
+        # short of trades that really happened. The JSWSTEEL trade of 16
+        # October ran correctly at the broker -- bought, sold, stop cancelled --
+        # and was absent from all fifteen rows above because its simulated
+        # quantities did not balance.
+        print()
+        print(f"  {len(excluded)} position(s) are NOT in the totals above, because their quantities do not")
+        print("  balance and a trade with no settled quantity has no result to count:")
+        for record in excluded:
+            print(
+                f"    {record.session_date}  {record.script_name}  {record.side}  status {record.status}  "
+                f"net {record.open_quantity} of {record.quantity}  charges {money(record.charges)}"
+            )
+        print("  Their charges ARE in the day totals, because the broker billed them. So the gross and")
+        print("  the charges above are measured over different sets of trades until these are settled.")
     if not cost.is_complete:
         named = ", ".join(str(item) for item in cost.estimated_days)
         print(f"     The broker has not billed {named}. Run backfill_broker_history.py once it has.")
