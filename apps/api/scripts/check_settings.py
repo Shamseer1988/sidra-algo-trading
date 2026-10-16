@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.db.models import ApplicationSetting  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
+from app.services.exit_rules import BREAKEVEN_AT_R, NO_TRAIL  # noqa: E402
 from app.services.live_usage import cap_lines, live_usage  # noqa: E402
 from app.services.settings_history import changed_on, revision_history  # noqa: E402
 from app.services.trade_counter import first_live_order_at  # noqa: E402
@@ -479,6 +480,24 @@ async def main() -> int:
                 f"   sides: {','.join(configuration.allowed_sides)}"
             )
             print(f"         {'hold':7}: {f'{held} minutes' if held else 'no time limit'}")
+
+            # How the stop is managed after entry. Missing from this section
+            # until now, which left the one setting an operator most wants to
+            # confirm -- trailing, newly switched on -- visible nowhere it
+            # could be read back. ATR_TRAIL is called out because the live exit
+            # manager does not apply it: it would mean cancelling and replacing
+            # the resting stop most minutes of the day, leaving the position
+            # unprotected for a round trip each time. Chosen in paper, it
+            # trades as NONE.
+            rule = configuration.exit_rules.trailing_rule
+            if rule == NO_TRAIL:
+                print(f"         {'trail':7}: the stop never moves")
+            elif rule == BREAKEVEN_AT_R:
+                trigger = configuration.exit_rules.trailing_trigger_r
+                print(f"         {'trail':7}: stop to entry once {trigger}R ahead, live and on paper")
+            else:
+                problems += 1
+                line(BAD, f"{name} uses {rule}, which the live path never applies; live trades do not trail.")
 
             for label, key, always_own in (
                 # minimum_rr, like minimum_score, is written into the effective
