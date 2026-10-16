@@ -120,6 +120,36 @@ def test_a_fill_a_tick_short_of_the_target_still_counts_as_the_target():
     assert shape(exit_price="407.95").verdict == TARGET
 
 
+def test_a_live_market_exit_near_the_target_is_the_target():
+    """The 16 October JSWSTEEL exit, in this fixture's numbers. A live target
+    exit is not a resting limit: the manager watches for the close to cross the
+    level and then sends a MARKET order, so the fill lands near the target
+    rather than on it. That one came in 0.05R short of a 1.91R plan -- a good
+    fill -- and a tighter test called it "left early", which is the one verdict
+    that has to mean something was cutting trades short.
+    """
+    # 2R plan, exiting 0.05R short of it: 8.00 reward less 0.20.
+    result = shape(exit_price="407.80")
+    assert result.gross_r == Decimal("1.95")
+    assert result.verdict == TARGET
+
+
+def test_a_trade_that_gave_up_a_third_of_its_target_is_not_the_target():
+    """The margin must stay narrow enough to leave the case this exists to
+    find. Two thirds of a 2R target is 0.7R short, and no tick allowance
+    reaches that."""
+    result = shape(exit_price="405.32")
+    assert result.gross_r == Decimal("1.33")
+    assert result.reach == Decimal("0.66")
+    assert result.verdict == EARLY
+
+
+def test_a_stop_a_tenth_short_of_its_trigger_is_still_the_stop():
+    """A stop that slipped the other way -- filled just before the level, which
+    a gap through it can do -- is the stop, not an early exit."""
+    assert shape(exit_price="396.40").verdict == STOP
+
+
 def test_the_stop_is_named_even_when_it_slipped_past():
     """A stop fills past its trigger in a fast market; -1.06R is the stop."""
     assert shape(exit_price="395.75").verdict == STOP

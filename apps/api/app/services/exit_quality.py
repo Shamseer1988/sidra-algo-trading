@@ -48,11 +48,22 @@ LABELS = {
     UNKNOWN: "no fill or no risk recorded, so the shape cannot be measured",
 }
 
-# Within 2% of a level counts as that level. A stop fills a tick or two past its
-# trigger and a target fills a tick or two short of its limit; demanding the
-# exact figure would file most real exits under "left early" and bury the thing
-# this exists to find.
-AT_LEVEL = Decimal("0.98")
+# How near a level still counts as having reached it, in R: a tenth of the risk
+# the trade took, either side.
+#
+# It has to be this wide because a live target exit is not a resting limit. The
+# exit manager watches for the close to cross the target and then sends a
+# MARKET order, so the fill lands near the level rather than on it. The 16
+# October JSWSTEEL exit came in 0.05R short of its target -- a good fill for a
+# market order -- and a tighter test filed it as "left early", which is the one
+# verdict that has to mean something was cutting trades short. A target that
+# works, counted among trades being cut, would send a diagnosis in exactly the
+# wrong direction.
+#
+# A tenth of R is also narrow enough to leave the case this exists to find: a
+# trade that collected two thirds of a 2R target is 0.7R short of it, and no
+# margin of this size reaches that.
+MARGIN_R = Decimal("0.10")
 
 # How close to the deadline still counts as the deadline. The exit sweep runs
 # once a minute and a market order takes a moment to come back, so an exit the
@@ -116,18 +127,21 @@ def shape(record: TradeRecord, *, square_off: time | None) -> ExitShape:
 
 
 def _verdict(gross_r: Decimal | None, planned_rr: Decimal | None, closed: time | None, square_off: time | None) -> str:
-    """Price first, then the clock.
+    """The levels first, then the clock.
+
+    Both levels are a fixed distance from the fill in R -- the stop is exactly
+    -1R by construction, the target is ``planned_rr`` -- so the whole test is
+    how near the result came to one of them, within ``MARGIN_R``.
 
     A trade that reached its target at 14:58 reached its target; the deadline
     two minutes later did not close it. So the levels are tested before the
-    clock, and only an exit that is at neither level is attributed to the
-    deadline.
+    clock, and only an exit at neither level is attributed to the deadline.
     """
     if gross_r is None:
         return UNKNOWN
-    if planned_rr is not None and gross_r >= planned_rr * AT_LEVEL:
+    if planned_rr is not None and gross_r >= planned_rr - MARGIN_R:
         return TARGET
-    if gross_r <= -AT_LEVEL:
+    if gross_r <= -(Decimal("1") - MARGIN_R):
         return STOP
     if closed is not None and square_off is not None and _within_deadline(closed, square_off):
         return SQUARE_OFF
