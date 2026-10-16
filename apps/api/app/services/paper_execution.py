@@ -303,7 +303,13 @@ class PaperOrderManager:
             position.open_quantity -= quantity
             position.current_price = candle.close
             position.fees_total = _money(Decimal(str(position.fees_total)) + costs.total)
-            position.status = "CLOSED" if position.open_quantity == 0 else "REDUCING"
+            # ``<= 0`` rather than ``== 0``. The clamp above means a fill can no
+            # longer take the quantity past zero, but a position that ever did
+            # land there stayed REDUCING for good: the counterpart was never
+            # cancelled and the trade was read as still open by every report
+            # that asks. A state the system cannot recover from is worth one
+            # character to avoid.
+            position.status = "CLOSED" if position.open_quantity <= 0 else "REDUCING"
             if position.status == "CLOSED":
                 position_closed = True
                 position.closed_at = candle.closed_at
@@ -565,6 +571,21 @@ class PaperOrderManager:
                             PaperOrder.eligible_after <= candle.opened_at,
                         )
                         .order_by(PaperOrder.order_role.desc(), PaperOrder.created_at)
+                        # Locked, because two candles of one instrument can be in
+                        # flight at once and an order is the thing they share. On
+                        # 16 October the 11:41 and 11:42 candles both found one
+                        # TARGET order PENDING, both filled it, and both wrote
+                        # filled_quantity = 0 + 5: the order ended up reading as a
+                        # single fill while two fills existed and the position had
+                        # been moved twice. The second pass then read the position
+                        # after the first had committed, so a long of 5 settled at
+                        # a net of -5 and never reached the status that cancels the
+                        # counterpart. One real completed trade left the record
+                        # entirely, and nothing but an alarm said so.
+                        #
+                        # The lock makes the second pass wait and then see FILLED,
+                        # which is what the status test below has always assumed.
+                        .with_for_update()
                     )
                 ).all()
             )
@@ -587,6 +608,20 @@ class PaperOrderManager:
                     continue
                 remaining = order.quantity - order.filled_quantity
                 quantity = min(remaining, fill_capacity(candle.volume, controls.participation_percent))
+                if order.order_role in EXIT_ROLES:
+                    # Belt and braces behind the lock. An exit that closes more
+                    # than is open is not a worse fill, it is a quantity that
+                    # never existed: the position goes net short of itself, the
+                    # status never reaches CLOSED, and the trade disappears from
+                    # every total while its charges stay in the day's. Bounded
+                    # here so the worst any future race can do is fill nothing.
+                    held = await session.scalar(
+                        select(PaperPosition.open_quantity)
+                        .where(PaperPosition.paper_signal_id == order.paper_signal_id)
+                        .with_for_update()
+                    )
+                    if held is not None:
+                        quantity = min(quantity, max(0, held))
                 if quantity > 0:
                     if await self._apply_fill(session, order, signal, candle, controls, reference, quantity):
                         settled_signal_ids.add(signal.id)
