@@ -31,11 +31,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.db.models import ApplicationSetting  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
 from app.services.live_usage import cap_lines, live_usage  # noqa: E402
+from app.services.settings_history import changed_on, revision_history  # noqa: E402
 
 OK, WARN, BAD = (
     "[OK]  ",
     "[WARN]",
     "[BAD] ",
+)
+
+# The saved controls section 6's two halves are built from. A save that moves
+# one of these mid-session leaves the "used" side describing orders sized under
+# the old figure and the "allowed" side describing the new one.
+PORTFOLIO_LIMITS = (
+    "account_capital",
+    "risk_per_trade_percent",
+    "maximum_daily_risk_percent",
+    "maximum_open_positions",
+    "maximum_open_exposure_percent",
+    "intraday_leverage_enabled",
+    "intraday_leverage_multiplier",
+    "universe_min_share_price",
+    "universe_max_share_price",
+    "daily_loss_limit",
+    "daily_profit_target",
 )
 
 
@@ -66,6 +84,60 @@ def sizing_room(controls) -> Decimal:  # noqa: ANN001 - the settings model, impo
     return floor + (min(drifts) if drifts else Decimal("0"))
 
 
+def best_reward_multiple(stored: list, account_rr: float) -> tuple[Decimal, str]:
+    """The highest reward:risk any enabled strategy will actually take.
+
+    Not the account's ``minimum_rr``. Every strategy writes its own into the
+    effective controls unconditionally -- section 5 says so in as many words --
+    so the account figure governs nothing. A profit target judged against it
+    would warn about a target the strategies can reach, or stay silent about
+    one they cannot, and either way the warning would be about a number no
+    trade is sized from.
+
+    The highest rather than the average, because the test below is whether the
+    target is reachable *at all*: a day of the best strategy's trades is the
+    best day available, and a target above that can never fire.
+    """
+    from app.services.strategy_registry import StrategyConfiguration
+
+    found: list[tuple[float, str]] = []
+    for item in stored:
+        try:
+            configuration = StrategyConfiguration.model_validate(item)
+        except Exception:  # an unreadable row is reported by section 5, not here
+            continue
+        if configuration.enabled:
+            found.append((configuration.minimum_rr, configuration.name[:30]))
+    if not found:
+        return Decimal(str(account_rr)), "the account's minimum_rr, as no enabled strategy could be read"
+    reward, name = max(found)
+    return Decimal(str(reward)), f"{name}, whose {reward} reward:risk is the highest of any enabled strategy"
+
+
+def best_day_available(
+    *, per_trade: Decimal, ceiling: int, funded: int, stored: list, account_rr: float
+) -> tuple[Decimal, str]:
+    """The most a day can make if every trade the settings permit hits target.
+
+    Optimistic in three ways, all deliberate: charges are ignored, whole-share
+    rounding is ignored, and the best enabled strategy's reward:risk is used
+    rather than a blend. So a target below this figure may still be out of
+    reach in practice -- and a target above it cannot be reached at all, which
+    is the only claim made from it.
+
+    ``funded`` matters because the daily risk budget can pay for fewer trades
+    than the trade ceiling allows, and then the budget is what the day really
+    ends on. The smaller of the two is the number of trades available.
+    """
+    takeable = min(ceiling, funded) if funded > 0 else ceiling
+    reward, source = best_reward_multiple(stored, account_rr)
+    best = per_trade * takeable * reward
+    return best, (
+        f"{takeable} trade(s) x {per_trade:,.2f} risked x {reward} reward:risk = {best:,.2f}, every one "
+        f"hitting its target, taken from {source}"
+    )
+
+
 def line(flag: str, text: str) -> None:
     print(f"  {flag} {text}")
 
@@ -88,6 +160,10 @@ async def main() -> int:
         row = await session.get(ApplicationSetting, TRADING_KEY)
         controls = TradingControls(**(row.value if row else DEFAULT_TRADING_CONTROLS))
         capital = Decimal(str(controls.account_capital))
+        # Loaded here rather than in section 5, because section 2 now judges the
+        # profit target against the reward:risk the strategies will really use.
+        strategies_row = await session.get(ApplicationSetting, STRATEGIES_KEY)
+        stored = strategies_row.value if strategies_row else DEFAULT_STRATEGIES
 
         heading("1. What one trade risks")
         per_trade = capital * Decimal(str(controls.risk_per_trade_percent)) / 100
@@ -162,6 +238,27 @@ async def main() -> int:
                 f"The loss stop ({controls.daily_loss_limit:,.2f}) is above {ceiling} full stops ({full_loss:,.2f}).",
             )
             line("      ", "The trade ceiling will end the day first; the loss stop will never fire.")
+
+        # The mirror of the loss stop, and the one that was missing. A target
+        # above the best day the settings permit is not a target, it is a switch
+        # that is permanently off -- and a day that ends on the trade ceiling
+        # with the target untouched reads as a day the target allowed to run.
+        best_day, basis = best_day_available(
+            per_trade=per_trade,
+            ceiling=ceiling,
+            funded=funded,
+            stored=stored,
+            account_rr=controls.minimum_rr,
+        )
+        target = Decimal(str(controls.daily_profit_target))
+        if target > 0 and target > best_day:
+            warnings += 1
+            line(WARN, f"The profit target ({target:,.2f}) is above the best day these settings allow.")
+            line("      ", basis + ".")
+            line("      ", "So it can never fire; the day will end on the trade ceiling instead. Charges and")
+            line("      ", "whole-share rounding make the real best day smaller again.")
+        elif target > 0:
+            line(OK, f"The profit target ({target:,.2f}) is inside the best day these settings allow ({basis}).")
 
         heading("3. Exposure")
         leverage = (
@@ -335,8 +432,6 @@ async def main() -> int:
                     line(WARN, f"A {cap_r}R cap gives away half the planned stop distance before entry.")
 
         heading("5. What each strategy will actually use")
-        row = await session.get(ApplicationSetting, STRATEGIES_KEY)
-        stored = row.value if row else DEFAULT_STRATEGIES
         base = controls.model_dump()
         for item in stored:
             try:
@@ -441,6 +536,23 @@ async def main() -> int:
         usage = await live_usage(session)
         print()
         print(f"  Today's live account, {usage.session_date}:")
+        # The two halves of every row below come from different places. The
+        # limit is read from the controls as they stand now; the usage is
+        # totalled from orders already sent, each sized under whatever was saved
+        # when it went out. Identical until somebody saves a limit mid-session,
+        # and nothing on the screen said which case the reader was in.
+        print("    The limits are the settings as saved now. The usage is totalled from orders already")
+        print("    sent, each sized by the settings in force when it went out.")
+        moved = changed_on(
+            await revision_history(session, TRADING_KEY, limit=200), usage.session_date, keys=PORTFOLIO_LIMITS
+        )
+        if moved:
+            warnings += 1
+            line(WARN, "A limit this section compares against was saved today: " + ", ".join(moved) + ".")
+            line("      ", "Any order sent before that was sized under the old figure, so the used and the")
+            line("      ", "allowed sides of the rows below are two different configurations. The figures")
+            line("      ", "agree again tomorrow.")
+        print()
         for text in cap_lines(usage):
             print(f"    {text}" if text else "")
 

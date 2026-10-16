@@ -18,13 +18,16 @@ has to be explicable by the settings that produced it, and reconstructing a
 historical configuration by replaying diffs works until the one time it matters.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import SettingRevision
+from app.services.trading_calendar import MARKET_TIMEZONE
 
 # Limits that can be loosened. Tightening one needs no explanation later;
 # raising one is the change somebody may have to account for, so it is named in
@@ -121,6 +124,38 @@ async def last_changed_per_key(session: AsyncSession, key: str) -> dict[str, str
         for changed in revision.changed_keys or []:
             stamps[str(changed)] = when
     return stamps
+
+
+def changed_on(revisions: Iterable[SettingRevision], day: date, *, keys: Iterable[str]) -> list[str]:
+    """Which of ``keys`` moved in a save made on ``day``, with the time it moved.
+
+    Exists for one question a report cannot otherwise answer honestly: a screen
+    that shows what today has used against what today allows is comparing
+    orders already sent against limits read from the settings as they stand
+    now. Those are the same thing until somebody saves a limit mid-session, and
+    then the two halves describe different configurations -- with no sign on
+    the screen that they do.
+
+    Six account settings were changed across two sessions here, so the case is
+    not hypothetical. Reported per key with its latest time on the day, because
+    "maximum_daily_trades at 11:20" tells an operator which of their orders
+    were sized before it and "the settings changed" does not.
+
+    Sorted by time internally, so the caller may hand revisions in either
+    order. The day is an IST trading date; a revision written at 23:00 UTC
+    belongs to the next one.
+    """
+    wanted = {str(key) for key in keys}
+    ordered = sorted((item for item in revisions if item.created_at is not None), key=lambda item: item.created_at)
+    moved: dict[str, str] = {}
+    for revision in ordered:
+        local = revision.created_at.astimezone(MARKET_TIMEZONE)
+        if local.date() != day:
+            continue
+        for changed in revision.changed_keys or []:
+            if str(changed) in wanted:
+                moved[str(changed)] = local.strftime("%H:%M")
+    return [f"{key} at {when}" for key, when in sorted(moved.items())]
 
 
 async def revision_history(session: AsyncSession, key: str, limit: int = 50) -> list[SettingRevision]:

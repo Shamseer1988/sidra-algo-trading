@@ -48,6 +48,38 @@ def parse_day(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
+def today_ist() -> date:
+    return datetime.now(MARKET_TIMEZONE).date()
+
+
+def stale_book_note(session_date: date, *, today: date | None = None) -> str | None:
+    """Why the broker's books are not the asked-for date's, when they are not.
+
+    ``normalised_orders`` and ``normalised_positions`` take no date. They
+    answer with whatever the account holds at the moment they are called, and
+    Upstox's order book is intraday -- cleared between sessions -- so asked
+    about a past date they answer about now. That answer was then printed
+    under a heading naming the past date.
+
+    An operator reading "LIVE SESSION 2026-10-15 ... POSITIONS: TATAPOWER"
+    had no way to see that TATAPOWER was open *today*; everything above that
+    line really was the 15th, read from our own records. Two sources, one
+    heading, and the only difference between them was invisible.
+
+    Returns None for today, where the two agree and a disclaimer would be
+    noise on every ordinary run.
+    """
+    now = today or today_ist()
+    if session_date >= now:
+        return None
+    return (
+        f"The broker's books below are the account as it stands on {now}, NOT on {session_date}. "
+        "They take no date: the order book is intraday and holds nothing from a past session, and "
+        f"a position shown here is open now. Everything above this line is {session_date}'s, from "
+        "our own records."
+    )
+
+
 def order_shape(record, sent_priceless: bool) -> str | None:  # noqa: ANN001
     """The limit the broker is holding an order at, when we did not set one.
 
@@ -227,6 +259,16 @@ async def report_live_caps(session_date: date, *, adapter) -> None:  # noqa: ANN
     print(RULE)
     print(f"LIVE CAPS AND WHAT {session_date} HAS USED")
     print(RULE)
+    # Half of this section is date-scoped and half is not. The allocation is
+    # totalled from that date's own live submissions; the position and exposure
+    # figures come from the broker's book, which is always now. On a past date
+    # the two halves are different days and the heading named only one.
+    stale = stale_book_note(session_date)
+    if stale is not None and adapter is not None:
+        print(f"  [NOTE] The allocation below is {session_date}'s, from our own records. The position and")
+        print(f"         exposure figures are the broker's book as of {today_ist()}, because the book takes")
+        print("         no date -- so on a past session they answer a question about now.")
+        print()
     async with SessionLocal() as session:
         usage = await live_usage(session, adapter=adapter, session_date=session_date)
     hint = (
@@ -364,12 +406,16 @@ async def main(args) -> int:
     from app.services.live_execution_gateway import live_report_adapter
     from app.services.upstox_orders import UpstoxError
 
+    stale = stale_book_note(session_date)
     brokers = {row.broker for row in rows if row.broker} or {None}
     for broker in sorted(brokers, key=str):
         print()
         print(RULE)
-        print(f"BROKER ORDER BOOK — {broker or 'default'}")
+        print(f"BROKER ORDER BOOK — {broker or 'default'}{'' if stale is None else f'  (as of {today_ist()})'}")
         print(RULE)
+        if stale is not None:
+            print(f"  [NOTE] {stale}")
+            print()
         try:
             async with SessionLocal() as session:
                 adapter = await live_report_adapter(settings, session, broker)
@@ -421,7 +467,7 @@ async def main(args) -> int:
 
         print()
         print(THIN)
-        print("POSITIONS")
+        print("POSITIONS" if stale is None else f"POSITIONS — current broker book, not {session_date}")
         print(THIN)
         for record in positions:
             print(
