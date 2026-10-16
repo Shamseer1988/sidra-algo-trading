@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import LiveOrderSubmission, PaperSignal, RiskReservation
 from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
-from app.services.trade_history import DaySummary, TradeRecord
+from app.services.trade_history import SCRATCH, DaySummary, TradeRecord
 
 # What a sample of live trades can support. Not a formula — a working rule a
 # trader would recognise, stated so a reader is not left to guess which of the
@@ -47,6 +47,9 @@ TOO_FEW = 30
 INDICATIVE = 100
 
 ENTRY_TYPES = frozenset({"LIMIT", "MARKET"})
+
+# ``strategy_version`` is written as ``type@version``.
+TYPE_SEPARATOR = "@"
 
 
 def _money(value: object) -> Decimal:
@@ -317,6 +320,51 @@ def summarise_charges(records: list[TradeRecord], days: list[DaySummary]) -> Cha
     return charges
 
 
+@dataclass
+class CostOfTrading:
+    """What a range cost, taking the best figure available for each day in it."""
+
+    settled: Decimal = Decimal("0")
+    settled_days: int = 0
+    estimated: Decimal = Decimal("0")
+    estimated_days: tuple[date, ...] = ()
+    total: Decimal = Decimal("0")
+
+    @property
+    def is_complete(self) -> bool:
+        """True when every day in the range has been billed by the broker."""
+        return not self.estimated_days
+
+
+def cost_of_trading(days: list[DaySummary]) -> CostOfTrading:
+    """The broker's own charges for every day it has published them, plus this
+    system's estimate for the rest.
+
+    Not one source or the other. ``summarise_charges`` reports whichever it has
+    and is right for a screen that shows the two side by side; a *total* that
+    took the broker's figure for the four settled days of a six-day range and
+    called it the cost of the range would understate it by the two days the
+    broker has not billed yet -- and the error always points the same way,
+    towards a cheaper and more flattering result.
+
+    ``estimated_days`` is returned rather than counted so the caller can name
+    the days, because the only useful response to an incomplete cost figure is
+    to go and fetch those days.
+    """
+    cost = CostOfTrading()
+    pending: list[date] = []
+    for day in days:
+        if day.broker_charges is not None:
+            cost.settled += day.broker_charges
+            cost.settled_days += 1
+        else:
+            cost.estimated += day.charges
+            pending.append(day.session_date)
+    cost.estimated_days = tuple(sorted(pending))
+    cost.total = cost.settled + cost.estimated
+    return cost
+
+
 def summarise_strategies(records: list[TradeRecord]) -> list[StrategyQuality]:
     grouped: dict[str, list[TradeRecord]] = {}
     for record in records:
@@ -336,31 +384,185 @@ def summarise_strategies(records: list[TradeRecord]) -> list[StrategyQuality]:
     return sorted(rows, key=lambda row: row.net, reverse=True)
 
 
-def read_verdict(expectancy: Expectancy) -> str:
+def strategy_type(record: TradeRecord) -> str:
+    """The strategy behind a trade, without its version.
+
+    ``strategy_version`` is written as ``type@version`` and the version is
+    bumped every time the strategy is saved -- ORB went from v12 to v15 in three
+    days during which its logic did not change once. Grouping by the whole
+    string therefore scatters one strategy across a row per save, each row
+    holding too few trades to read, which is how a losing strategy hides in
+    plain sight. ``trade_counter`` already matches the per-strategy daily cap on
+    this prefix for the same reason.
+
+    ``summarise_strategies`` deliberately keeps grouping by the full version: a
+    screen comparing two *saves* of a strategy wants them apart. This is the
+    other question -- is this strategy worth running -- and it wants them
+    together.
+    """
+    return (record.strategy_version or "").split(TYPE_SEPARATOR)[0] or "unknown"
+
+
+@dataclass
+class RProfile:
+    """One strategy's record in R, with the money beside it.
+
+    R -- the net result divided by the risk planned for that trade -- is the
+    only unit that compares trades taken at different position sizes. Risk per
+    trade here moved from 100 to 50 between two consecutive sessions, so a money
+    average over both is weighted towards the larger-risk half and reads as a
+    statement about the strategy when it is partly a statement about the sizing.
+
+    ``measured`` is carried because a trade with no planned risk recorded has no
+    R at all. Those trades count in ``trades`` and in the money totals and are
+    absent from every R figure, which is the honest treatment: dividing by a
+    risk nobody planned would invent the number the whole table turns on.
+    """
+
+    label: str
+    versions: tuple[str, ...] = ()
+    trades: int = 0
+    wins: int = 0
+    losses: int = 0
+    scratches: int = 0
+    win_rate_percent: Decimal | None = None
+    average_r_won: Decimal | None = None
+    average_r_lost: Decimal | None = None
+    expectancy_r: Decimal | None = None
+    reward_risk: Decimal | None = None
+    break_even_win_rate_percent: Decimal | None = None
+    measured: int = 0
+    gross_pnl: Decimal = Decimal("0")
+    charges: Decimal = Decimal("0")
+    net_pnl: Decimal = Decimal("0")
+
+
+def summarise_r(records: list[TradeRecord], *, label: str = "ALL") -> RProfile:
+    """One strategy's, or one ledger's, record in R.
+
+    Closed trades only, and the win/loss/scratch split is the money one the rest
+    of the system uses: an exit at the entry price is a scratch, and counting it
+    as a loss because the net is a few paise negative would understate every win
+    rate here.
+
+    The break-even win rate is computed from the R averages rather than the
+    rupee ones. Both answer "what fraction of these trades has to win for the
+    set to come out level", and they disagree whenever the position sizes
+    differed -- the R version is the one that is still true after the risk per
+    trade is changed.
+    """
+    closed = [record for record in records if not record.is_open]
+    profile = RProfile(
+        label=label,
+        versions=tuple(sorted({record.strategy_version for record in closed})),
+        trades=len(closed),
+        gross_pnl=sum((record.gross_pnl for record in closed), start=Decimal("0")),
+        charges=sum((record.charges for record in closed), start=Decimal("0")),
+        net_pnl=sum((record.net_pnl for record in closed), start=Decimal("0")),
+    )
+    if not closed:
+        return profile
+
+    wins = [record for record in closed if record.net_pnl > SCRATCH]
+    losses = [record for record in closed if record.net_pnl < -SCRATCH]
+    profile.wins, profile.losses = len(wins), len(losses)
+    profile.scratches = len(closed) - len(wins) - len(losses)
+    decided = len(wins) + len(losses)
+    if decided:
+        profile.win_rate_percent = (Decimal(len(wins)) * 100 / Decimal(decided)).quantize(Decimal("0.1"))
+
+    multiples = [record.r_multiple for record in closed if record.r_multiple is not None]
+    profile.measured = len(multiples)
+    # The mean of every closed trade's R, scratches included. Not
+    # win_rate x average win less loss_rate x average loss: that identity only
+    # holds when nothing scratched, and the direct mean needs no such caveat.
+    profile.expectancy_r = _mean(multiples)
+    profile.average_r_won = _mean([record.r_multiple for record in wins if record.r_multiple is not None])
+    profile.average_r_lost = _mean([record.r_multiple for record in losses if record.r_multiple is not None])
+
+    if profile.average_r_won is not None and profile.average_r_lost is not None:
+        span = profile.average_r_won + abs(profile.average_r_lost)
+        if span > 0:
+            profile.break_even_win_rate_percent = (abs(profile.average_r_lost) * 100 / span).quantize(Decimal("0.1"))
+        if profile.average_r_lost != 0:
+            profile.reward_risk = (profile.average_r_won / abs(profile.average_r_lost)).quantize(Decimal("0.01"))
+    return profile
+
+
+def summarise_by_strategy(records: list[TradeRecord]) -> list[RProfile]:
+    """One row per strategy, worst last. Grouped by type, not by version."""
+    grouped: dict[str, list[TradeRecord]] = {}
+    for record in records:
+        if not record.is_open:
+            grouped.setdefault(strategy_type(record), []).append(record)
+    rows = [summarise_r(items, label=label) for label, items in grouped.items()]
+    return sorted(rows, key=lambda row: row.net_pnl, reverse=True)
+
+
+def r_verdict(profile: RProfile) -> str:
+    """Whether this set of trades covered its own costs, in one sentence.
+
+    The comparison a trader makes and the one nothing in this system said out
+    loud: a win rate is not good or bad on its own, it is good or bad against
+    the win rate the reward:risk needs. 33% is a fine win rate at 3:1 and a
+    losing one at 1.6:1, and the only way to tell is to put the two side by
+    side.
+    """
+    if profile.trades == 0:
+        return "No closed trades in this range: there is nothing to judge."
+    if profile.win_rate_percent is None:
+        return f"{profile.trades} closed trade(s), none of them decided either way: nothing to judge."
+    if profile.break_even_win_rate_percent is None:
+        missing = "no losing trade yet" if not profile.losses else "no winning trade yet"
+        return (
+            f"Win rate {profile.win_rate_percent}% with {missing}, so there is no break-even to compare "
+            "against until both have happened."
+        )
+
+    gap = profile.win_rate_percent - profile.break_even_win_rate_percent
+    # ``reward_risk`` is absent when the average loss rounds to 0.00R, which a
+    # large enough risk amount can do. Named only when it is known, rather than
+    # printed as "at None:1".
+    at = "" if profile.reward_risk is None else f" at {profile.reward_risk}:1"
+    reading = "losing edge" if gap < 0 else ("exactly break-even" if gap == 0 else f"{gap} points of edge{at}")
+    sentence = f"Win rate {profile.win_rate_percent}% vs break-even {profile.break_even_win_rate_percent}%: {reading}"
+    if gap < 0:
+        sentence += f", {abs(gap)} points short"
+    if profile.expectancy_r is not None:
+        sentence += f" (expectancy {profile.expectancy_r}R a trade)"
+    return sentence + "."
+
+
+def read_verdict(expectancy: Expectancy, *, ledger: str = "live") -> str:
     """What this sample can support, in words, before anyone reads a number.
 
     Deliberately blunt. A per-trade expectancy computed from nine trades looks
     exactly like one computed from nine hundred, and the only thing standing
     between the two is this sentence.
+
+    ``ledger`` only names which record is being counted. It defaults to live
+    because that is the only ledger this was written for; a paper section needs
+    the identical sentence about its own trades, and a second copy of it would
+    be a second place for the thresholds to drift.
     """
     trades = expectancy.trades
     if trades == 0:
-        return "No closed live trades in this range. There is nothing here to measure yet."
+        return f"No closed {ledger} trades in this range. There is nothing here to measure yet."
     if trades < TOO_FEW:
         return (
-            f"{trades} closed live trade{'s' if trades != 1 else ''}. This is not a sample. Nothing below is "
+            f"{trades} closed {ledger} trade{'s' if trades != 1 else ''}. This is not a sample. Nothing below is "
             f"evidence of an edge — it is evidence about execution, which is what it is useful for. "
             f"Judging a strategy needs {TOO_FEW}+ trades, and trusting the judgement needs {INDICATIVE}+."
         )
     if trades < INDICATIVE:
         return (
-            f"{trades} closed live trades. Enough to see execution clearly and to form a provisional view of "
+            f"{trades} closed {ledger} trades. Enough to see execution clearly and to form a provisional view of "
             f"the strategy, not enough to act on it. {INDICATIVE}+ before a figure here should change position "
             "size or retire a strategy."
         )
     return (
-        f"{trades} closed live trades. A sample worth acting on, provided the period covers more than one kind "
-        "of market."
+        f"{trades} closed {ledger} trades. A sample worth acting on, provided the period covers more than one "
+        "kind of market."
     )
 
 
