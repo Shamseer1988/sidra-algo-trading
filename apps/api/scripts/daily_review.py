@@ -39,7 +39,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import func, select  # noqa: E402
 
-from app.db.models import ApplicationSetting, LiveOrderSubmission, PaperOrder, PaperPosition  # noqa: E402
+from app.db.models import (  # noqa: E402
+    ApplicationSetting,
+    LiveOrderSubmission,
+    PaperFill,
+    PaperOrder,
+    PaperPosition,
+)
 from app.db.session import SessionLocal  # noqa: E402
 from app.services.execution_quality import (  # noqa: E402
     cost_of_trading,
@@ -141,7 +147,9 @@ async def paper_orders(session, record) -> None:  # noqa: ANN001
             .order_by(PaperOrder.created_at.asc())
         )
     ).all()
+    roles = {}
     for order in rows:
+        roles[order.id] = order.order_role
         trail = (order.simulation_snapshot or {}).get("trail")
         note = (order.simulation_snapshot or {}).get("reason") or order.rejection_reason or ""
         print(
@@ -152,6 +160,31 @@ async def paper_orders(session, record) -> None:  # noqa: ANN001
             f"{'  trailed ' + str(len(trail)) + 'x' if trail else ''}"
             f"{'  ' + note if note else ''}"
         )
+
+    # The fills, which are what the position's quantity was actually moved by.
+    # The orders above can be consistent while the quantity is not: one fill
+    # applied twice moves the position twice and leaves the order showing one
+    # fill. So this is the decisive record, and guessing from the orders alone
+    # is how the first two readings of this went wrong.
+    fills = (
+        await session.scalars(
+            select(PaperFill).where(PaperFill.paper_order_id.in_(list(roles))).order_by(PaperFill.occurred_at.asc())
+        )
+    ).all()
+    if not fills:
+        print("            (no fills recorded, which with a moved quantity is itself the finding)")
+        return
+    moved = 0
+    for fill in fills:
+        role = roles.get(fill.paper_order_id, "?")
+        step = fill.quantity if role == "ENTRY" else -fill.quantity
+        moved += step
+        print(
+            f"            fill  {role:<7}{fill.side:<6}{step:+5d}  at {fill.price:>10,.2f}  "
+            f"{fill.occurred_at.astimezone(MARKET_TIMEZONE).strftime('%H:%M:%S')}  "
+            f"running {moved:+d}"
+        )
+    print(f"            the fills add up to a net of {moved:+d}; the position row says {record.open_quantity:+d}")
 
 
 async def safety(session, day: date, records: list) -> int:  # noqa: ANN001
