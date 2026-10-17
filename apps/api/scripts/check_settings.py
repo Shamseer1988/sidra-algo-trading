@@ -480,6 +480,11 @@ async def main() -> int:
                 f"   sides: {','.join(configuration.allowed_sides)}"
             )
             print(f"         {'hold':7}: {f'{held} minutes' if held else 'no time limit'}")
+            # The id is what run_sweep.py --strategy takes, and the type is what
+            # strategy_stats.py groups by. Neither was printed anywhere, so
+            # sweeping one strategy of four meant going to the database for a
+            # string this screen already had in hand.
+            print(f"         {'id':7}: {configuration.id}   type: {configuration.strategy_type}")
 
             # How the stop is managed after entry. Missing from this section
             # until now, which left the one setting an operator most wants to
