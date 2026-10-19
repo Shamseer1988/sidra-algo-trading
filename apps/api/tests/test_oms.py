@@ -50,9 +50,26 @@ async def test_paper_oms_intent_is_idempotent_and_lifecycle_is_explicit() -> Non
                 select(OmsOrder).join(OrderIntent).where(OrderIntent.source_paper_signal_id == signal.id)
             )
             assert stored is not None and stored.status == "FILLED"
+            # Ordered by sequence, the column the model exists to be ordered by
+            # ("sequence is unique within an OMS order") and the one
+            # transition_order assigns as max + 1. Without it this read the
+            # heap, so the assertion below passed whenever Postgres happened to
+            # hand the rows back in insertion order and failed when it did not
+            # -- a lifecycle test that was really testing storage layout.
+            #
+            # occurred_at would not fix it: it defaults to now(), which in
+            # Postgres is the transaction's start time, so all four events of
+            # one transaction carry the same timestamp.
             events = list(
-                (await session.scalars(select(OmsOrderEvent).where(OmsOrderEvent.oms_order_id == stored.id))).all()
+                (
+                    await session.scalars(
+                        select(OmsOrderEvent)
+                        .where(OmsOrderEvent.oms_order_id == stored.id)
+                        .order_by(OmsOrderEvent.sequence)
+                    )
+                ).all()
             )
+            assert [event.sequence for event in events] == [1, 2, 3, 4]
             assert [event.to_status for event in events] == ["QUEUED", "UNKNOWN", "ACKNOWLEDGED", "FILLED"]
     finally:
         async with SessionLocal() as session:
