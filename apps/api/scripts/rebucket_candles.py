@@ -40,7 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import delete, select  # noqa: E402
+from sqlalchemy import delete, func, select  # noqa: E402
 
 from app.db.models import MarketCandle  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
@@ -124,64 +124,127 @@ async def main() -> int:
     print(f"  {SOURCE_TIMEFRAME_SECONDS}s candles in -> {target}s candles out, {target // 60} minutes each.")
     print("  The source rows are left exactly as they are.")
 
-    async with SessionLocal() as session:
-        query = select(MarketCandle).where(MarketCandle.timeframe_seconds == SOURCE_TIMEFRAME_SECONDS)
+    def bounded(query):
         if args.from_date:
             query = query.where(MarketCandle.session_date >= args.from_date)
         if args.to_date:
             query = query.where(MarketCandle.session_date <= args.to_date)
         if args.instruments:
             query = query.where(MarketCandle.instrument_token.in_(args.instruments))
-        source = list((await session.scalars(query.order_by(MarketCandle.opened_at))).all())
+        return query
 
-        if not source:
+    # One instrument at a time, and never the whole table.
+    #
+    # The first version read every matching row into a list and folded that.
+    # Against six months of 29 instruments -- 1,375,887 candles -- the process
+    # was killed before it printed another line: an ORM row is not a cheap
+    # object, and there were three copies of the history alive at once (rows,
+    # CompletedCandles, the buckets holding them). A silent SIGKILL looks
+    # exactly like a script that decided there was nothing to do, which is the
+    # worst way for this to fail.
+    #
+    # Instrument is the right unit because a bucket never spans two of them, so
+    # folding one instrument's history is the same answer as folding all of it,
+    # and the peak is one instrument rather than twenty-nine.
+    async with SessionLocal() as session:
+        instruments = list(
+            (
+                await session.scalars(
+                    bounded(
+                        select(MarketCandle.instrument_token)
+                        .where(MarketCandle.timeframe_seconds == SOURCE_TIMEFRAME_SECONDS)
+                        .distinct()
+                    ).order_by(MarketCandle.instrument_token)
+                )
+            ).all()
+        )
+        if not instruments:
             print("\n  No source candles matched. Nothing to do.")
             return 1
 
-        sessions = sorted({row.session_date for row in source})
-        instruments = sorted({row.instrument_token for row in source})
-        print(f"  source              : {len(source):,} candles")
-        print(f"  sessions            : {len(sessions)}   {sessions[0]} -> {sessions[-1]}")
+        span = (
+            await session.execute(
+                bounded(
+                    select(
+                        func.count(MarketCandle.id),
+                        func.min(MarketCandle.session_date),
+                        func.max(MarketCandle.session_date),
+                        func.count(MarketCandle.session_date.distinct()),
+                    ).where(MarketCandle.timeframe_seconds == SOURCE_TIMEFRAME_SECONDS)
+                )
+            )
+        ).one()
+        total, first_day, last_day, session_count = span
+        print(f"  source              : {total:,} candles")
+        print(f"  sessions            : {session_count}   {first_day} -> {last_day}")
         print(f"  instruments         : {len(instruments)}")
+        print()
 
-        built = fold_to_timeframe([as_completed(row) for row in source], target)
         expected = target // SOURCE_TIMEFRAME_SECONDS
-        counts = minutes_per_bucket(source, target)
-        short = [candle for candle in built if counts[(candle.instrument_token, candle.opened_at)] < expected]
-        print(f"  {target}s candles to write : {len(built):,}")
-        if short:
+        written = 0
+        short_total = 0
+        short_by_day: dict[date, int] = defaultdict(int)
+
+        for index, token in enumerate(instruments, start=1):
+            rows = list(
+                (
+                    await session.scalars(
+                        bounded(
+                            select(MarketCandle).where(
+                                MarketCandle.timeframe_seconds == SOURCE_TIMEFRAME_SECONDS,
+                                MarketCandle.instrument_token == token,
+                            )
+                        ).order_by(MarketCandle.opened_at)
+                    )
+                ).all()
+            )
+            built = fold_to_timeframe([as_completed(row) for row in rows], target)
+            counts = minutes_per_bucket(rows, target)
+            for candle in built:
+                if counts[(candle.instrument_token, candle.opened_at)] < expected:
+                    short_total += 1
+                    short_by_day[candle.session_date] += 1
+            written += len(built)
+            print(f"  [{index:>2}/{len(instruments)}] {token:<28} {len(rows):>7,} -> {len(built):>7,}")
+
+            if args.apply:
+                await session.execute(
+                    bounded(
+                        delete(MarketCandle).where(
+                            MarketCandle.timeframe_seconds == target,
+                            MarketCandle.instrument_token == token,
+                        )
+                    )
+                )
+                session.add_all([as_row(candle) for candle in built])
+                # Committed per instrument so a run that dies part way leaves
+                # whole instruments done rather than nothing, and so the rows
+                # just built can be released.
+                await session.commit()
+
+            # The ORM keeps every row it loaded in its identity map, which would
+            # defeat reading one instrument at a time.
+            session.expunge_all()
+            rows.clear()
+            built.clear()
+
+        print()
+        print(f"  {target}s candles {'written' if args.apply else 'to write'} : {written:,}")
+        if short_total:
             # A short bucket is a real candle of a session with a feed gap, not
             # a mistake: it is reported rather than dropped, because dropping
             # it would quietly shorten those sessions in every replay.
-            by_day: dict[date, int] = defaultdict(int)
-            for candle in short:
-                by_day[candle.session_date] += 1
-            print(f"    short: {len(short):,} of them hold fewer than {expected} minutes")
-            worst = sorted(by_day.items(), key=lambda item: -item[1])[:3]
+            print(f"    short: {short_total:,} of them hold fewer than {expected} minutes")
+            worst = sorted(short_by_day.items(), key=lambda item: -item[1])[:3]
             print("           most affected: " + ", ".join(f"{day} ({count})" for day, count in worst))
             print("           kept: a session with a feed gap is still that session.")
-
-        existing = await session.scalar(
-            select(MarketCandle.id).where(MarketCandle.timeframe_seconds == target).limit(1)
-        )
-        if existing is not None:
-            print(f"\n  {target}s rows already exist and will be replaced for the sessions above.")
 
         if not args.apply:
             print("\n  Nothing was written. Add --apply to store these.")
             print(RULE)
             return 0
 
-        await session.execute(
-            delete(MarketCandle).where(
-                MarketCandle.timeframe_seconds == target,
-                MarketCandle.session_date.in_(sessions),
-                MarketCandle.instrument_token.in_(instruments),
-            )
-        )
-        session.add_all([as_row(candle) for candle in built])
-        await session.commit()
-        print(f"\n  Wrote {len(built):,} candles at {target}s. Source rows untouched.")
+        print("\n  Source rows untouched.")
         print(f"  Compare them with:  run_sweep.py --timeframe {target}   against   --timeframe 60")
         print(RULE)
         return 0
