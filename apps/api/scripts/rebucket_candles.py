@@ -35,8 +35,7 @@ import argparse
 import asyncio
 import sys
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -45,7 +44,8 @@ from sqlalchemy import delete, select  # noqa: E402
 
 from app.db.models import MarketCandle  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
-from app.services.candle_aggregation import _bucket_start  # noqa: E402
+from app.services.candle_aggregation import _bucket_start, fold_to_timeframe  # noqa: E402
+from app.services.market_calculations import CompletedCandle  # noqa: E402
 
 RULE = "=" * 88
 SOURCE_TIMEFRAME_SECONDS = 60
@@ -55,60 +55,48 @@ def parse_day(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-@dataclass
-class Bucket:
-    """One coarse candle under construction, in source-candle order."""
-
-    opened_at: datetime
-    session_date: date
-    instrument_token: str
-    rows: list[MarketCandle] = field(default_factory=list)
-
-    def add(self, row: MarketCandle) -> None:
-        self.rows.append(row)
-
-    def candle(self, timeframe_seconds: int) -> MarketCandle:
-        ordered = sorted(self.rows, key=lambda row: row.opened_at)
-        return MarketCandle(
-            instrument_token=self.instrument_token,
-            timeframe_seconds=timeframe_seconds,
-            session_date=self.session_date,
-            opened_at=self.opened_at,
-            # The nominal close, not the last source candle's: a bucket missing
-            # its final minute is still a candle of this timeframe, and a
-            # closed_at that shrank with the gap would make the row describe a
-            # timeframe that does not exist.
-            closed_at=self.opened_at + timedelta(seconds=timeframe_seconds),
-            open=ordered[0].open,
-            high=max(row.high for row in ordered),
-            low=min(row.low for row in ordered),
-            close=ordered[-1].close,
-            # Added, because a stored volume is already this candle's own:
-            # CandleAggregationService._volume_delta turns the feed's running
-            # total into a per-candle figure before the row is written. Adding
-            # cumulative figures instead would have inflated every bucket
-            # about threefold and left RVOL comparing against nonsense.
-            volume=sum(row.volume for row in ordered),
-            tick_count=sum(row.tick_count for row in ordered),
-        )
-
-    @property
-    def minutes(self) -> int:
-        return len(self.rows)
+def as_completed(row: MarketCandle) -> CompletedCandle:
+    return CompletedCandle(
+        instrument_token=row.instrument_token,
+        timeframe_seconds=row.timeframe_seconds,
+        opened_at=row.opened_at,
+        closed_at=row.closed_at,
+        open=row.open,
+        high=row.high,
+        low=row.low,
+        close=row.close,
+        volume=row.volume,
+        tick_count=row.tick_count,
+    )
 
 
-def buckets_for(rows: list[MarketCandle], timeframe_seconds: int) -> list[Bucket]:
-    """Group source candles into coarse buckets, keyed the way live keys them."""
-    grouped: dict[tuple[str, datetime], Bucket] = {}
+def as_row(candle: CompletedCandle) -> MarketCandle:
+    return MarketCandle(
+        instrument_token=candle.instrument_token,
+        timeframe_seconds=candle.timeframe_seconds,
+        session_date=candle.session_date,
+        opened_at=candle.opened_at,
+        closed_at=candle.closed_at,
+        open=candle.open,
+        high=candle.high,
+        low=candle.low,
+        close=candle.close,
+        volume=candle.volume,
+        tick_count=candle.tick_count,
+    )
+
+
+def minutes_per_bucket(rows: list[MarketCandle], timeframe_seconds: int) -> dict[tuple[str, datetime], int]:
+    """How many source candles each bucket holds, to report the short ones.
+
+    ``fold_to_timeframe`` keeps a short bucket, as it should -- a session with
+    a feed gap is still that session -- so the count is taken here rather than
+    inferred from the folded rows, where the gap no longer shows.
+    """
+    counts: dict[tuple[str, datetime], int] = defaultdict(int)
     for row in rows:
-        start = _bucket_start(row.opened_at, timeframe_seconds)
-        key = (row.instrument_token, start)
-        bucket = grouped.get(key)
-        if bucket is None:
-            bucket = Bucket(opened_at=start, session_date=row.session_date, instrument_token=row.instrument_token)
-            grouped[key] = bucket
-        bucket.add(row)
-    return [grouped[key] for key in sorted(grouped, key=lambda item: (item[0], item[1]))]
+        counts[(row.instrument_token, _bucket_start(row.opened_at, timeframe_seconds))] += 1
+    return counts
 
 
 async def main() -> int:
@@ -156,17 +144,18 @@ async def main() -> int:
         print(f"  sessions            : {len(sessions)}   {sessions[0]} -> {sessions[-1]}")
         print(f"  instruments         : {len(instruments)}")
 
-        built = buckets_for(source, target)
+        built = fold_to_timeframe([as_completed(row) for row in source], target)
         expected = target // SOURCE_TIMEFRAME_SECONDS
-        short = [bucket for bucket in built if bucket.minutes < expected]
+        counts = minutes_per_bucket(source, target)
+        short = [candle for candle in built if counts[(candle.instrument_token, candle.opened_at)] < expected]
         print(f"  {target}s candles to write : {len(built):,}")
         if short:
             # A short bucket is a real candle of a session with a feed gap, not
             # a mistake: it is reported rather than dropped, because dropping
             # it would quietly shorten those sessions in every replay.
             by_day: dict[date, int] = defaultdict(int)
-            for bucket in short:
-                by_day[bucket.session_date] += 1
+            for candle in short:
+                by_day[candle.session_date] += 1
             print(f"    short: {len(short):,} of them hold fewer than {expected} minutes")
             worst = sorted(by_day.items(), key=lambda item: -item[1])[:3]
             print("           most affected: " + ", ".join(f"{day} ({count})" for day, count in worst))
@@ -190,7 +179,7 @@ async def main() -> int:
                 MarketCandle.instrument_token.in_(instruments),
             )
         )
-        session.add_all([bucket.candle(target) for bucket in built])
+        session.add_all([as_row(candle) for candle in built])
         await session.commit()
         print(f"\n  Wrote {len(built):,} candles at {target}s. Source rows untouched.")
         print(f"  Compare them with:  run_sweep.py --timeframe {target}   against   --timeframe 60")

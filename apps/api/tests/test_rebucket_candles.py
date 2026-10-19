@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import rebucket_candles as rebucket  # noqa: E402
 
 from app.db.models import MarketCandle  # noqa: E402
-from app.services.candle_aggregation import _bucket_start  # noqa: E402
+from app.services.candle_aggregation import _bucket_start, fold_to_timeframe  # noqa: E402
 
 IST = timezone(timedelta(hours=5, minutes=30))
 SESSION = date(2026, 10, 16)
@@ -41,6 +41,14 @@ def minute(hhmm: str, *, open_: str, high: str, low: str, close: str, volume: in
         volume=volume,
         tick_count=ticks,
     )
+
+
+def fold(rows, timeframe_seconds):
+    return fold_to_timeframe([rebucket.as_completed(row) for row in rows], timeframe_seconds)
+
+
+def key(candle):
+    return (candle.instrument_token, candle.opened_at)
 
 
 THREE = [
@@ -67,14 +75,14 @@ def test_a_session_divides_into_whole_three_minute_candles():
 
 
 def test_three_minutes_become_one_candle():
-    built = rebucket.buckets_for(THREE, 180)
+    built = fold(THREE, 180)
     assert len(built) == 1
-    assert built[0].minutes == 3
+    assert rebucket.minutes_per_bucket(THREE, 180)[key(built[0])] == 3
 
 
 def test_minutes_in_different_buckets_do_not_merge():
     later = minute("09:18", open_="98", high="99", low="97", close="98", volume=5)
-    built = rebucket.buckets_for([*THREE, later], 180)
+    built = fold([*THREE, later], 180)
     # Bucket starts come back in UTC, the way the live aggregator stores them.
     assert [bucket.opened_at.astimezone(IST).strftime("%H:%M") for bucket in built] == ["09:15", "09:18"]
 
@@ -82,7 +90,7 @@ def test_minutes_in_different_buckets_do_not_merge():
 def test_two_instruments_are_kept_apart():
     other = minute("09:15", open_="50", high="51", low="49", close="50", volume=1)
     other.instrument_token = "NSE_EQ|OTHER"
-    built = rebucket.buckets_for([THREE[0], other], 180)
+    built = fold([THREE[0], other], 180)
     assert {bucket.instrument_token for bucket in built} == {TOKEN, "NSE_EQ|OTHER"}
 
 
@@ -90,7 +98,7 @@ def test_two_instruments_are_kept_apart():
 
 
 def test_the_open_is_the_first_minute_and_the_close_the_last():
-    candle = rebucket.buckets_for(THREE, 180)[0].candle(180)
+    candle = fold(THREE, 180)[0]
     assert candle.open == Decimal("100")
     assert candle.close == Decimal("98")
 
@@ -98,13 +106,13 @@ def test_the_open_is_the_first_minute_and_the_close_the_last():
 def test_the_open_follows_time_not_the_order_rows_arrived():
     """Rows come back ordered by the query, and a later query that does not
     order would otherwise decide the candle's open and close."""
-    candle = rebucket.buckets_for(list(reversed(THREE)), 180)[0].candle(180)
+    candle = fold(list(reversed(THREE)), 180)[0]
     assert candle.open == Decimal("100")
     assert candle.close == Decimal("98")
 
 
 def test_the_high_and_low_span_every_minute():
-    candle = rebucket.buckets_for(THREE, 180)[0].candle(180)
+    candle = fold(THREE, 180)[0]
     assert candle.high == Decimal("107")
     assert candle.low == Decimal("97")
 
@@ -112,13 +120,13 @@ def test_the_high_and_low_span_every_minute():
 def test_the_volume_is_added_up():
     """Stored volumes are already per candle: _volume_delta converts the feed's
     running total before a row is written, so these add."""
-    candle = rebucket.buckets_for(THREE, 180)[0].candle(180)
+    candle = fold(THREE, 180)[0]
     assert candle.volume == 60
     assert candle.tick_count == 21
 
 
 def test_the_candle_carries_the_timeframe_it_was_built_for():
-    candle = rebucket.buckets_for(THREE, 180)[0].candle(180)
+    candle = fold(THREE, 180)[0]
     assert candle.timeframe_seconds == 180
     assert candle.session_date == SESSION
     assert candle.instrument_token == TOKEN
@@ -128,16 +136,16 @@ def test_closed_at_is_the_nominal_end_not_the_last_minute_present():
     """A bucket missing its final minute is still a candle of this timeframe.
     A closed_at that shrank with the gap would describe a timeframe that is not
     the one being replayed."""
-    candle = rebucket.buckets_for(THREE[:2], 180)[0].candle(180)
+    candle = fold(THREE[:2], 180)[0]
     assert candle.closed_at - candle.opened_at == timedelta(seconds=180)
 
 
 def test_a_feed_gap_leaves_a_short_candle_rather_than_no_candle():
     """Dropping it would quietly shorten that session in every replay."""
-    built = rebucket.buckets_for([THREE[0], THREE[2]], 180)
+    built = fold([THREE[0], THREE[2]], 180)
     assert len(built) == 1
-    assert built[0].minutes == 2
-    candle = built[0].candle(180)
+    assert rebucket.minutes_per_bucket([THREE[0], THREE[2]], 180)[key(built[0])] == 2
+    candle = built[0]
     assert candle.open == Decimal("100")
     assert candle.close == Decimal("98")
 
@@ -147,10 +155,10 @@ def test_a_feed_gap_leaves_a_short_candle_rather_than_no_candle():
 
 def test_a_five_minute_candle_groups_five_minutes():
     rows = [minute(f"09:{15 + index}", open_="100", high="101", low="99", close="100", volume=1) for index in range(5)]
-    built = rebucket.buckets_for(rows, 300)
+    built = fold(rows, 300)
     assert len(built) == 1
-    assert built[0].minutes == 5
-    assert built[0].candle(300).closed_at - built[0].candle(300).opened_at == timedelta(seconds=300)
+    assert rebucket.minutes_per_bucket(rows, 300)[key(built[0])] == 5
+    assert built[0].closed_at - built[0].opened_at == timedelta(seconds=300)
 
 
 @pytest.mark.parametrize("bad", [60, 30, 90, 0])

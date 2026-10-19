@@ -21,13 +21,16 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.core.config import Settings
 from app.db.models import MarketCandle
 from app.db.session import SessionLocal
-from app.services.candle_aggregation import MarketCalculationPersistenceService
+from app.services.candle_aggregation import MarketCalculationPersistenceService, fold_to_timeframe
 from app.services.market_calculations import CompletedCandle, is_regular_market_timestamp
 from app.services.trading_calendar import DEFAULT_TRADING_CALENDAR, TradingCalendar
 from app.services.upstox_market_data import configured_subscriptions
 
 logger = structlog.get_logger("upstox.backfill")
 UPSTOX_HISTORICAL_URL = "https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
+# Both intraday endpoints above are fixed at 1minute, so whatever the
+# scanner's timeframe is, what arrives is minutes and has to be folded.
+INTRADAY_SOURCE_TIMEFRAME_SECONDS = 60
 UPSTOX_DAILY_HISTORICAL_URL = "https://api.upstox.com/v2/historical-candle/{instrument_key}/day/{to_date}/{from_date}"
 UPSTOX_RANGE_URL = "https://api.upstox.com/v2/historical-candle/{instrument_key}/1minute/{to_date}/{from_date}"
 MARKET_TIMEZONE = ZoneInfo("Asia/Kolkata")
@@ -91,6 +94,14 @@ async def backfill_today_candles(
                 # We need chronological order: earliest (09:15) -> latest
                 sorted_candles = list(reversed(raw_candles))
                 instrument_count = 0
+                # Collected rather than persisted one by one, because the
+                # endpoint is fixed at 1minute (UPSTOX_HISTORICAL_URL) while
+                # the scanner may be set to any timeframe. Labelling each
+                # minute with candle_timeframe_seconds, which is what used to
+                # happen here, stored three one-minute candles as three
+                # three-minute candles -- overlapping, triple the rows, and
+                # indistinguishable afterwards from candles the feed built.
+                minutes: list[CompletedCandle] = []
 
                 for item in sorted_candles:
                     # Item format: [timestamp_str, open, high, low, close, volume, open_interest]
@@ -108,18 +119,22 @@ async def backfill_today_candles(
                     if not is_regular_market_timestamp(opened_at, calendar or DEFAULT_TRADING_CALENDAR):
                         continue
 
-                    candle = CompletedCandle(
-                        instrument_token=instrument_key,
-                        timeframe_seconds=settings.candle_timeframe_seconds,
-                        opened_at=opened_at,
-                        closed_at=opened_at + timedelta(seconds=settings.candle_timeframe_seconds),
-                        open=Decimal(str(open_p)),
-                        high=Decimal(str(high_p)),
-                        low=Decimal(str(low_p)),
-                        close=Decimal(str(close_p)),
-                        volume=int(vol or 0),
-                        tick_count=1,
+                    minutes.append(
+                        CompletedCandle(
+                            instrument_token=instrument_key,
+                            timeframe_seconds=INTRADAY_SOURCE_TIMEFRAME_SECONDS,
+                            opened_at=opened_at,
+                            closed_at=opened_at + timedelta(seconds=INTRADAY_SOURCE_TIMEFRAME_SECONDS),
+                            open=Decimal(str(open_p)),
+                            high=Decimal(str(high_p)),
+                            low=Decimal(str(low_p)),
+                            close=Decimal(str(close_p)),
+                            volume=int(vol or 0),
+                            tick_count=1,
+                        )
                     )
+
+                for candle in fold_to_timeframe(minutes, settings.candle_timeframe_seconds):
                     # Backfill rebuilds indicators and quality history only. Strategy
                     # evaluation is reserved for candles completed by the live feed.
                     await persistence.persist_completed(candle, notify_snapshot=False)
@@ -371,7 +386,13 @@ async def backfill_intraday_range(
     active_calendar = calendar or DEFAULT_TRADING_CALENDAR
     benchmark = benchmark_key or settings.upstox_nifty_benchmark_key
     targets = instruments or ([benchmark] + [k for k in configured_subscriptions(settings) if k != benchmark])
-    timeframe = settings.candle_timeframe_seconds
+    # The source timeframe, not the scanner's. UPSTOX_RANGE_URL is fixed at
+    # 1minute, so these rows are minutes whatever the setting says, and
+    # labelling them with it stored minutes under a timeframe they were not.
+    # Coarser history is built from these afterwards by
+    # scripts/rebucket_candles.py, which keeps both timeframes side by side so
+    # the two can be replayed against each other.
+    timeframe = INTRADAY_SOURCE_TIMEFRAME_SECONDS
     report = RangeBackfillReport(from_date=from_date, to_date=to_date)
     headers = {
         "Accept": "application/json",

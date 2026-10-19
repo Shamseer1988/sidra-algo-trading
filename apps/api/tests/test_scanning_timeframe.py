@@ -14,7 +14,8 @@ reading it off the compiled statement. A test that needed rows would pass on a
 fixture built at whatever timeframe the fixture chose.
 """
 
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -60,6 +61,55 @@ async def test_the_rvol_baseline_reads_the_scanning_timeframe(timeframe: int):
     session = CapturingSession()
     await service._time_of_day_baseline(session, "NSE_EQ|TEST", date(2026, 10, 16))
     assert session.timeframes == [timeframe]
+
+
+def test_a_session_of_minutes_folds_to_whole_candles_not_relabelled_minutes():
+    """What the day's backfill used to do, and must not.
+
+    Both Upstox intraday endpoints are fixed at 1minute, so every candle that
+    arrives is a minute. Stamping each one with candle_timeframe_seconds --
+    which is what happened before -- stored 375 one-minute candles as 375
+    three-minute candles: triple the rows, each claiming three minutes it did
+    not cover, overlapping, and afterwards indistinguishable from candles the
+    live feed built. Folded, the same session is 125 candles.
+    """
+    from datetime import timedelta, timezone
+
+    from app.services.candle_aggregation import fold_to_timeframe
+    from app.services.market_calculations import CompletedCandle
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    open_at = datetime(2026, 10, 16, 9, 15, tzinfo=ist)
+    minutes = [
+        CompletedCandle(
+            instrument_token="NSE_EQ|TEST",
+            timeframe_seconds=60,
+            opened_at=open_at + timedelta(minutes=index),
+            closed_at=open_at + timedelta(minutes=index + 1),
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100"),
+            volume=1,
+            tick_count=1,
+        )
+        for index in range(375)
+    ]
+    folded = fold_to_timeframe(minutes, 180)
+    assert len(minutes) == 375
+    assert len(folded) == 125
+    assert {candle.timeframe_seconds for candle in folded} == {180}
+    assert sum(candle.volume for candle in folded) == 375
+
+
+def test_the_range_backfill_stores_the_timeframe_it_actually_fetched():
+    """Research history is minutes because the endpoint only serves minutes.
+    Coarser history is built from it by scripts/rebucket_candles.py, which is
+    why this must not follow the setting."""
+    from app.services.upstox_backfill import INTRADAY_SOURCE_TIMEFRAME_SECONDS, UPSTOX_RANGE_URL
+
+    assert INTRADAY_SOURCE_TIMEFRAME_SECONDS == 60
+    assert "1minute" in UPSTOX_RANGE_URL
 
 
 def test_the_setting_allows_three_minute_candles():

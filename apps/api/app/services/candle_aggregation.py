@@ -1,7 +1,7 @@
 """Tick aggregation and completed-candle persistence for market calculations."""
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -107,6 +107,48 @@ def _bucket_start(timestamp: datetime, timeframe_seconds: int) -> datetime:
     value = timestamp.astimezone(UTC)
     epoch = int(value.timestamp())
     return datetime.fromtimestamp(epoch - (epoch % timeframe_seconds), tz=UTC)
+
+
+def fold_to_timeframe(candles: Iterable[CompletedCandle], timeframe_seconds: int) -> list[CompletedCandle]:
+    """Combine finer candles into whole candles of ``timeframe_seconds``.
+
+    One candle of a coarser timeframe is the finer ones inside it: the first
+    one's open, the last one's close, the highest high, the lowest low, and the
+    volumes added -- added because a CompletedCandle's volume is already its
+    own, ``_volume_delta`` having turned the feed's running total into a
+    per-candle figure before any of this.
+
+    Buckets come from ``_bucket_start``, the same function the live aggregator
+    buckets ticks with, so folded candles land on the grid the scanner will
+    produce rather than on one that merely looks like it.
+
+    A bucket short of its finer candles -- a feed gap, or a session's last
+    minutes -- is still a candle of this timeframe, so it is kept and its
+    ``closed_at`` stays the nominal end. Shrinking that to the last candle
+    present would describe a timeframe nothing is replaying at.
+    """
+    buckets: dict[tuple[str, datetime], list[CompletedCandle]] = {}
+    for candle in candles:
+        key = (candle.instrument_token, _bucket_start(candle.opened_at, timeframe_seconds))
+        buckets.setdefault(key, []).append(candle)
+    folded: list[CompletedCandle] = []
+    for instrument_token, opened_at in sorted(buckets):
+        ordered = sorted(buckets[(instrument_token, opened_at)], key=lambda item: item.opened_at)
+        folded.append(
+            CompletedCandle(
+                instrument_token=instrument_token,
+                timeframe_seconds=timeframe_seconds,
+                opened_at=opened_at,
+                closed_at=opened_at + timedelta(seconds=timeframe_seconds),
+                open=ordered[0].open,
+                high=max(item.high for item in ordered),
+                low=min(item.low for item in ordered),
+                close=ordered[-1].close,
+                volume=sum(item.volume for item in ordered),
+                tick_count=sum(item.tick_count for item in ordered),
+            )
+        )
+    return folded
 
 
 class CandleAggregationService:
