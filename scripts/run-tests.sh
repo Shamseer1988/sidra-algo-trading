@@ -64,15 +64,26 @@ docker compose exec -T postgres sh -lc \
 
 # --user root because the image runs as the unprivileged sidra user, which
 # cannot install into site-packages. --rm because nothing here should outlive
-# the run. The versions match the dev extra in pyproject.toml.
+# the run.
+#
+# The three packages are named rather than installed as `.[dev]`, which would
+# be the obvious way to stay in step with pyproject.toml. An editable install
+# writes egg-info into /app, and /app belongs to sidra while the service drops
+# every capability (cap_drop: ALL in docker-compose.yml), so root here has no
+# DAC_OVERRIDE and cannot write there. These are the dev extra minus httpx,
+# already a runtime dependency, and ruff, which no test needs.
+#
+# -p no:cacheprovider for the same reason: pytest's cache wants a directory
+# under /app and would otherwise warn twice on every run about not getting one.
 #
 # DATABASE_URL is rebuilt inside the container from the one it was given, so the
 # password never passes through this script or the shell's history.
 docker compose run --rm --user root --entrypoint sh api -c '
   set -e
-  pip install --quiet --disable-pip-version-check "pytest>=8.3,<9" "pytest-asyncio>=0.24,<1" >/dev/null
+  pip install --quiet --disable-pip-version-check --root-user-action=ignore \
+    "pytest>=8.3,<9" "pytest-asyncio>=0.24,<1" "psutil>=5.9.0,<7" >/dev/null
   DATABASE_URL="${DATABASE_URL%/*}/'"$TEST_DB"'"
   export DATABASE_URL
   alembic upgrade head >/dev/null
-  exec python -m pytest "$@"
+  exec python -m pytest -p no:cacheprovider "$@"
 ' sh "$@"
