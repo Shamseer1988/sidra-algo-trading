@@ -78,7 +78,22 @@ docker compose exec -T postgres sh -lc \
 #
 # DATABASE_URL is rebuilt inside the container from the one it was given, so the
 # password never passes through this script or the shell's history.
-docker compose run --rm --user root --entrypoint sh api -c '
+# APPLICATION_MODE and LIVE_TRADING_ENABLED are forced back to their defaults.
+#
+# The service takes env_file: .env, so a one-off container built from it
+# inherits this deployment's attestations -- which today say LIVE and true.
+# Several tests assert what an operator gets when they touch neither:
+# Settings().application_mode == "PAPER", live_trading_enabled is False. Handed
+# the live environment they fail, and they are right to: they were asking about
+# the default and were answered with the deployment.
+#
+# Overriding them is not weakening the suite. It is giving it the controlled
+# environment a test run is supposed to have, so that what passes today still
+# passes on a machine configured differently, and so that going live does not
+# silently turn four safety assertions red.
+docker compose run --rm --user root \
+  -e APPLICATION_MODE=PAPER -e LIVE_TRADING_ENABLED=false \
+  --entrypoint sh api -c '
   set -e
   pip install --quiet --disable-pip-version-check --root-user-action=ignore \
     "pytest>=8.3,<9" "pytest-asyncio>=0.24,<1" "psutil>=5.9.0,<7" >/dev/null
