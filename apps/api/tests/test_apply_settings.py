@@ -61,6 +61,41 @@ def test_an_emptied_value_is_none_not_an_empty_string():
     assert apply.parse_value("none") is None
 
 
+@pytest.mark.parametrize("key", ["trailing_rule", "exit_rules.trailing_rule"])
+def test_the_trailing_rule_called_none_stays_the_name_of_a_rule(key: str):
+    """ "NONE" is one of trailing_rule's three names, not the absence of one.
+
+    Parsed as Python None it was refused as a NoneType where a literal was
+    wanted, so the terminal could not switch off the one exit rule the sweeps
+    had just argued for, and the refusal pointed at the type rather than the
+    mistake. Both spellings of the key reach the same setting.
+    """
+    assert apply.split_pair(f"{key}=NONE") == (key, "NONE")
+
+
+@pytest.mark.parametrize("key", ["exit_rules.stop_atr_multiple", "min_stop_distance_percent"])
+def test_a_nullable_setting_still_empties_to_none(key: str):
+    """The exception above is for one key only. Everywhere else the word is
+    still how a strategy gives up an opinion and goes back to the account."""
+    assert apply.split_pair(f"{key}=none") == (key, None)
+
+
+def test_the_model_takes_the_parsed_trailing_rule():
+    """The parse and the model have to agree, which only a round trip shows."""
+    from app.services.strategy_registry import StrategyConfiguration
+
+    payload = StrategyConfiguration(id="orb-retest-default", name="ORB Retest").model_dump()
+    key, value = apply.split_pair("exit_rules.trailing_rule=NONE")
+    apply.apply_path(payload, key, value)
+    assert StrategyConfiguration.model_validate(payload).exit_rules.trailing_rule == "NONE"
+
+
+def test_the_leaf_of_a_key_is_the_part_after_the_one_dot():
+    assert apply.leaf("exit_rules.trailing_rule") == "trailing_rule"
+    assert apply.leaf("trailing_rule") == "trailing_rule"
+    assert apply.leaf("") == ""
+
+
 def test_a_pair_splits_on_the_first_equals_only():
     assert apply.split_pair("trade_cutoff_time=14:45") == ("trade_cutoff_time", "14:45")
 
