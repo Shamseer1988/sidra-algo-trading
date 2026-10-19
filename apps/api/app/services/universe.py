@@ -269,12 +269,20 @@ async def _daily_candles(session, token: str, limit: int) -> list[CompletedCandl
     return [_as_completed(row) for row in rows.all()]
 
 
-async def _session_open(session, token: str, session_date: date) -> Decimal | None:
+async def _session_open(session, token: str, session_date: date, timeframe_seconds: int) -> Decimal | None:
+    """The session's first intraday candle, for the gap the ranking scores.
+
+    The timeframe was the literal 60 until now, which was right only while
+    every intraday candle was a minute long. On any other setting no row
+    matches, so the gap is missing for every instrument -- and a missing gap is
+    not an error here, it is a quarter of the composite score silently scored
+    as nothing. The scanner would go on choosing a universe, badly.
+    """
     row = await session.scalar(
         select(MarketCandle)
         .where(
             MarketCandle.instrument_token == token,
-            MarketCandle.timeframe_seconds == 60,
+            MarketCandle.timeframe_seconds == timeframe_seconds,
             MarketCandle.session_date == session_date,
         )
         .order_by(MarketCandle.opened_at.asc())
@@ -316,7 +324,10 @@ async def refresh_universe(settings: Settings, session_date: date | None = None)
         daily_by_instrument = {
             token: await _daily_candles(session, token, settings.daily_history_sessions) for token in candidates
         }
-        session_open_by_instrument = {token: await _session_open(session, token, target) for token in candidates}
+        session_open_by_instrument = {
+            token: await _session_open(session, token, target, settings.candle_timeframe_seconds)
+            for token in candidates
+        }
         ranked = rank_universe(daily_by_instrument, session_open_by_instrument, controls)
 
         await session.execute(delete(ScanUniverseEntry).where(ScanUniverseEntry.session_date == target))

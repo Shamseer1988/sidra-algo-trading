@@ -280,7 +280,13 @@ class MarketCalculationPersistenceService:
                     select(MarketCandle)
                     .where(
                         MarketCandle.instrument_token == instrument_token,
-                        MarketCandle.timeframe_seconds == 60,
+                        # The scanning timeframe, not the literal 60: these
+                        # rows are bucketed by time of day to give each candle
+                        # a volume to be relative to, and on any other setting
+                        # the literal matched nothing -- leaving every RVOL
+                        # baseline empty and the volume gate comparing against
+                        # a number that was never there.
+                        MarketCandle.timeframe_seconds == self._settings.candle_timeframe_seconds,
                         MarketCandle.session_date < session_date,
                     )
                     .order_by(MarketCandle.session_date.desc(), MarketCandle.opened_at.asc())
