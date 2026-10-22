@@ -47,6 +47,33 @@ async def _publish_worker_state(redis: Redis, status: str, detail: str, restart_
     )
 
 
+async def _announce_start(redis: Redis, logger) -> None:  # noqa: ANN001 - a structlog logger
+    """Say the worker is up, and survive Redis not being ready to hear it.
+
+    This was an unguarded await, and it sat above the loop's try, so the first
+    thing the worker did was the one thing that could kill it outright. Redis
+    answers every command with BusyLoadingError while it reads its dump back
+    after a restart -- a condition it reports precisely because it is
+    temporary -- and that error left run(), left asyncio.run(), and ended the
+    process. Docker restarted it into a Redis that was still loading.
+
+    Each restart costs far more than the announcement is worth: the worker
+    re-runs the whole intraday backfill, twenty-eight instruments at a few
+    seconds each, and until that finishes the newest candle it can see is
+    minutes old -- so entries fire late in a clump and the exit manager
+    refuses to judge a target it cannot measure. One position sat more than an
+    hour past its target this way.
+
+    Every other state publish is already either inside the loop's try or
+    wrapped. This one is now too: a failure here is logged and the loop starts
+    anyway, where the ordinary backoff will retry against Redis.
+    """
+    try:
+        await _publish_worker_state(redis, "RUNNING", "Scanner worker supervisor started", 0)
+    except Exception as exc:
+        logger.warning("scanner.worker_state_announce_failed", error=f"{type(exc).__name__}: {exc}")
+
+
 async def run() -> None:
     # ``settings`` is rebound each session to an overlay carrying the stored
     # indicator periods; ``base_settings`` stays the environment underneath it.
@@ -80,7 +107,7 @@ async def run() -> None:
     logger.info(
         "scanner.worker_started", mode=settings.application_mode, live_trading_enabled=settings.live_trading_enabled
     )
-    await _publish_worker_state(redis, "RUNNING", "Scanner worker supervisor started", 0)
+    await _announce_start(redis, logger)
     try:
         while True:
             try:
