@@ -34,6 +34,13 @@ from app.services.upstox_market_data import UpstoxMarketDataService
 from app.services.upstox_oauth import UpstoxOAuthError, load_access_token
 from app.services.worker_supervision import WORKER_STATE_KEY, RestartBackoff, completed_task_detail
 
+# Consecutive failed iterations before the worker hands the process back to
+# the supervisor. At the loop's 30-second ceiling this is about ten minutes of
+# a worker that is achieving nothing -- long enough that a blip, a restarting
+# Redis or a brief network stall is ridden out, short enough that a structural
+# fault costs minutes rather than the four days it once did.
+GIVE_UP_AFTER_FAILURES = 20
+
 
 async def _publish_worker_state(redis: Redis, status: str, detail: str, restart_count: int) -> None:
     await redis.hset(
@@ -373,6 +380,31 @@ async def run() -> None:
                         f"Worker iteration failed: {type(exc).__name__}; retrying in {delay:g} seconds",
                         loop_backoff.failures,
                     )
+                if loop_backoff.failures >= GIVE_UP_AFTER_FAILURES:
+                    # Give the process back to the supervisor rather than
+                    # retrying something structural forever.
+                    #
+                    # Retrying suits a blip. It does not suit a worker holding
+                    # an engine built against an address that cannot work:
+                    # that state is decided once, at import, so every one of
+                    # these iterations was always going to fail the same way.
+                    # The loop retried it every thirty seconds for four days,
+                    # stored no candles, and placed no orders on three trading
+                    # days. Exiting re-runs the startup that chose the address.
+                    logger.error(
+                        "scanner.worker_giving_up",
+                        error=str(exc),
+                        consecutive_failures=loop_backoff.failures,
+                        detail="every iteration has failed; exiting so the supervisor restarts this process",
+                    )
+                    with contextlib.suppress(Exception):
+                        await _publish_worker_state(
+                            redis,
+                            "DEGRADED",
+                            f"{loop_backoff.failures} consecutive failures ({type(exc).__name__}); restarting",
+                            loop_backoff.failures,
+                        )
+                    raise SystemExit(1) from exc
                 await asyncio.sleep(delay)
     except asyncio.CancelledError:
         logger.info("scanner.worker_stopped")
