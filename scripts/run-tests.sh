@@ -50,11 +50,31 @@ echo "API TEST SUITE"
 echo "=========================================================================="
 echo "  trading database : $PROD_DB   (untouched)"
 echo "  test database    : $TEST_DB   (created, migrated, written to)"
-echo
 
-# No arguments means the whole suite, quietly. pyproject's testpaths points
-# pytest at tests/ either way; -q is only so a passing run is one line.
-[ $# -gt 0 ] || set -- -q
+# No arguments means the whole suite, quietly, minus tests/load.
+#
+# Those measure the machine, not the code. They assert p95 latency under
+# 500ms against a mocked Redis and database, so on a Synology running ten
+# containers the number says what else the NAS was doing. The same commit
+# failed at 786ms minutes after two image builds and passed on a quiet
+# machine, and a gate that answers differently to the same code is worse than
+# no gate: it teaches you that red is normal, and the day red means something
+# you will not look. That is how an error logged every thirty seconds went
+# unread for four days.
+#
+# They are not deleted, only taken off the default path:
+#
+#     scripts/run-tests.sh tests/load/ -q      # when the NAS is idle
+#
+# Arguments are passed through untouched, so naming any path runs exactly
+# what was named.
+if [ $# -gt 0 ]; then
+  echo "  load tests       : included if the paths you named cover them"
+else
+  echo "  load tests       : skipped (scripts/run-tests.sh tests/load/ -q to run them)"
+  set -- -q --ignore=tests/load
+fi
+echo
 
 # CREATE DATABASE has no IF NOT EXISTS, and a second run must not fail, so the
 # error is tolerated and the next step would fail loudly if it really is absent.
