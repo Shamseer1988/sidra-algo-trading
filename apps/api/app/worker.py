@@ -32,6 +32,12 @@ from app.services.upstox_backfill import backfill_daily_history, backfill_today_
 from app.services.upstox_instruments import InstrumentRefreshError, refresh_is_due, refresh_upstox_instruments
 from app.services.upstox_market_data import UpstoxMarketDataService
 from app.services.upstox_oauth import UpstoxOAuthError, load_access_token
+from app.services.worker_alerts import (
+    ALERT_AFTER_FAILURES,
+    alert_worker_degraded,
+    alert_worker_giving_up,
+    alert_worker_recovered,
+)
 from app.services.worker_supervision import WORKER_STATE_KEY, RestartBackoff, completed_task_detail
 
 # Consecutive failed iterations before the worker hands the process back to
@@ -110,6 +116,9 @@ async def run() -> None:
     last_universe_refresh: object = None
     market_data_backoff = RestartBackoff()
     loop_backoff = RestartBackoff(maximum_seconds=30)
+    # Whether the operator has been told the scanner stopped. Kept so the
+    # recovery message is only sent to someone who got the alarm.
+    degraded_alerted = False
     calendar = TradingCalendar.from_settings(settings)
     logger.info(
         "scanner.worker_started", mode=settings.application_mode, live_trading_enabled=settings.live_trading_enabled
@@ -366,6 +375,11 @@ async def run() -> None:
                         await _publish_worker_state(
                             redis, "RUNNING", "Scanner worker recovered after a transient error", 0
                         )
+                if degraded_alerted:
+                    # The operator was told this had stopped. Close it, or the
+                    # next alarm is one they have learned to ignore.
+                    await alert_worker_recovered(settings, after_failures=loop_backoff.failures)
+                    degraded_alerted = False
                 loop_backoff.reset()
                 await asyncio.sleep(2)
             except asyncio.CancelledError:
@@ -373,6 +387,10 @@ async def run() -> None:
             except Exception as exc:
                 delay = loop_backoff.record_failure()
                 logger.exception("scanner.worker_iteration_failed", error=str(exc), retry_in_seconds=delay)
+                if loop_backoff.failures == ALERT_AFTER_FAILURES:
+                    # Once, on the way past, not every thirty seconds.
+                    degraded_alerted = True
+                    await alert_worker_degraded(settings, error=str(exc), failures=loop_backoff.failures)
                 with contextlib.suppress(Exception):
                     await _publish_worker_state(
                         redis,
@@ -404,6 +422,7 @@ async def run() -> None:
                             f"{loop_backoff.failures} consecutive failures ({type(exc).__name__}); restarting",
                             loop_backoff.failures,
                         )
+                    await alert_worker_giving_up(settings, error=str(exc), failures=loop_backoff.failures)
                     raise SystemExit(1) from exc
                 await asyncio.sleep(delay)
     except asyncio.CancelledError:
