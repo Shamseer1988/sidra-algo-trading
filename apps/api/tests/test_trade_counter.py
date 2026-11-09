@@ -218,10 +218,30 @@ async def test_an_order_recovered_from_an_unknown_still_counts() -> None:
     assert await count() == 1
 
 
-@pytest.mark.parametrize("status", ["PREPARED", "REJECTED", "UNKNOWN", "NEEDS_REVIEW"])
-async def test_a_live_order_the_broker_did_not_place_counts_nothing(status: str) -> None:
-    await live_submission(status=status)
+async def test_only_a_rejected_order_counts_nothing() -> None:
+    """The broker said no. There is nothing at the exchange and nothing to hold."""
+    await live_submission(status="REJECTED")
     assert await count() == 0
+
+
+@pytest.mark.parametrize("status", ["PREPARED", "UNKNOWN", "NEEDS_REVIEW"])
+async def test_an_order_that_may_be_at_the_exchange_counts(status: str) -> None:
+    """This asserted the opposite until 9 November, and that is the day it cost.
+
+    Four entries left for the broker at 09:37:01 and all three daily gates
+    passed all four: the ceiling of 3 took 4, the 375 risk budget took 500, and
+    the two-position limit took four positions held together until 12:10. Each
+    was checked while the other three were PREPARED -- written and committed
+    before their requests left, on purpose -- and a gate that could not see
+    them was not a gate for the length of a round trip.
+
+    PREPARED may be at the exchange a moment from now. UNKNOWN is a lost
+    response and may be there already. NEEDS_REVIEW is recovery giving up, and
+    its own text says "this is not proof it was never placed". A ceiling has to
+    read all three as a trade; erring this way costs at most a trade not taken.
+    """
+    await live_submission(status=status)
+    assert await count() == 1
 
 
 # --- the IST day boundary -------------------------------------------------

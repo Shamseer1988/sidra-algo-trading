@@ -1,6 +1,7 @@
 """Paper scanner orchestration: state, duplicate prevention, persistence and alerts."""
 
 import json
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -14,6 +15,7 @@ from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, Tradi
 from app.core.config import Settings
 from app.db.models import ApplicationSetting, PaperSignal, ScannerEvaluation, ScanUniverseEntry, TelegramAlert
 from app.db.session import SessionLocal
+from app.services.entry_gate import entry_gate
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_execution import PaperOrderManager
 from app.services.paper_strategy import AWAITING, SIGNALLED
@@ -614,69 +616,78 @@ class PaperScannerOrchestrator:
         state_key = self._state_key(candle, strategy)
         prior_state = await self._redis.get(state_key) or AWAITING
         decision = StrategyRegistry.evaluate(strategy, candle, indicators, nifty, effective_controls, prior_state)
-        if decision.next_state == SIGNALLED:
-            block_reason = self._regime_block_reason(regime, decision.side or "") or await self._signal_block_reason(
-                candle, strategy, decision, controls
+        # The lock, the limit checks, the signal row and the live order all sit
+        # inside one block, because the defect was the distance between them.
+        # Every `return` below still releases it, and a signal that did not get
+        # it is recorded with its reason like any other blocked signal rather
+        # than checked against limits that cannot yet see the entry in flight.
+        async with AsyncExitStack() as stack:
+            if decision.next_state == SIGNALLED:
+                gate = await stack.enter_async_context(entry_gate(self._redis, candle.session_date))
+                block_reason = (
+                    gate.block_reason
+                    or self._regime_block_reason(regime, decision.side or "")
+                    or await self._signal_block_reason(candle, strategy, decision, controls)
+                )
+                if block_reason:
+                    decision = decision.__class__(next_state=AWAITING, reason=block_reason)
+            await self._redis.set(state_key, decision.next_state, ex=STATE_TTL_SECONDS)
+            evaluation = await self._record_evaluation(candle, indicators, strategy, decision, strategy_snapshot)
+            if evaluation:
+                await self._publish_evaluation(evaluation)
+            if decision.next_state != SIGNALLED or decision.side is None:
+                return
+            signal = await self._record(candle, decision, indicators, strategy, strategy_snapshot)
+            if signal is None:
+                return
+            paper = await self._reserve_paper(signal)
+            if paper.queued:
+                await self._redis.set(
+                    f"scanner:last_signal:{candle.instrument_token}",
+                    json.dumps({"signal_id": str(signal.id), "at": datetime.now(UTC).isoformat()}),
+                    ex=STATE_TTL_SECONDS,
+                )
+                await self._alert(signal)
+            # After the paper record and the paper alert, never before. The
+            # operator's record is the system of record and completes regardless;
+            # this call cannot raise, so a live-path failure costs the live order
+            # and nothing else.
+            #
+            # Offered even when the paper engine refused. Until this change a paper
+            # refusal returned here, which meant the live account's position,
+            # exposure and daily-allocation limits were in practice the paper
+            # ledger's: on 14 October the operator's live day ended after one trade
+            # because paper had reached its own ceiling. The live engine now
+            # enforces each of those from the live account, and the one refusal
+            # that was a fact about the share rather than about the paper ledger --
+            # the operator's price band -- it enforces too. What a paper refusal
+            # still withholds is a paper order, which is the only thing it was ever
+            # about.
+            if paper.blocks_live:
+                self._logger.warning("scanner.live_entry_withheld", signal_id=str(signal.id), reason=paper.reason)
+            else:
+                await self._offer_live_entry(signal)
+            if not paper.queued:
+                return
+            await self._redis.publish(
+                SCANNER_EVENTS_CHANNEL,
+                json.dumps(
+                    {
+                        "type": "paper_signal",
+                        "signal_id": str(signal.id),
+                        "instrument_token": signal.instrument_token,
+                        "side": signal.side,
+                        "status": signal.status,
+                        "score": signal.score,
+                    }
+                ),
             )
-            if block_reason:
-                decision = decision.__class__(next_state=AWAITING, reason=block_reason)
-        await self._redis.set(state_key, decision.next_state, ex=STATE_TTL_SECONDS)
-        evaluation = await self._record_evaluation(candle, indicators, strategy, decision, strategy_snapshot)
-        if evaluation:
-            await self._publish_evaluation(evaluation)
-        if decision.next_state != SIGNALLED or decision.side is None:
-            return
-        signal = await self._record(candle, decision, indicators, strategy, strategy_snapshot)
-        if signal is None:
-            return
-        paper = await self._reserve_paper(signal)
-        if paper.queued:
-            await self._redis.set(
-                f"scanner:last_signal:{candle.instrument_token}",
-                json.dumps({"signal_id": str(signal.id), "at": datetime.now(UTC).isoformat()}),
-                ex=STATE_TTL_SECONDS,
+            self._logger.info(
+                "scanner.paper_signal_recorded",
+                strategy_id=strategy.id,
+                strategy_version=strategy.version,
+                instrument_token=candle.instrument_token,
+                side=signal.side,
+                score=signal.score,
+                live_trading_enabled=self._settings.live_trading_enabled,
             )
-            await self._alert(signal)
-        # After the paper record and the paper alert, never before. The
-        # operator's record is the system of record and completes regardless;
-        # this call cannot raise, so a live-path failure costs the live order
-        # and nothing else.
-        #
-        # Offered even when the paper engine refused. Until this change a paper
-        # refusal returned here, which meant the live account's position,
-        # exposure and daily-allocation limits were in practice the paper
-        # ledger's: on 14 October the operator's live day ended after one trade
-        # because paper had reached its own ceiling. The live engine now
-        # enforces each of those from the live account, and the one refusal
-        # that was a fact about the share rather than about the paper ledger --
-        # the operator's price band -- it enforces too. What a paper refusal
-        # still withholds is a paper order, which is the only thing it was ever
-        # about.
-        if paper.blocks_live:
-            self._logger.warning("scanner.live_entry_withheld", signal_id=str(signal.id), reason=paper.reason)
-        else:
-            await self._offer_live_entry(signal)
-        if not paper.queued:
-            return
-        await self._redis.publish(
-            SCANNER_EVENTS_CHANNEL,
-            json.dumps(
-                {
-                    "type": "paper_signal",
-                    "signal_id": str(signal.id),
-                    "instrument_token": signal.instrument_token,
-                    "side": signal.side,
-                    "status": signal.status,
-                    "score": signal.score,
-                }
-            ),
-        )
-        self._logger.info(
-            "scanner.paper_signal_recorded",
-            strategy_id=strategy.id,
-            strategy_version=strategy.version,
-            instrument_token=candle.instrument_token,
-            side=signal.side,
-            score=signal.score,
-            live_trading_enabled=self._settings.live_trading_enabled,
-        )

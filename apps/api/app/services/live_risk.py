@@ -56,7 +56,11 @@ from app.db.models import ApplicationSetting, ExecutionReconciliation, LiveOrder
 from app.services import daily_limits
 from app.services.broker_adapter import BrokerAdapter, BrokerOrder, BrokerOrderDescription
 from app.services.live_readiness import inspect_live_readiness
-from app.services.trade_counter import LIVE_PLACED_STATUSES, current_session_date, session_bounds_utc
+from app.services.trade_counter import (
+    LIVE_COMMITTED_STATUSES,
+    current_session_date,
+    session_bounds_utc,
+)
 
 # A reconciliation older than this tells us about an account that may since have
 # changed. Short enough that a stale pass cannot authorise a whole session.
@@ -303,7 +307,13 @@ async def live_risk_allocated_today(session: AsyncSession, session_date: date) -
             ).where(
                 LiveOrderSubmission.created_at >= start,
                 LiveOrderSubmission.created_at < end,
-                LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
+                # Committed, not placed. The risk is committed when the order is
+                # prepared -- which is when planned_risk is written onto the row
+                # -- not when the broker answers. Counting only answered orders
+                # let 500 of planned risk through a 375 budget on 9 November,
+                # because all four entries were in flight at the same moment and
+                # each read the budget as untouched.
+                LiveOrderSubmission.status.in_(LIVE_COMMITTED_STATUSES),
                 LiveOrderSubmission.planned_risk.is_not(None),
             )
         )

@@ -51,7 +51,39 @@ from app.services.trading_calendar import MARKET_TIMEZONE
 # A broker outcome that means an order exists at the exchange. RESOLVED_PLACED
 # is an UNKNOWN that recovery later found in the order book, so it is as real as
 # an ACCEPTED one; excluding it would let a lost response buy an extra trade.
+#
+# Used for money: P&L, reconciliation, execution quality, the broker's own day
+# figures. Those are questions about trades that really happened, and an order
+# still in flight has not happened.
 LIVE_PLACED_STATUSES = ("ACCEPTED", "RESOLVED_PLACED")
+
+# An order that MAY exist at the exchange, which for a ceiling is the same thing
+# as one that does.
+#
+# PREPARED is written and committed *before* the request leaves the process, on
+# purpose -- an order at the exchange that this system has no record of is the
+# worse failure. So between that commit and the broker's answer there is a row
+# for a real order, and reading only LIVE_PLACED_STATUSES made every daily gate
+# blind to it for the length of a round trip. On 9 November four entries were
+# sent in the same second, 09:37:01, and all three daily gates passed all four:
+# the trade ceiling of 3 took 4, the risk budget of 375 took 500, and the
+# two-position limit took four positions held together for two and a half
+# hours. Three of the four were banks.
+#
+# UNKNOWN is a lost response: the order may be live and we were not told.
+# NEEDS_REVIEW is recovery giving up on an UNKNOWN, and its own resolution text
+# says "this is not proof it was never placed; resolve it by hand before
+# trading this instrument again" -- which a ceiling must take at its word.
+#
+# REJECTED is the only outcome that frees what it reserved, because the broker
+# said no and there is nothing at the exchange.
+LIVE_IN_FLIGHT_STATUSES = ("PREPARED", "UNKNOWN", "NEEDS_REVIEW")
+
+# What a *ceiling* counts: everything the account may be on the hook for. Used
+# by the daily trade count here and by the daily risk allocation in live_risk.
+# Erring this way costs at most a trade not taken; erring the other way cost
+# 2.0% of capital on a day configured for 1.5%.
+LIVE_COMMITTED_STATUSES = LIVE_PLACED_STATUSES + LIVE_IN_FLIGHT_STATUSES
 
 
 def session_bounds_utc(session_date: date) -> tuple[datetime, datetime]:
@@ -234,7 +266,10 @@ async def count_filled_entries(
         .where(
             LiveOrderSubmission.created_at >= start,
             LiveOrderSubmission.created_at < end,
-            LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
+            # Committed, not placed: see LIVE_IN_FLIGHT_STATUSES. A ceiling that
+            # waits for the broker's answer is not a ceiling for the length of a
+            # round trip, which is exactly long enough to send another order.
+            LiveOrderSubmission.status.in_(LIVE_COMMITTED_STATUSES),
         )
         .distinct()
     )
