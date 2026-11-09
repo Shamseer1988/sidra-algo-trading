@@ -22,6 +22,16 @@
 #
 # The first run creates the test database and costs an extra few seconds for the
 # install and the migrations. Later runs reuse the database and only reinstall.
+#
+# THE IMAGE IS BUILT FIRST, AND THAT IS NOT OPTIONAL.
+#
+# docker-compose.yml mounts only app_logs; the source is COPYed into the image
+# by infra/docker/api.Dockerfile. So a one-off container built from the api
+# service runs whatever the last build put there, not what is on disk. Pulling
+# three commits and running this script reported 2217 passing tests against an
+# image that predated two of them -- a green suite for code that was not being
+# tested, which is worse than a red one. Deps are cached above the COPY, so a
+# code-only change rebuilds in seconds.
 
 set -e
 
@@ -50,6 +60,7 @@ echo "API TEST SUITE"
 echo "=========================================================================="
 echo "  trading database : $PROD_DB   (untouched)"
 echo "  test database    : $TEST_DB   (created, migrated, written to)"
+echo "  image            : rebuilt first, so this tests the working tree"
 
 # No arguments means the whole suite, quietly, minus tests/load.
 #
@@ -74,6 +85,13 @@ else
   echo "  load tests       : skipped (scripts/run-tests.sh tests/load/ -q to run them)"
   set -- -q --ignore=tests/load
 fi
+echo
+
+# Build before anything else. A failure here stops the script under set -e,
+# which is the point: there is no honest way to run the suite against an image
+# that could not be built.
+echo "Building the api image so the suite tests the working tree..."
+docker compose build api
 echo
 
 # CREATE DATABASE has no IF NOT EXISTS, and a second run must not fail, so the
