@@ -160,8 +160,15 @@ class PaperScannerOrchestrator:
     ) -> str | None:
         """Quota limits that block a *new signal* while still recording the evaluation.
 
-        Ordering: an account-wide daily ceiling, then the per-strategy daily cap, then the
-        optional per-strategy per-side cap, then the per-strategy cooldown.
+        Ordering: an account-wide daily ceiling, then the per-share daily ceiling, then the
+        per-strategy daily cap, then the optional per-strategy per-side cap, then the
+        per-strategy cooldown.
+
+        The per-share ceiling sits second on purpose. The per-strategy caps below it are
+        each blind to the others, so two strategies that agree about one share both pass
+        their own cap and the account holds two trades' worth of risk on one company --
+        which is what happened to JSWSTEEL on 6 November, twice short in the same minute,
+        both stopped out for about a full R each.
         """
         latest = None
         async with SessionLocal() as session:
@@ -174,6 +181,20 @@ class PaperScannerOrchestrator:
             taken = await count_filled_entries(session, candle.session_date)
             if taken.total >= ceiling:
                 return f"Daily trade ceiling reached: {taken.explain(ceiling)}"
+            # Across strategies, from fills, for the same reasons as above. The
+            # control is read with a default rather than indexed, because a
+            # settings row saved before this control existed has no key for it
+            # and an operator's stored row must not start raising KeyError.
+            per_share_default = DEFAULT_TRADING_CONTROLS["maximum_daily_trades_per_instrument"]
+            per_instrument = int(controls.get("maximum_daily_trades_per_instrument", per_share_default))
+            on_this_share = await count_filled_entries(
+                session, candle.session_date, instrument_token=candle.instrument_token
+            )
+            if on_this_share.total >= per_instrument:
+                return (
+                    f"Daily ceiling for this share reached: {on_this_share.explain(per_instrument)} "
+                    "Another strategy may already hold it; the per-strategy caps cannot see each other."
+                )
             # From fills, for the same reason the ceiling above is. These two
             # counted accepted evaluations, and an evaluation is written before
             # the risk engine is asked: a signal refused for "Maximum

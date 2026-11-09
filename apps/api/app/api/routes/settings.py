@@ -80,6 +80,7 @@ DEFAULT_TRADING_CONTROLS = {
     "maximum_open_positions": 1,
     "maximum_open_exposure_percent": 100.0,
     "maximum_daily_trades": 4,
+    "maximum_daily_trades_per_instrument": 1,
     "minimum_score": 80,
     "minimum_rr": 1.5,
     "volume_multiplier": 1.3,
@@ -127,6 +128,14 @@ class TradingControls(BaseModel):
     # both brokers. Counted from fills rather than signals: a signal whose entry
     # never filled did not use up a trade. See services/trade_counter.py.
     maximum_daily_trades: int = Field(ge=1, le=20)
+    # Filled entries on ONE share per trading day, across every strategy. The
+    # per-strategy caps above it cannot see each other: on 6 November two
+    # strategies entered JSWSTEEL short in the same minute, each inside its own
+    # cap, and the day held two trades' worth of risk on one company's news.
+    # Defaults to one, which also refuses a same-day reversal on that share --
+    # set it to 2 to allow one. Rows written before this control keep working:
+    # the default applies to them.
+    maximum_daily_trades_per_instrument: int = Field(default=1, ge=1, le=5)
     minimum_score: int = Field(ge=0, le=100)
     minimum_rr: float = Field(ge=1, le=10)
     volume_multiplier: float = Field(ge=0.5, le=10)

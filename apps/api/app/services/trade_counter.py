@@ -150,6 +150,7 @@ async def count_filled_entries(
     *,
     strategy_type: str | None = None,
     side: str | None = None,
+    instrument_token: str | None = None,
 ) -> TradeCount:
     """Today's trades, counted from fills rather than intentions.
 
@@ -177,12 +178,20 @@ async def count_filled_entries(
     a budget under this count; nothing in the system creates that today, and a
     signal would have to carry its configuration's id for it to be fixable.
 
+    ``instrument_token`` narrows it to one share, for the per-share ceiling.
+    Across every strategy, because the thing that ceiling is about is the
+    company: on 6 November two different strategies entered JSWSTEEL short in
+    the same minute, each inside its own per-strategy cap, and the account held
+    two trades' worth of risk on one company's news. Neither strategy knew
+    what the other had taken; this count does.
+
     A live order with no signal behind it cannot be attributed to a strategy,
     so it is left out of a narrowed count. It still reaches the account-wide
     ceiling, where an order resting at the exchange belongs however it got
-    there.
+    there. The same is true of the per-share count: a signal-less order cannot
+    be attributed to a share either.
     """
-    narrowed = strategy_type is not None or side is not None
+    narrowed = strategy_type is not None or side is not None or instrument_token is not None
     signal_ids: set[str] | None = None
     if narrowed:
         conditions = [PaperSignal.session_date == session_date]
@@ -190,6 +199,8 @@ async def count_filled_entries(
             conditions.append(PaperSignal.strategy_version.startswith(f"{strategy_type}@"))
         if side is not None:
             conditions.append(PaperSignal.side == side)
+        if instrument_token is not None:
+            conditions.append(PaperSignal.instrument_token == instrument_token)
         rows = await session.scalars(select(PaperSignal.id).where(*conditions))
         signal_ids = {str(value) for value in rows.all()}
         if not signal_ids:

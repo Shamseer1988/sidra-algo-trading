@@ -300,6 +300,21 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
         is_ceiling=True,
     ),
     SettingSpec(
+        key="maximum_daily_trades_per_instrument",
+        group=DAILY_RISK,
+        label="Maximum trades per share per day",
+        help=(
+            "How many filled entries one share may take in a day, across every strategy. The "
+            "per-strategy caps cannot see each other: on 6 November two strategies entered the "
+            "same share short in the same minute, each inside its own cap, and the day carried "
+            "two trades' worth of risk on one company's news. One also refuses a same-day "
+            "reversal on that share; set 2 to allow one."
+        ),
+        unit=COUNT,
+        effect=IMMEDIATE,
+        is_ceiling=True,
+    ),
+    SettingSpec(
         key="maximum_open_positions",
         group=DAILY_RISK,
         label="Maximum concurrent positions",
