@@ -32,6 +32,7 @@ from app.services.live_risk import (
     allocation_budget,
     exposure_ceiling,
     live_controls,
+    live_entries_in_flight,
     live_exposure,
     live_risk_allocated_today,
     open_positions,
@@ -143,7 +144,20 @@ def _band(controls: Any) -> str:
     return f"from {low} up, enforced on the live path as well as on paper"
 
 
-def _book_caps(controls: Any, positions: Iterable[Any] | None, failure: str | None) -> tuple[Cap, Cap, tuple[str, ...]]:
+def _book_caps(
+    controls: Any,
+    positions: Iterable[Any] | None,
+    failure: str | None,
+    in_flight: tuple[str, ...] = (),
+) -> tuple[Cap, Cap, tuple[str, ...]]:
+    """The position and exposure caps as the gate computes them.
+
+    ``in_flight`` is the gate's own addition: entries committed but not yet
+    reported by the broker. Reported here as well as enforced there, because
+    two readings of one ceiling means the one an operator reads is the one
+    enforcing nothing -- and this is the ceiling that read zero while four
+    positions were being opened on 9 November.
+    """
     limit = Decimal(str(int(controls.maximum_open_positions or 0)))
     ceiling = exposure_ceiling(controls)
     if positions is None:
@@ -173,13 +187,24 @@ def _book_caps(controls: Any, positions: Iterable[Any] | None, failure: str | No
     held = open_positions(rows)
     symbols = tuple(sorted(item.symbol for item in held))
     exposure = live_exposure(held)
+    # Anything already in the book is not also in flight; the gate drops those
+    # the same way, so the two numbers cannot disagree.
+    pending = tuple(token for token in in_flight if not any(item.identifies(token, None) for item in held))
+    if symbols and pending:
+        detail = f"{', '.join(symbols)}, and {len(pending)} entr{'y' if len(pending) == 1 else 'ies'} in flight"
+    elif pending:
+        detail = f"nothing settled yet, {len(pending)} entr{'y' if len(pending) == 1 else 'ies'} in flight"
+    elif symbols:
+        detail = ", ".join(symbols)
+    else:
+        detail = "the live book is flat"
     return (
         Cap(
             "positions",
             "Open live positions",
-            Decimal(len(held)),
+            Decimal(len(held) + len(pending)),
             limit,
-            ", ".join(symbols) if symbols else "the live book is flat",
+            detail,
         ),
         Cap(
             "exposure",
@@ -233,7 +258,8 @@ async def live_usage(
         except Exception as exc:  # noqa: BLE001 - a report never raises at an operator
             failure = f"The broker position book could not be read: {exc}. The gate refuses on this."
 
-    position_cap, exposure_cap, symbols = _book_caps(controls, positions, failure)
+    in_flight = await live_entries_in_flight(session, day)
+    position_cap, exposure_cap, symbols = _book_caps(controls, positions, failure, in_flight)
     return LiveUsage(
         session_date=day,
         controls_readable=True,

@@ -280,6 +280,69 @@ def open_positions(positions: Iterable[Any]) -> list[Any]:
     return [item for item in positions if item.net_quantity and item.net_quantity != 0]
 
 
+# How long an entry counts as "in flight" for the position limit.
+#
+# The window the broker's book is blind through is sub-second -- the gap between
+# our order leaving and the fill being reported. Two minutes is far more than
+# that on purpose, and the reason it is bounded at all is the other direction:
+# an entry limit that is never touched must not hold a position slot for the
+# rest of the day. Past this window the book is the whole truth again, because
+# either the order filled and the book shows it, or it did not and there is
+# nothing to show.
+IN_FLIGHT_WINDOW_SECONDS = 120
+
+
+async def live_entries_in_flight(
+    session: AsyncSession, session_date: date, *, now: datetime | None = None
+) -> tuple[str, ...]:
+    """Instruments the account has committed to opening and the broker has not
+    yet reported.
+
+    The position limit reads the broker's position book, which is the right
+    source for everything it can see and is blind to exactly one thing: an
+    order that has left but whose fill has not come back. On 9 November that
+    blindness took four positions on a limit of two -- SBIN, PNB, BANKBARODA
+    and VEDL, all entered at 09:37:01, all held together until 12:10, three of
+    them banks. Every one of the four was checked against an empty book.
+
+    Three columns do the work, and each is already written for its own reason:
+
+    ``planned_risk``  non-null only on an entry. An exit and a protective stop
+                      risk nothing new, so they are null -- which makes this
+                      the discriminator that says "this order opens something".
+    ``fill_seen_at``  written by ``live_fills`` from the order book. Null means
+                      the broker has not told us about this order yet, which is
+                      the same moment the position book cannot show it either.
+    ``status``        committed rather than placed, for the reason given in
+                      ``LIVE_IN_FLIGHT_STATUSES``: a PREPARED row is a real
+                      order a moment from the exchange.
+
+    Returns canonical instrument tokens, because ``trading_symbol`` holds what
+    the broker was asked for and the brokers disagree about what that is. The
+    token is read from each row's request snapshot, so a row that somehow
+    carries none is skipped rather than guessed at -- it cannot be matched
+    against a position book either way.
+    """
+    start, end = session_bounds_utc(session_date)
+    moment = now or datetime.now(UTC)
+    since = max(start, moment - timedelta(seconds=IN_FLIGHT_WINDOW_SECONDS))
+    rows = await session.scalars(
+        select(LiveOrderSubmission).where(
+            LiveOrderSubmission.created_at >= since,
+            LiveOrderSubmission.created_at < end,
+            LiveOrderSubmission.status.in_(LIVE_COMMITTED_STATUSES),
+            LiveOrderSubmission.planned_risk.is_not(None),
+            LiveOrderSubmission.fill_seen_at.is_(None),
+        )
+    )
+    tokens: list[str] = []
+    for row in rows.all():
+        token = row.instrument_token
+        if token and token not in tokens:
+            tokens.append(token)
+    return tuple(tokens)
+
+
 async def live_risk_allocated_today(session: AsyncSession, session_date: date) -> tuple[Decimal, int]:
     """Risk committed to the live account today, and how many trades carry it.
 
@@ -425,7 +488,11 @@ async def _live_allocation_check(session: AsyncSession, controls: Any, candidate
 
 
 async def _live_position_check(
-    adapter: BrokerAdapter, controls: Any, order: BrokerOrder, description: BrokerOrderDescription | None
+    session: AsyncSession,
+    adapter: BrokerAdapter,
+    controls: Any,
+    order: BrokerOrder,
+    description: BrokerOrderDescription | None,
 ) -> LiveRiskCheck:
     """Concurrent live positions and live exposure, read from the account.
 
@@ -439,6 +506,18 @@ async def _live_position_check(
     count that cannot be established is not a reason to send another order.
     An order that closes or reduces an existing position is exempt, because
     refusing those would trap a position open with no way out.
+
+    The count is the book plus whatever is in flight. The book alone took four
+    positions on a limit of two on 9 November, because all four entries left in
+    the same second and each was checked before any fill came back. Nothing is
+    counted twice: an in-flight instrument that has reached the book is dropped
+    from the in-flight set, and once past ``IN_FLIGHT_WINDOW_SECONDS`` the book
+    is the whole truth again.
+
+    Only entries reach here. A protective stop and an exit use the write-ahead
+    primitives directly and skip this chain on purpose -- see
+    ``live_protection`` -- so a stricter count here can never leave a position
+    unprotected.
     """
     limit = int(controls.maximum_open_positions or 0)
     exposure_percent = Decimal(str(controls.maximum_open_exposure_percent or 0))
@@ -460,6 +539,15 @@ async def _live_position_check(
         )
 
     open_rows = open_positions(positions)
+    # Entries we have committed to that the book cannot show yet, minus any
+    # that have since reached it. Matched on the token through the position
+    # row's own identifies(), which is the one comparison that knows how each
+    # broker names an instrument.
+    in_flight = tuple(
+        held_token
+        for held_token in await live_entries_in_flight(session, current_session_date())
+        if not any(item.identifies(held_token, None) for item in open_rows)
+    )
     # The canonical token from the order, and the broker-facing name from the
     # description -- which is where it lives: a BrokerOrder has no symbol and a
     # BrokerOrderDescription has no token, so taking both from one of them
@@ -469,7 +557,12 @@ async def _live_position_check(
     # An order against a token we already hold is adding to, reducing or
     # closing that position, not opening another one.
     mine = [item for item in open_rows if item.identifies(token, symbol)]
-    already_held = bool(mine)
+    # An order against an instrument whose own entry is still in flight is not
+    # opening an additional position either, and is exempt for the same reason
+    # a book position exempts it. Taking a second trade on one share is the
+    # per-share ceiling's question, not this one's.
+    mine_in_flight = bool(token) and token in in_flight
+    already_held = bool(mine) or mine_in_flight
     # Opposite to the position it names, so it can only make the book smaller.
     # Exempt from the exposure ceiling for the reason exits bypass these gates
     # entirely: a limit that refuses the order which would bring the account
@@ -481,16 +574,27 @@ async def _live_position_check(
         if item.net_quantity is not None
     )
 
-    held = len(open_rows)
+    held = len(open_rows) + len(in_flight)
+    # Exposure stays the book's own figure. It is money, and an order whose
+    # fill price is not known yet has no honest amount to add -- the position
+    # count is a count, which is why that one can include what is in flight.
     exposure = live_exposure(open_rows)
-    numbers = {"open_positions": held, "limit": limit, "exposure": str(exposure)}
+    numbers = {
+        "open_positions": held,
+        "limit": limit,
+        "exposure": str(exposure),
+        "in_flight": len(in_flight),
+    }
 
     if limit > 0 and not already_held and held >= limit:
+        names = sorted(item.symbol for item in open_rows)
+        detail = ", ".join(names) if names else "none settled yet"
+        pending = f" and {len(in_flight)} entr{'y' if len(in_flight) == 1 else 'ies'} still in flight" if in_flight else ""
         return LiveRiskCheck(
             "live_positions",
             False,
             f"{held} live position(s) are already open and the limit is {limit}: "
-            f"{', '.join(sorted(item.symbol for item in open_rows))}.",
+            f"{detail}{pending}.",
             numbers,
         )
 
@@ -589,7 +693,7 @@ async def authorize_live_order(
         # by a simulation: the two agree while nothing diverges and are
         # unrelated the moment anything does.
         checks.append(await _live_allocation_check(session, controls, candidate_risk))
-        checks.append(await _live_position_check(adapter, controls, order, description))
+        checks.append(await _live_position_check(session, adapter, controls, order, description))
 
     failures = [check for check in checks if not check.passed]
     return LiveRiskDecision(
