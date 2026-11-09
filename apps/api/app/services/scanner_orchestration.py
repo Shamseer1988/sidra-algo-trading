@@ -21,11 +21,12 @@ from app.services.paper_execution import PaperOrderManager
 from app.services.paper_strategy import AWAITING, SIGNALLED
 from app.services.risk_engine import PaperRiskEngine
 from app.services.safety import emergency_stop_state, paper_tracking_enabled
+from app.services.sectors import sector_of
 from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 from app.services.telegram import TelegramError, TelegramNotificationService
 from app.services.telegram_config import configured_settings
-from app.services.trade_counter import count_filled_entries
-from app.services.trading_symbols import resolve_symbol
+from app.services.trade_counter import count_filled_entries, filled_entry_instruments
+from app.services.trading_symbols import resolve_script_names, resolve_symbol
 
 STATE_TTL_SECONDS = 60 * 60 * 18
 
@@ -163,8 +164,8 @@ class PaperScannerOrchestrator:
         """Quota limits that block a *new signal* while still recording the evaluation.
 
         Ordering: an account-wide daily ceiling, then the per-share daily ceiling, then the
-        per-strategy daily cap, then the optional per-strategy per-side cap, then the
-        per-strategy cooldown.
+        per-sector daily ceiling, then the per-strategy daily cap, then the optional
+        per-strategy per-side cap, then the per-strategy cooldown.
 
         The per-share ceiling sits second on purpose. The per-strategy caps below it are
         each blind to the others, so two strategies that agree about one share both pass
@@ -197,6 +198,21 @@ class PaperScannerOrchestrator:
                     f"Daily ceiling for this share reached: {on_this_share.explain(per_instrument)} "
                     "Another strategy may already hold it; the per-strategy caps cannot see each other."
                 )
+            # The share is bounded; the company's neighbours are not. Three PSU
+            # banks entered in the same second on 9 November was one trade at
+            # three times the size, because those stops do not fail
+            # independently and no ceiling above this one can tell.
+            per_sector_default = DEFAULT_TRADING_CONTROLS["maximum_daily_trades_per_sector"]
+            per_sector = int(controls.get("maximum_daily_trades_per_sector", per_sector_default))
+            taken_today = await filled_entry_instruments(session, candle.session_date)
+            if taken_today:
+                group, held = await self._sector_usage(session, candle.instrument_token, taken_today)
+                if len(held) >= per_sector:
+                    return (
+                        f"Daily ceiling for the {group} group reached: "
+                        f"{len(held)} of {per_sector} used by {', '.join(held)}. "
+                        "Those move together, so a second trade here is the same bet twice."
+                    )
             # From fills, for the same reason the ceiling above is. These two
             # counted accepted evaluations, and an evaluation is written before
             # the risk engine is asked: a signal refused for "Maximum
@@ -231,6 +247,36 @@ class PaperScannerOrchestrator:
         if latest and (candle.opened_at - latest).total_seconds() < strategy.cooldown_minutes * 60:
             return "Strategy paper-signal cooldown is active"
         return None
+
+    async def _sector_usage(self, session, token: str, taken_today: tuple[str, ...]):  # noqa: ANN001
+        """This candidate's group, and today's filled entries already in it.
+
+        Names are resolved rather than compared as tokens because the map is
+        keyed by trading symbol, which is the spelling an operator maintains it
+        in. One batch lookup, and only when a signal has actually fired -- not
+        on every candle.
+
+        A lookup that fails leaves every instrument in a group of its own, so
+        the ceiling stops protecting and never starts refusing. Blocking a real
+        signal because a name could not be read would be the worse failure of
+        the two, and this gate is the only one here whose input can go stale.
+        """
+        try:
+            names = await resolve_script_names(session, [token, *taken_today])
+        except Exception as exc:  # noqa: BLE001 - a name lookup must not refuse a trade
+            self._logger.warning(
+                "scanner.sector_lookup_failed",
+                error=f"{type(exc).__name__}: {exc}",
+                detail="the per-sector ceiling is not being applied for this signal",
+            )
+            return sector_of(token), []
+        group = sector_of(names.get(token, token))
+        held = [
+            names.get(other, other)
+            for other in taken_today
+            if other != token and sector_of(names.get(other, other)) == group
+        ]
+        return group, sorted(held)
 
     async def _record(
         self,

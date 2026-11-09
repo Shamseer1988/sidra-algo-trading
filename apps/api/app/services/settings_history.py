@@ -37,6 +37,7 @@ RISK_CEILINGS = (
     "maximum_daily_risk_percent",
     "maximum_daily_trades",
     "maximum_daily_trades_per_instrument",
+    "maximum_daily_trades_per_sector",
     "maximum_open_positions",
     "maximum_open_exposure_percent",
     "daily_loss_limit",

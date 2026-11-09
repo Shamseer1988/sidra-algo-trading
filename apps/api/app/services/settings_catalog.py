@@ -315,6 +315,21 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
         is_ceiling=True,
     ),
     SettingSpec(
+        key="maximum_daily_trades_per_sector",
+        group=DAILY_RISK,
+        label="Maximum trades per sector per day",
+        help=(
+            "How many filled entries one group of instruments that move together may take in a "
+            "day. On 9 November three PSU banks were entered in the same second: that is one "
+            "trade at three times the size, because those stops do not fail independently. The "
+            "groups are listed in services/sectors.py; an instrument the map does not know is "
+            "counted on its own and limits nothing."
+        ),
+        unit=COUNT,
+        effect=IMMEDIATE,
+        is_ceiling=True,
+    ),
+    SettingSpec(
         key="maximum_open_positions",
         group=DAILY_RISK,
         label="Maximum concurrent positions",

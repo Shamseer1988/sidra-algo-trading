@@ -148,6 +148,33 @@ async def main() -> int:
         for key in reference:
             print(f"  {names.get(key, key):<{width}}  " + (key if args.tokens else ""))
 
+    # The per-sector ceiling is only as good as the map behind it, and a name
+    # it does not know limits nothing silently. Said here rather than at the
+    # moment of the trade: a stale map is a configuration fault, and this is
+    # where configuration is read.
+    from app.services.sectors import SECTORS, sector_of, unmapped  # noqa: PLC0415
+
+    heading("SECTOR GROUPS — what the per-sector ceiling treats as one bet")
+    grouped: dict[str, list[str]] = {}
+    for key in equities:
+        name = names.get(key, key)
+        grouped.setdefault(sector_of(name), []).append(name)
+    for group, items in sorted(grouped.items(), key=lambda row: (-len(row[1]), row[0])):
+        if group.startswith("UNMAPPED:"):
+            continue
+        marker = "  <- more than one; the ceiling binds here" if len(items) > 1 else ""
+        print(f"  {group:<10}{len(items):>3}  {', '.join(sorted(items))}{marker}")
+
+    missing = unmapped([names.get(key, key) for key in equities])
+    if missing:
+        print()
+        print(f"  [WARN] {len(missing)} instrument(s) are not in the sector map: {', '.join(missing)}")
+        print("         Each counts as a group of its own, so the per-sector ceiling does not")
+        print("         bound them against anything. Add them to app/services/sectors.py.")
+    else:
+        print()
+        print(f"  [OK]   Every tradeable instrument is mapped ({len(SECTORS)} names known).")
+
     heading("WHAT STILL NARROWS THIS")
     # From the saved controls, not the environment. The switch moved onto the
     # Settings screen, and reading .env here told an operator who had turned

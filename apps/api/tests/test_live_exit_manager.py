@@ -550,8 +550,15 @@ async def test_the_stop_is_cancelled_before_the_exit_is_sent(wiring) -> None:
 
 @pytest.mark.asyncio
 async def test_a_position_past_its_square_off_is_closed_regardless_of_price(wiring) -> None:
-    past = (datetime.now(UTC).astimezone(module.MARKET_TIMEZONE) - timedelta(minutes=5)).strftime("%H:%M")
-    wiring.signal = signal(target="9999", square_off=past)
+    # "Five minutes ago" is not a time of day. Between 00:00 and 00:05 IST it
+    # wrapped to 23:5x, which the deadline arithmetic correctly reads as still
+    # ahead, and this test failed for those five minutes every night while
+    # saying nothing at all about the code.
+    #
+    # 00:00 instead, which needs no clock: minutes_until_square_off builds the
+    # deadline as *today* at that time, so midnight is behind every moment of
+    # every day.
+    wiring.signal = signal(target="9999", square_off="00:00")
     wiring.close = Decimal("2840")  # nowhere near the target
     wiring.adapter = FakeAdapter([position(Decimal("50"))])
     result = await sweep(wiring)

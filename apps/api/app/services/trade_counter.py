@@ -176,6 +176,50 @@ class TradeCount:
         return f"{self.total} of {ceiling} used — {detail}."
 
 
+async def filled_entry_instruments(session: AsyncSession, session_date: date) -> tuple[str, ...]:
+    """The instruments today's filled entries were taken on, once each.
+
+    The sector ceiling needs names, not a number: "how many of today's trades
+    are in this candidate's group" cannot be answered by a count. Read from the
+    same two sources and the same statuses as ``count_filled_entries`` so the
+    two can never disagree about what today has taken.
+
+    Paper rows carry the token directly. A live row carries it in its request
+    snapshot, because ``trading_symbol`` holds what the broker was asked for and
+    the brokers disagree about what that is -- Upstox is handed the token and
+    Firstock a tradable name, so only the snapshot answers for both.
+    """
+    start, end = session_bounds_utc(session_date)
+    tokens: list[str] = []
+
+    paper_rows = await session.scalars(
+        select(PaperOrder.instrument_token).where(
+            PaperOrder.session_date == session_date,
+            PaperOrder.order_role == "ENTRY",
+            PaperOrder.filled_quantity > 0,
+        )
+    )
+    for value in paper_rows:
+        if value and value not in tokens:
+            tokens.append(str(value))
+
+    live_rows = await session.scalars(
+        select(LiveOrderSubmission).where(
+            LiveOrderSubmission.created_at >= start,
+            LiveOrderSubmission.created_at < end,
+            LiveOrderSubmission.status.in_(LIVE_COMMITTED_STATUSES),
+            # An entry, not the stop behind it or the exit that closes it.
+            LiveOrderSubmission.planned_risk.is_not(None),
+        )
+    )
+    for row in live_rows:
+        token = row.instrument_token
+        if token and token not in tokens:
+            tokens.append(token)
+
+    return tuple(tokens)
+
+
 async def count_filled_entries(
     session: AsyncSession,
     session_date: date,

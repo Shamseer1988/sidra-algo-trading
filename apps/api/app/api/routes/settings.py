@@ -81,6 +81,7 @@ DEFAULT_TRADING_CONTROLS = {
     "maximum_open_exposure_percent": 100.0,
     "maximum_daily_trades": 4,
     "maximum_daily_trades_per_instrument": 1,
+    "maximum_daily_trades_per_sector": 1,
     "minimum_score": 80,
     "minimum_rr": 1.5,
     "volume_multiplier": 1.3,
@@ -136,6 +137,12 @@ class TradingControls(BaseModel):
     # set it to 2 to allow one. Rows written before this control keep working:
     # the default applies to them.
     maximum_daily_trades_per_instrument: int = Field(default=1, ge=1, le=5)
+    # Filled entries across one group of instruments that move together, per day.
+    # Three PSU banks entered in the same second on 9 November is not three
+    # trades, it is one trade at three times the size: those stops do not fail
+    # independently. See services/sectors.py for the groups and why they are
+    # drawn by co-movement rather than by industry.
+    maximum_daily_trades_per_sector: int = Field(default=1, ge=1, le=5)
     minimum_score: int = Field(ge=0, le=100)
     minimum_rr: float = Field(ge=1, le=10)
     volume_multiplier: float = Field(ge=0.5, le=10)
