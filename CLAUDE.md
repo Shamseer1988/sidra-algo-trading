@@ -11,8 +11,14 @@ It is not on this machine. Reach it over SSH, and **always pass `-T`** — witho
 it `docker compose exec` allocates a TTY and hangs on a non-interactive SSH:
 
 ```
-ssh nas "cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/<script>.py <args>"
+ssh nas "cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/<script>.py <args>"
 ```
+
+**The absolute path to docker is not optional either.** `ssh host "command"` runs
+a non-interactive shell, which on DSM does not put `/usr/local/bin` on PATH, so a
+bare `docker` fails with `sh: docker: command not found`. It works when you ssh in
+and type it, because that shell is interactive and reads the profile. The same
+command through Claude is not.
 
 Services: `api`, `scanner-worker`, `postgres`, `redis`, `caddy`, `web`.
 The scanner is `scanner-worker`, not `worker`.

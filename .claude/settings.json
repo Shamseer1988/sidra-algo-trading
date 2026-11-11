@@ -2,18 +2,18 @@
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
     "allow": [
-      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/check_settings.py*)",
-      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/daily_review.py*)",
-      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/inspect_live_day.py*)",
-      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/why_no_trade.py*)",
-      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/watchlist.py*)",
-      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/candle_coverage.py*)",
-      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/strategy_stats.py*)",
-      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/trade_patterns.py*)",
-      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/entry_edge.py*)",
-      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/snapshot.py*)",
-      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/audit_deployment.py*)",
-      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && docker compose exec -T api python scripts/universe_applied.py*)"
+      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/check_settings.py*)",
+      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/daily_review.py*)",
+      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/inspect_live_day.py*)",
+      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/why_no_trade.py*)",
+      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/watchlist.py*)",
+      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/candle_coverage.py*)",
+      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/strategy_stats.py*)",
+      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/trade_patterns.py*)",
+      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/entry_edge.py*)",
+      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/snapshot.py*)",
+      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/audit_deployment.py*)",
+      "Bash(ssh nas \"cd /volume1/docker/sidra-algo-trading && /usr/local/bin/docker compose exec -T api python scripts/universe_applied.py*)"
     ],
     "deny": []
   },
