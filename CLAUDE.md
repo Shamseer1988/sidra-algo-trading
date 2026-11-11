@@ -45,6 +45,16 @@ restore-*.sh           purge_history.py       repair_unbalanced_positions.py
 Shamseer changes trading settings himself. If one needs to change, say which
 one and why, and wait.
 
+**This list is enforced, not just written down.** `.claude/settings.json` has a
+PreToolUse hook that refuses any Bash command whose text names one of them. It
+matches the text, so it also refuses a command that merely mentions one -- that
+is the safe direction and costs only the occasional `grep`. It is a guardrail
+against a mistake, not a security boundary: anything that assembles the name
+from pieces goes straight past it.
+
+The twelve read-only scripts are allow-listed by their full command, so they
+run without a prompt. Anything else still asks.
+
 ## Deploying a code change
 
 ```
