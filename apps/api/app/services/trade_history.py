@@ -28,7 +28,7 @@ double every trade; counting fills would multiply them by however many partials
 the simulator produced.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -45,7 +45,7 @@ from app.db.models import (
     PaperSignal,
     SessionHalt,
 )
-from app.services.live_fills import SignalFills, fills_by_signal
+from app.services.live_fills import FillSide, SignalFills, fills_by_signal
 from app.services.trade_counter import LIVE_PLACED_STATUSES
 
 # Reconciliation vocabulary. Four states, and the distinction between the middle
@@ -132,6 +132,11 @@ class TradeRecord:
     # Their difference is slippage, and it is the number that was invisible for
     # as long as only one of them reached the screen.
     modelled_gross_pnl: Decimal = Decimal("0")
+    # False for a live trade the simulator never opened a position for (see
+    # ``_live_only_records``). There is no modelled figure to measure slippage
+    # against, and reporting zero would claim the fills matched a model that
+    # did not exist.
+    has_model: bool = True
 
     @property
     def slippage(self) -> Decimal | None:
@@ -140,7 +145,7 @@ class TradeRecord:
         Negative means the fills were worse than the model assumed, which is
         the usual direction and the honest one to show.
         """
-        if self.price_source != BROKER:
+        if self.price_source != BROKER or not self.has_model:
             return None
         return (self.gross_pnl - self.modelled_gross_pnl).quantize(Decimal("0.01"))
 
@@ -476,6 +481,220 @@ def _price_trade(position: PaperPosition, fills: SignalFills | None) -> _PricedT
     )
 
 
+async def _live_submissions(session: AsyncSession, signal_ids: set[UUID]) -> dict[UUID, list[LiveOrderSubmission]]:
+    """Every placed submission behind each of these signals, oldest first."""
+    if not signal_ids:
+        return {}
+    rows = (
+        await session.scalars(
+            select(LiveOrderSubmission)
+            .where(
+                LiveOrderSubmission.paper_signal_id.in_(signal_ids),
+                LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
+            )
+            .order_by(LiveOrderSubmission.created_at.asc())
+        )
+    ).all()
+    grouped: dict[UUID, list[LiveOrderSubmission]] = {}
+    for row in rows:
+        if row.paper_signal_id is not None:
+            grouped.setdefault(row.paper_signal_id, []).append(row)
+    return grouped
+
+
+def _never_filled(submissions: dict[UUID, list[LiveOrderSubmission]]) -> set[UUID]:
+    """Signals the broker has answered for, every order of which filled nothing.
+
+    Answered is the operative word. A submission whose fill was never recorded
+    (``filled_quantity`` is None) is not known to be unfilled -- it predates
+    the fill columns, or the sweep has not run -- and is left counted as live
+    rather than guessed out of the record.
+    """
+    return {
+        signal_id
+        for signal_id, rows in submissions.items()
+        if rows and all(row.filled_quantity is not None and row.filled_quantity == 0 for row in rows)
+    }
+
+
+async def _signals(
+    session: AsyncSession,
+    signal_ids: set[UUID],
+    instrument_token: str | None,
+    strategy_version: str | None,
+) -> list[PaperSignal]:
+    if not signal_ids:
+        return []
+    statement = select(PaperSignal).where(PaperSignal.id.in_(signal_ids))
+    if instrument_token:
+        statement = statement.where(PaperSignal.instrument_token == instrument_token)
+    if strategy_version:
+        statement = statement.where(PaperSignal.strategy_version == strategy_version)
+    return list((await session.scalars(statement)).all())
+
+
+def _pool_by_instrument(
+    fills: dict[UUID, SignalFills], instruments: dict[UUID, tuple[date, str]]
+) -> dict[UUID, SignalFills]:
+    """Settle fills that one signal's order made on another signal's behalf.
+
+    Two entries on one share on one day leave the broker one net position, and
+    the second signal's stop or exit is sized to all of it. On 3 November
+    HDFCBANK was bought twice, 19 shares each; the first stop was cancelled and
+    the second signal's exit sold all 38. Per signal that read as one trade
+    bought and never sold -- so priced by the model -- and one that sold twice
+    what it bought, so priced on half its quantity. The broker's P&L for the
+    pair was ₹256.50 and ours was ₹264.45, from two numbers neither of which
+    was true.
+
+    The excess on one signal is handed, at its own average price, to the
+    signal on the same share and day that is short of exactly that side. The
+    quantities and the money are conserved: nothing is added, it is only
+    attributed. A remainder nobody is short of stays where it was.
+    """
+    groups: dict[tuple[date, str], list[UUID]] = {}
+    for signal_id in fills:
+        key = instruments.get(signal_id)
+        if key is not None:
+            groups.setdefault(key, []).append(signal_id)
+
+    settled = dict(fills)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        for side in (BUY_SIDE, SELL_SIDE):
+            for taker in members:
+                for giver in members:
+                    if giver == taker:
+                        continue
+                    settled[giver], settled[taker] = _hand_over(settled[giver], settled[taker], side)
+    return settled
+
+
+BUY_SIDE = "buy"
+SELL_SIDE = "sell"
+
+
+def _hand_over(giver: SignalFills, taker: SignalFills, side: str) -> tuple[SignalFills, SignalFills]:
+    """Move ``giver``'s surplus on ``side`` to ``taker``'s shortfall on it."""
+    other = SELL_SIDE if side == BUY_SIDE else BUY_SIDE
+    give_side: FillSide = getattr(giver, side)
+    surplus = give_side.quantity - getattr(giver, other).quantity
+    shortfall = getattr(taker, other).quantity - getattr(taker, side).quantity
+    moved = min(surplus, shortfall)
+    if moved <= 0 or give_side.price is None:
+        return giver, taker
+
+    kept = FillSide(quantity=give_side.quantity - moved, price=give_side.price if give_side.quantity > moved else None)
+    taken = _combine(getattr(taker, side), FillSide(quantity=moved, price=give_side.price))
+    return replace(giver, **{side: kept}), replace(taker, **{side: taken})
+
+
+def _combine(first: FillSide, second: FillSide) -> FillSide:
+    quantity = first.quantity + second.quantity
+    priced = [part for part in (first, second) if part.quantity > 0 and part.price is not None]
+    if not priced:
+        return FillSide(quantity=quantity, price=None)
+    weighted = sum(part.quantity * part.price for part in priced) / sum(part.quantity for part in priced)
+    return FillSide(quantity=quantity, price=Decimal(str(weighted)).quantize(Decimal("0.0001")))
+
+
+async def _live_only_records(
+    session: AsyncSession,
+    signals: list[PaperSignal],
+    *,
+    fills: dict[UUID, SignalFills],
+    submissions: dict[UUID, list[LiveOrderSubmission]],
+    names: dict[str, str],
+    brokers: dict[UUID, str],
+) -> list[TradeRecord]:
+    """A trade for each live signal that has fills at the broker and no position.
+
+    Built from the broker's fills alone, because they are all there is. The
+    charges are this system's rate-card estimate on those fills, the same
+    estimate a simulated position carries, so the day's local cost stays one
+    kind of number. ``position_id`` is the signal's id: there is no position,
+    and the signal is what the drill-down can still find.
+
+    Reconciliation is filled in by the caller, which owns the day verdicts.
+    """
+    if not signals:
+        return []
+
+    from app.db.models import ApplicationSetting
+    from app.services.paper_execution import (
+        DEFAULT_PAPER_EXECUTION_CONTROLS,
+        PAPER_EXECUTION_KEY,
+        PaperExecutionControls,
+        transaction_costs,
+    )
+
+    setting = await session.get(ApplicationSetting, PAPER_EXECUTION_KEY)
+    controls = PaperExecutionControls.model_validate(setting.value if setting else DEFAULT_PAPER_EXECUTION_CONTROLS)
+
+    records: list[TradeRecord] = []
+    for signal in signals:
+        filled = fills.get(signal.id)
+        if filled is None:
+            continue
+        entry = filled.entry(signal.side)
+        exit_ = filled.exit(signal.side)
+        if entry.quantity <= 0:
+            continue
+
+        charges = Decimal("0")
+        for leg, part in (("SELL", filled.sell), ("BUY", filled.buy)):
+            if part.quantity > 0 and part.price is not None:
+                charges += transaction_costs(part.price, part.quantity, leg, controls).total
+        charges = charges.quantize(Decimal("0.01"))
+
+        gross = filled.gross or Decimal("0")
+        open_quantity = abs(entry.quantity - exit_.quantity)
+        rows = submissions.get(signal.id, [])
+        filled_rows = [row for row in rows if row.filled_quantity]
+        entry_word = "SELL" if signal.side.upper() == "SHORT" else "BUY"
+        opened = next((row.created_at for row in filled_rows if row.canonical_side == entry_word), None)
+        closed = (
+            max((row.created_at for row in filled_rows if row.canonical_side != entry_word), default=None)
+            if open_quantity == 0
+            else None
+        )
+
+        records.append(
+            TradeRecord(
+                position_id=signal.id,
+                signal_id=signal.id,
+                session_date=signal.session_date,
+                instrument_token=signal.instrument_token,
+                script_name=names.get(signal.instrument_token, signal.instrument_token),
+                side=signal.side,
+                strategy_version=signal.strategy_version,
+                status="CLOSED" if open_quantity == 0 else "OPEN",
+                execution_mode=LIVE,
+                quantity=entry.quantity,
+                open_quantity=open_quantity,
+                entry_price=entry.price,
+                exit_price=exit_.price if exit_.quantity else None,
+                stop_price=_money(signal.stop_price),
+                target_price=_money(signal.target_price),
+                opened_at=opened,
+                closed_at=closed,
+                gross_pnl=gross,
+                charges=charges,
+                net_pnl=gross - charges,
+                unrealized_pnl=Decimal("0"),
+                risk_amount=_money(signal.risk_amount),
+                reconciliation=BROKER_DATA_PENDING,
+                reconciliation_note="",
+                price_source=BROKER,
+                modelled_gross_pnl=Decimal("0"),
+                broker=brokers.get(signal.id),
+                has_model=False,
+            )
+        )
+    return records
+
+
 async def load_trades(
     session: AsyncSession,
     from_date: date,
@@ -515,6 +734,15 @@ async def load_trades(
     ).all()
 
     live_brokers = await live_brokers_by_signal(session, from_date, to_date)
+    submissions = await _live_submissions(session, set(live_brokers))
+
+    # A signal whose every order the broker answered with a fill of nothing --
+    # an entry rejected, or a limit that expired unfilled -- never put a share
+    # on the account. Counting it live gave it the simulator's P&L on a day the
+    # broker's statement has no such trade (7 Oct, 26 Oct, 5 Nov). It is a
+    # paper trade, and is reported as one.
+    for signal_id in _never_filled(submissions):
+        live_brokers.pop(signal_id, None)
     live_ids = set(live_brokers)
     snapshots = await latest_broker_snapshots(session, from_date, to_date, broker=broker)
 
@@ -528,7 +756,20 @@ async def load_trades(
     # by ``live_fills`` from the order book reconciliation already reads; absent
     # for a trade whose fills were never seen, which is why every use below
     # falls back rather than assuming.
-    fills = await fills_by_signal(session, {signal.id for _, signal in rows if signal.id in live_ids})
+    fills = await fills_by_signal(session, live_ids)
+
+    # Live signals the simulator never opened a position for. The paper journal
+    # and the live path have separate caps, so the paper side can refuse a
+    # signal the live side places -- and a record built from positions alone
+    # then has no row for a trade that really happened at the broker. Eight
+    # such trades were missing between 23 Oct and 9 Nov, and with them their
+    # P&L, while the broker's charges for them were still being counted.
+    positioned = {signal.id for _, signal in rows}
+    live_only_signals = await _signals(session, live_ids - positioned, instrument_token, strategy_version)
+
+    instruments = {signal.id: (signal.session_date, signal.instrument_token) for _, signal in rows}
+    instruments.update({signal.id: (signal.session_date, signal.instrument_token) for signal in live_only_signals})
+    fills = _pool_by_instrument(fills, instruments)
 
     # Resolved before the day verdicts, not after. The day's gross has to be the
     # sum of the rows the operator can see, and a verdict computed from the
@@ -540,33 +781,57 @@ async def load_trades(
     # trade reads it. Computing it per trade would ask the same question of the
     # same broker snapshot once per row and could answer differently for two
     # trades on the same day.
-    per_day: dict[date, list] = {}
-    for position, signal in rows:
-        per_day.setdefault(position.session_date, []).append((position, signal))
+    from app.services.trading_symbols import resolve_script_names
 
-    day_verdicts: dict[date, tuple[str, str]] = {}
-    for session_date, entries in per_day.items():
-        # Live only, on both sides of the comparison. The broker's figure covers
-        # the trades that reached the broker and nothing else, so measuring it
-        # against a day that also contains paper trades reports a mismatch on
-        # every day that had one of each -- a stop-and-investigate instruction
-        # raised by arithmetic rather than by anything being wrong.
-        live_entries = [(item, sig) for item, sig in entries if on_account(sig.id)]
-        gross = sum((priced[item.id].gross for item, _ in live_entries), start=Decimal("0"))
-        charges = sum((_money(item.fees_total) for item, _ in live_entries), start=Decimal("0"))
-        live_count = len(live_entries)
-        day_verdicts[session_date] = reconcile_day(
-            live_trades=live_count,
+    names = await resolve_script_names(
+        session,
+        {position.instrument_token for position, _ in rows} | {signal.instrument_token for signal in live_only_signals},
+    )
+    live_only = await _live_only_records(
+        session,
+        live_only_signals,
+        fills=fills,
+        submissions=submissions,
+        names=names,
+        brokers=live_brokers,
+    )
+
+    # Live only, on both sides of the comparison. The broker's figure covers
+    # the trades that reached the broker and nothing else, so measuring it
+    # against a day that also contains paper trades reports a mismatch on
+    # every day that had one of each -- a stop-and-investigate instruction
+    # raised by arithmetic rather than by anything being wrong.
+    live_totals: dict[date, list[Decimal]] = {}
+
+    def count_live(session_date: date, gross: Decimal, charges: Decimal) -> None:
+        total = live_totals.setdefault(session_date, [Decimal("0"), Decimal("0"), Decimal("0")])
+        total[0] += 1
+        total[1] += gross
+        total[2] += charges
+
+    for position, signal in rows:
+        live_totals.setdefault(position.session_date, [Decimal("0"), Decimal("0"), Decimal("0")])
+        if on_account(signal.id):
+            count_live(position.session_date, priced[position.id].gross, _money(position.fees_total))
+    for record in live_only:
+        if on_account(record.signal_id):
+            count_live(record.session_date, record.gross_pnl, record.charges)
+
+    day_verdicts: dict[date, tuple[str, str]] = {
+        session_date: reconcile_day(
+            live_trades=int(count),
             local_gross=gross,
             local_charges=charges,
             snapshot=snapshots.get(session_date),
         )
-
-    from app.services.trading_symbols import resolve_script_names
-
-    names = await resolve_script_names(session, {position.instrument_token for position, _ in rows})
+        for session_date, (count, gross, charges) in live_totals.items()
+    }
 
     records: list[TradeRecord] = []
+    for record in live_only:
+        status, note = trade_reconciliation(LIVE, *day_verdicts[record.session_date])
+        records.append(replace(record, reconciliation=status, reconciliation_note=note))
+
     for position, signal in rows:
         mode = LIVE if signal.id in live_ids else PAPER
         day_status, day_note = day_verdicts[position.session_date]
@@ -603,6 +868,9 @@ async def load_trades(
                 broker=live_brokers.get(signal.id),
             )
         )
+
+    # Newest first, as the docstring promises, now that live-only rows are in.
+    records.sort(key=lambda item: (item.session_date, item.opened_at is not None, item.opened_at), reverse=True)
 
     wanted = (execution_mode or "").upper()
     if wanted in (PAPER, LIVE):
@@ -883,7 +1151,15 @@ async def load_trade_detail(
     """
     position = await session.get(PaperPosition, position_id)
     if position is None:
-        return None
+        # A live trade the simulator never opened a position for carries its
+        # signal's id instead (``_live_only_records``). It has no paper orders
+        # or fills to itemise; the broker's fills are on the record itself.
+        signal = await session.get(PaperSignal, position_id)
+        if signal is None:
+            return None
+        records = await load_trades(session, signal.session_date, signal.session_date)
+        record = next((item for item in records if item.position_id == position_id), None)
+        return None if record is None else (record, [], [])
 
     records = await load_trades(session, position.session_date, position.session_date)
     record = next((item for item in records if item.position_id == position_id), None)
