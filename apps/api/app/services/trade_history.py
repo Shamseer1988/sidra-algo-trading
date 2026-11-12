@@ -534,40 +534,43 @@ async def _signals(
 
 
 def _pool_by_instrument(
-    fills: dict[UUID, SignalFills], instruments: dict[UUID, tuple[date, str]]
+    fills: dict[UUID, SignalFills], instruments: dict[UUID, tuple[date, str, str]]
 ) -> dict[UUID, SignalFills]:
-    """Settle fills that one signal's order made on another signal's behalf.
+    """Settle exits that one signal's order made on another signal's behalf.
 
     Two entries on one share on one day leave the broker one net position, and
     the second signal's stop or exit is sized to all of it. On 3 November
     HDFCBANK was bought twice, 19 shares each; the first stop was cancelled and
     the second signal's exit sold all 38. Per signal that read as one trade
     bought and never sold -- so priced by the model -- and one that sold twice
-    what it bought, so priced on half its quantity. The broker's P&L for the
-    pair was ₹256.50 and ours was ₹264.45, from two numbers neither of which
-    was true.
+    what it bought, so priced on half its quantity.
 
-    The excess on one signal is handed, at its own average price, to the
-    signal on the same share and day that is short of exactly that side. The
-    quantities and the money are conserved: nothing is added, it is only
-    attributed. A remainder nobody is short of stays where it was.
+    Only exits move, and only between signals on the same share, day and side.
+    A signal whose exits exceed its own entry hands the excess, at its own
+    average price, to a signal whose entry has not been fully exited. Entries
+    never move: an entry is the signal's own decision, and reattributing one
+    would invent a trade. Quantity and money are conserved -- nothing is
+    added, it is only attributed -- and a remainder nobody is short of stays
+    where it was.
     """
-    groups: dict[tuple[date, str], list[UUID]] = {}
+    groups: dict[tuple[date, str, str], list[UUID]] = {}
     for signal_id in fills:
         key = instruments.get(signal_id)
         if key is not None:
             groups.setdefault(key, []).append(signal_id)
 
     settled = dict(fills)
-    for members in groups.values():
+    for (_, _, side), members in groups.items():
         if len(members) < 2:
             continue
-        for side in (BUY_SIDE, SELL_SIDE):
-            for taker in members:
-                for giver in members:
-                    if giver == taker:
-                        continue
-                    settled[giver], settled[taker] = _hand_over(settled[giver], settled[taker], side)
+        exit_attr = BUY_SIDE if side.upper() == "SHORT" else SELL_SIDE
+        entry_attr = SELL_SIDE if exit_attr == BUY_SIDE else BUY_SIDE
+        for taker in members:
+            for giver in members:
+                if giver != taker:
+                    settled[giver], settled[taker] = _hand_over(
+                        settled[giver], settled[taker], exit_attr=exit_attr, entry_attr=entry_attr
+                    )
     return settled
 
 
@@ -575,19 +578,20 @@ BUY_SIDE = "buy"
 SELL_SIDE = "sell"
 
 
-def _hand_over(giver: SignalFills, taker: SignalFills, side: str) -> tuple[SignalFills, SignalFills]:
-    """Move ``giver``'s surplus on ``side`` to ``taker``'s shortfall on it."""
-    other = SELL_SIDE if side == BUY_SIDE else BUY_SIDE
-    give_side: FillSide = getattr(giver, side)
-    surplus = give_side.quantity - getattr(giver, other).quantity
-    shortfall = getattr(taker, other).quantity - getattr(taker, side).quantity
+def _hand_over(
+    giver: SignalFills, taker: SignalFills, *, exit_attr: str, entry_attr: str
+) -> tuple[SignalFills, SignalFills]:
+    """Move ``giver``'s exits beyond its own entry to cover ``taker``'s unexited entry."""
+    give_exit: FillSide = getattr(giver, exit_attr)
+    surplus = give_exit.quantity - getattr(giver, entry_attr).quantity
+    shortfall = getattr(taker, entry_attr).quantity - getattr(taker, exit_attr).quantity
     moved = min(surplus, shortfall)
-    if moved <= 0 or give_side.price is None:
+    if moved <= 0 or give_exit.price is None:
         return giver, taker
 
-    kept = FillSide(quantity=give_side.quantity - moved, price=give_side.price if give_side.quantity > moved else None)
-    taken = _combine(getattr(taker, side), FillSide(quantity=moved, price=give_side.price))
-    return replace(giver, **{side: kept}), replace(taker, **{side: taken})
+    kept = FillSide(quantity=give_exit.quantity - moved, price=give_exit.price)
+    taken = _combine(getattr(taker, exit_attr), FillSide(quantity=moved, price=give_exit.price))
+    return replace(giver, **{exit_attr: kept}), replace(taker, **{exit_attr: taken})
 
 
 def _combine(first: FillSide, second: FillSide) -> FillSide:
@@ -767,8 +771,10 @@ async def load_trades(
     positioned = {signal.id for _, signal in rows}
     live_only_signals = await _signals(session, live_ids - positioned, instrument_token, strategy_version)
 
-    instruments = {signal.id: (signal.session_date, signal.instrument_token) for _, signal in rows}
-    instruments.update({signal.id: (signal.session_date, signal.instrument_token) for signal in live_only_signals})
+    instruments = {signal.id: (signal.session_date, signal.instrument_token, signal.side) for _, signal in rows}
+    instruments.update(
+        {signal.id: (signal.session_date, signal.instrument_token, signal.side) for signal in live_only_signals}
+    )
     fills = _pool_by_instrument(fills, instruments)
 
     # Resolved before the day verdicts, not after. The day's gross has to be the
