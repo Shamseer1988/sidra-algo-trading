@@ -65,7 +65,7 @@ from app.services.live_orders import (
     prepare_submission,
     send_prepared_order,
 )
-from app.services.live_protection import protect_position
+from app.services.live_protection import covering_stops, protect_position
 from app.services.price_ticks import TICK, round_to_tick
 from app.services.trade_counter import LIVE_PLACED_STATUSES, session_bounds_utc
 from app.services.trading_calendar import MARKET_TIMEZONE, MarketPhase, TradingCalendar
@@ -564,7 +564,25 @@ async def _hold_or_protect(
     # exists. The check used to stop at "any working stop" and return, so a stop
     # for 1 behind a position of 2 -- which is what a partially filled entry
     # leaves -- read as protected, once a minute, all day.
-    covered = sum(int(stop.quantity or 0) for stop in working)
+    #
+    # Counting every trade's working stops on this share, not only this
+    # signal's. The position is the broker's net for the share, and an earlier
+    # trade's resting stop closes part of it. Counting only the latest signal's
+    # read that as a shortfall and placed another stop, so the stops together
+    # came to more than was held, and filling both reversed the position.
+    others = [
+        stop
+        for stop in await covering_stops(
+            session,
+            instrument_token=signal.instrument_token,
+            exit_side=SELL if net > 0 else BUY,
+            book=book,
+            start=start,
+            end=end,
+        )
+        if stop.paper_signal_id != signal.id
+    ]
+    covered = sum(int(stop.quantity or 0) for stop in working) + sum(int(stop.quantity or 0) for stop in others)
     if covered >= quantity:
         # Protected. The only thing left to ask is whether the stop should now
         # be somewhere better than it is.

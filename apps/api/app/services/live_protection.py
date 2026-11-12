@@ -35,9 +35,11 @@ instead, because a stop for the wrong size is worse than an alert.
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
@@ -54,6 +56,8 @@ from app.services.live_orders import (
     send_prepared_order,
 )
 from app.services.price_ticks import TICK, round_to_tick
+from app.services.trade_counter import session_bounds_utc
+from app.services.trading_calendar import MARKET_TIMEZONE
 from app.services.trading_symbols import instrument_tick_size
 
 logger = logging.getLogger(__name__)
@@ -118,6 +122,74 @@ async def _held_quantity(adapter: BrokerAdapter, token: str, symbol: str | None)
         if record.identifies(token, symbol):
             return record.net_quantity
     return Decimal("0")
+
+
+async def covering_stops(
+    session: AsyncSession,
+    *,
+    instrument_token: str,
+    exit_side: str,
+    book: list | None,
+    start: datetime,
+    end: datetime,
+) -> list[LiveOrderSubmission]:
+    """Our stops on this instrument and side that are working at the broker now.
+
+    Every signal's stops, not just one signal's. The broker holds one net
+    position per share, and every stop resting against it closes part of that
+    one position, whichever trade placed it. On 28 October two IDFCFIRSTB
+    entries of 198 each were protected by a stop for 198 and then a stop for
+    396 -- the second sized to the whole net position while the first still
+    rested. Both triggered, 594 were sold against 396 held, and the account was
+    short 198 shares for seven minutes. JSWSTEEL did the same on 6 November.
+
+    An unreadable book returns every stop recorded as accepted. That counts a
+    stop that may already be gone as cover, which leaves the position under-
+    stopped until the next sweep reads the book. The other direction -- not
+    counting a stop that is still working -- reverses the position, which is
+    the failure this function exists for.
+    """
+    rows = (
+        await session.scalars(
+            select(LiveOrderSubmission).where(
+                LiveOrderSubmission.status == ACCEPTED,
+                LiveOrderSubmission.created_at >= start,
+                LiveOrderSubmission.created_at < end,
+            )
+        )
+    ).all()
+    stops = [
+        row
+        for row in rows
+        if row.canonical_order_type == STOP_MARKET
+        and row.instrument_token == instrument_token
+        and row.canonical_side == exit_side
+    ]
+    if book is None:
+        return stops
+    open_ids = {str(order.broker_order_id) for order in book if order.status in OPEN_STATUSES and order.broker_order_id}
+    return [stop for stop in stops if any(str(number) in open_ids for number in (stop.broker_order_numbers or []))]
+
+
+async def _covered_by_other_trades(
+    session: AsyncSession, adapter: BrokerAdapter, *, signal: PaperSignal, net: Decimal
+) -> int:
+    """How much of this position other trades' working stops already close."""
+    try:
+        book = await adapter.normalised_orders()
+    except Exception as exc:  # noqa: BLE001 - this path must not raise
+        logger.warning("live_protection.book_unreadable_for_cover error=%s", exc)
+        book = None
+    start, end = session_bounds_utc(datetime.now(MARKET_TIMEZONE).date())
+    stops = await covering_stops(
+        session,
+        instrument_token=signal.instrument_token,
+        exit_side=_exit_side(net > 0),
+        book=book,
+        start=start,
+        end=end,
+    )
+    return sum(int(stop.quantity or 0) for stop in stops if stop.paper_signal_id != signal.id)
 
 
 async def _place_exit(
@@ -366,6 +438,25 @@ async def _protect(
         if after == 0:
             return ProtectionOutcome(True, "flat", "The partial fill was closed before a stop was needed.")
         net = after
+
+    # Only the part no other trade's stop already closes. The net quantity is
+    # the whole position on this share, and when an earlier entry on it still
+    # has a stop resting, a stop sized to all of it closes the earlier shares
+    # twice -- and opens the reverse position when both trigger.
+    covered = await _covered_by_other_trades(session, adapter, signal=signal, net=net)
+    if covered:
+        remaining = int(abs(net)) - covered
+        logger.info(
+            "live_protection.partly_covered symbol=%s held=%s covered_by_others=%s", symbol, abs(net), covered
+        )
+        if remaining <= 0:
+            return ProtectionOutcome(
+                True,
+                "covered",
+                f"{abs(net)} of {symbol} is held and stops already working for earlier trades cover {covered}. "
+                "No further stop was placed, because one more would close more than is held.",
+            )
+        net = Decimal(remaining) if net > 0 else Decimal(-remaining)
 
     # The canonical product, never submission.product. That field holds what
     # the broker was asked for -- "I" at Upstox -- and describe() translates
