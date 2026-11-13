@@ -50,6 +50,15 @@ from app.services.settings_history import record_revision, summarise, summarise_
 RULE = "=" * 88
 TRUE = {"true", "yes", "on", "1"}
 FALSE = {"false", "no", "off", "0"}
+# Keys whose value stays text even when it spells "none".
+#
+# For every nullable setting the word means the absence of a value:
+# ``stop_atr_multiple=none`` is how a strategy gives up an opinion it once had
+# and goes back to the account control. trailing_rule is the exception --
+# "NONE" is one of its three valid names, the rule that leaves the stop where
+# it is -- so parsing it to Python None refused the one exit rule the sweeps
+# said to change, and the refusal named NoneType rather than the mistake.
+TEXT_ONLY_KEYS = {"trailing_rule"}
 
 
 def refuse(what: str, error: Exception) -> None:
@@ -67,7 +76,16 @@ def refuse(what: str, error: Exception) -> None:
     raise SystemExit(1)
 
 
-def parse_value(raw: str) -> object:
+def leaf(key: str) -> str:
+    """The part of a key after the one dot apply_path follows.
+
+    ``exit_rules.trailing_rule`` and ``trailing_rule`` are the same setting
+    written two ways, so anything that matches on the name has to see both.
+    """
+    return key.rpartition(".")[2].strip()
+
+
+def parse_value(raw: str, key: str = "") -> object:
     """A command-line string as the value it is meant to be.
 
     Order matters. ``true`` is a boolean and not the string "true", and ``2`` is
@@ -75,6 +93,8 @@ def parse_value(raw: str) -> object:
     number one and a trade ceiling is not a fraction. Anything that is none of
     those stays text, which is what a time like ``14:45`` and a rule name like
     ``BREAKEVEN_AT_R`` need. The models validate it afterwards either way.
+
+    ``key`` decides one case the word alone cannot: see TEXT_ONLY_KEYS.
     """
     text = raw.strip()
     lowered = text.lower()
@@ -82,7 +102,7 @@ def parse_value(raw: str) -> object:
         return True
     if lowered in FALSE:
         return False
-    if lowered in {"none", "null", ""}:
+    if lowered in {"none", "null", ""} and leaf(key) not in TEXT_ONLY_KEYS:
         return None
     try:
         return int(text)
@@ -98,7 +118,7 @@ def split_pair(pair: str) -> tuple[str, object]:
     if "=" not in pair:
         raise SystemExit(f"Expected key=value, got: {pair}")
     key, _, raw = pair.partition("=")
-    return key.strip(), parse_value(raw)
+    return key.strip(), parse_value(raw, key)
 
 
 def apply_path(payload: dict, key: str, value: object) -> None:

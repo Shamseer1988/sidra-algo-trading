@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from app.db.models import (
     BrokerDaySnapshot,
@@ -984,3 +984,146 @@ async def test_rebuilt_days_total_into_the_range_like_any_other():
     assert totals.trading_days == 2
     assert totals.broker_days == 2
     assert totals.broker_net_pnl == Decimal("97.2800")
+
+
+# --- the record has to hold every trade the broker does --------------------
+#
+# Between 7 October and 9 November the broker's statement and this record
+# disagreed on seven of twenty-one days, and nobody had traded the account by
+# hand. Three things, each tested below: live trades the simulator never opened
+# a position for were missing; live entries that never filled were counted with
+# the simulator's P&L; and one signal's exit filling on another's behalf left
+# both priced wrongly.
+
+
+async def a_live_signal(*, side="LONG", instrument="NSE_EQ|INE002A01018", quantity=10, risk="100"):
+    """A signal the live path placed and the paper journal never opened."""
+    async with SessionLocal() as session:
+        signal = PaperSignal(
+            signal_key=uuid4().hex,
+            instrument_token=instrument,
+            session_date=SESSION_DATE,
+            candle_opened_at=datetime(2026, 9, 21, 4, 0, tzinfo=UTC),
+            strategy_version="rs-pullback-v1@1",
+            side=side,
+            entry_price=Decimal("100"),
+            stop_price=Decimal("98"),
+            target_price=Decimal("104"),
+            quantity=quantity,
+            risk_amount=Decimal(risk),
+            score=80,
+        )
+        session.add(signal)
+        await session.commit()
+        return signal.id
+
+
+async def a_fill(signal_id, leg, quantity, price):
+    """One submission the broker answered: ``quantity`` 0 is an order that filled nothing."""
+    async with SessionLocal() as session:
+        session.add(
+            LiveOrderSubmission(
+                client_order_id=uuid4().hex[:20],
+                paper_signal_id=signal_id,
+                broker="UPSTOX",
+                exchange="NSE",
+                trading_symbol="RELIANCE",
+                product="I",
+                price_type="LIMIT",
+                transaction_type=leg,
+                quantity=max(quantity, 1),
+                status="ACCEPTED",
+                request_snapshot={"canonical": {"side": leg}},
+                filled_quantity=quantity,
+                average_fill_price=None if price is None else Decimal(str(price)),
+                broker_status="COMPLETE" if quantity else "REJECTED",
+            )
+        )
+        await session.commit()
+
+
+async def test_a_live_trade_with_no_position_is_still_in_the_record():
+    signal_id = await a_live_signal(side="SHORT")
+    await a_fill(signal_id, "SELL", 48, "295.60")
+    await a_fill(signal_id, "BUY", 48, "291.20")
+
+    records, _, _ = await load(mode="LIVE")
+    assert len(records) == 1
+    record = records[0]
+    assert record.execution_mode == history.LIVE
+    assert record.price_source == history.BROKER
+    assert record.gross_pnl == Decimal("211.2000")
+    assert (record.quantity, record.open_quantity, record.status) == (48, 0, "CLOSED")
+    assert record.position_id == signal_id
+
+
+async def test_a_live_only_trade_carries_estimated_charges_and_no_invented_slippage():
+    signal_id = await a_live_signal()
+    await a_fill(signal_id, "BUY", 12, "1159.70")
+    await a_fill(signal_id, "SELL", 12, "1163.50")
+
+    record = (await load(mode="LIVE"))[0][0]
+    assert record.charges > 0
+    assert record.net_pnl == record.gross_pnl - record.charges
+    assert record.slippage is None
+
+
+async def test_a_live_only_trade_counts_in_its_days_comparison_with_the_broker():
+    await a_trade(gross="224.88", charges="16.35", live=True)
+    signal_id = await a_live_signal(side="SHORT", instrument="NSE_EQ|INE020B01018")
+    await a_fill(signal_id, "SELL", 48, "295.60")
+    await a_fill(signal_id, "BUY", 48, "291.20")
+    await record_broker(realized="436.08", charges="31.93")
+
+    _, days, _ = await load(mode="LIVE")
+    assert days[0].live_trades == 2
+    assert days[0].gross_pnl == Decimal("436.0800")
+    assert days[0].reconciliation != history.MISMATCH
+
+
+async def test_a_live_entry_that_never_filled_is_not_a_live_trade():
+    _, _ = await a_trade(gross="185.68", charges="12.03")
+    async with SessionLocal() as session:
+        signal_id = (await session.scalars(select(PaperSignal.id).where(PaperSignal.session_date == SESSION_DATE))).one()
+    await a_fill(signal_id, "BUY", 0, None)
+
+    records, days, _ = await load()
+    assert records[0].execution_mode == history.PAPER
+    assert days[0].live_trades == 0
+
+
+async def test_an_entry_whose_fill_was_never_recorded_stays_live():
+    """Unknown is not unfilled. Rows from before the fill columns existed have
+    no fill at all, and dropping them would rewrite the early record."""
+    await a_trade(live=True)
+    records, _, _ = await load()
+    assert records[0].execution_mode == history.LIVE
+
+
+async def test_an_exit_that_closed_two_signals_is_split_between_them():
+    """3 November, HDFCBANK: bought 19 twice, the first stop cancelled, the
+    second signal's exit sold all 38. The broker made ₹256.50 on the pair."""
+    first = await a_live_signal()
+    second = await a_live_signal()
+    await a_fill(first, "BUY", 19, "717.50")
+    await a_fill(second, "BUY", 19, "715.90")
+    await a_fill(second, "SELL", 38, "723.45")
+
+    records, days, _ = await load(mode="LIVE")
+    by_signal = {record.signal_id: record for record in records}
+    assert by_signal[first].gross_pnl == Decimal("113.0500")
+    assert by_signal[second].gross_pnl == Decimal("143.4500")
+    assert all(record.open_quantity == 0 for record in records)
+    assert days[0].gross_pnl == Decimal("256.5000")
+
+
+async def test_two_signals_on_different_shares_do_not_share_fills():
+    first = await a_live_signal(instrument="NSE_EQ|INE040A01034")
+    second = await a_live_signal(instrument="NSE_EQ|INE062A01020")
+    await a_fill(first, "BUY", 19, "717.50")
+    await a_fill(second, "BUY", 19, "715.90")
+    await a_fill(second, "SELL", 38, "723.45")
+
+    by_signal = {record.signal_id: record for record in (await load(mode="LIVE"))[0]}
+    assert by_signal[first].open_quantity == 19
+    assert by_signal[first].is_open

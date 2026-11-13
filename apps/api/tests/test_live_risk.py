@@ -58,6 +58,7 @@ class FakeSession:
         controls=None,  # noqa: ANN001
         allocated: list[tuple[object, object, Decimal]] | None = None,
         controls_raise: Exception | None = None,
+        in_flight: list[object] | None = None,
     ) -> None:
         self._by_entity = {ExecutionReconciliation: reconciliation, SessionHalt: halt}
         self._controls = controls
@@ -65,6 +66,11 @@ class FakeSession:
         # One row per live submission the day already carries: (signal id, the
         # risk that submission was sized from).
         self._allocated = allocated or []
+        # Entry submissions the broker has not reported a fill for yet. The
+        # position gate reads these as well as the book, because the book is
+        # blind to an order that has left and not come back -- which took four
+        # positions on a limit of two on 9 November.
+        self._in_flight = in_flight or []
         self.added: list[object] = []
         self.commits = 0
 
@@ -81,6 +87,9 @@ class FakeSession:
 
     async def execute(self, _query: object) -> object:
         return SimpleNamespace(all=lambda: list(self._allocated))
+
+    async def scalars(self, _query: object) -> object:
+        return SimpleNamespace(all=lambda: list(self._in_flight))
 
     def add(self, value: object) -> None:
         self.added.append(value)
@@ -164,6 +173,7 @@ async def authorize(
     session=None,
     allocated=None,
     candidate_risk=None,
+    in_flight=None,
     **overrides,
 ):
     monkeypatch.setattr("app.services.live_risk.inspect_live_readiness", readiness(ready))
@@ -174,6 +184,7 @@ async def authorize(
             halt,
             controls or limits(),
             allocated=allocated,
+            in_flight=in_flight,
         ),
         SimpleNamespace(),
         # The real adapter over a fake client: the margin comparison is the part
@@ -551,6 +562,106 @@ async def test_room_under_the_live_position_limit_authorises(monkeypatch: pytest
     decision = await authorize(monkeypatch, client=client, controls=limits(maximum_open_positions=2))
     assert check(decision, "live_positions").passed is True
     assert decision.authorized is True
+
+
+# --- the positions the book cannot show yet -------------------------------
+#
+# 9 November: four entries left at 09:37:01 and the position limit of two
+# passed all four, because each was checked against a book that had not heard
+# about the other three. The count is now the book plus what is in flight,
+# and these pin the ways that must not over-count.
+
+
+def flight(token: str) -> SimpleNamespace:
+    """A live submission row as live_entries_in_flight reads it."""
+    return SimpleNamespace(instrument_token=token)
+
+
+async def test_an_entry_in_flight_fills_the_last_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The defect itself. An empty book and one entry already on its way is one
+    position, not none."""
+    decision = await authorize(
+        monkeypatch,
+        client=FakeClient(positions=[]),
+        controls=limits(maximum_open_positions=1),
+        in_flight=[flight("NSE_EQ|INE245A01021")],
+    )
+    positions = check(decision, "live_positions")
+    assert positions.passed is False
+    assert positions.data["open_positions"] == 1
+    assert positions.data["in_flight"] == 1
+    assert "none settled yet" in positions.detail
+    assert "1 entry still in flight" in positions.detail
+
+
+async def test_the_book_and_the_in_flight_entries_add_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeClient(positions=[position("TATAPOWER-EQ", token="NSE_EQ|INE245A01021")])
+    decision = await authorize(
+        monkeypatch,
+        client=client,
+        controls=limits(maximum_open_positions=2),
+        in_flight=[flight("NSE_EQ|INE123A01010")],
+    )
+    positions = check(decision, "live_positions")
+    assert positions.passed is False
+    assert positions.data["open_positions"] == 2
+    assert "TATAPOWER-EQ" in positions.detail
+
+
+async def test_an_in_flight_entry_already_in_the_book_is_not_counted_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Between the fill being reported and this row being updated both sources
+    can name the same position. Counting it twice would refuse an order on the
+    strength of a position that does not exist."""
+    client = FakeClient(positions=[position("TATAPOWER-EQ", token="NSE_EQ|INE245A01021")])
+    decision = await authorize(
+        monkeypatch,
+        client=client,
+        controls=limits(maximum_open_positions=2),
+        in_flight=[flight("NSE_EQ|INE245A01021")],
+    )
+    positions = check(decision, "live_positions")
+    assert positions.data["open_positions"] == 1
+    assert positions.data["in_flight"] == 0
+    assert positions.passed is True
+
+
+async def test_an_order_whose_own_entry_is_in_flight_is_not_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It is not opening an additional position. Whether it may take a second
+    trade on that share is the per-share ceiling's question, not this gate's --
+    and this exemption is the same one a book position already gets."""
+    decision = await authorize(
+        monkeypatch,
+        client=FakeClient(positions=[]),
+        controls=limits(maximum_open_positions=1),
+        in_flight=[flight(ORDER.instrument_token)],
+    )
+    assert check(decision, "live_positions").passed is True
+
+
+async def test_an_in_flight_entry_adds_no_exposure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exposure is money, and an order whose fill price is not known has no
+    honest amount to add. A count can include what is in flight; a sum cannot."""
+    client = FakeClient(positions=[position("TATAPOWER-EQ", lastTradedPrice="100", token="NSE_EQ|INE245A01021")])
+    decision = await authorize(
+        monkeypatch,
+        client=client,
+        controls=limits(maximum_open_positions=5, maximum_open_exposure_percent=100.0),
+        in_flight=[flight("NSE_EQ|INE123A01010")],
+    )
+    positions = check(decision, "live_positions")
+    assert positions.data["exposure"] == "1000"
+    assert positions.data["open_positions"] == 2
+
+
+async def test_nothing_in_flight_leaves_the_count_as_the_book(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = FakeClient(positions=[position("TATAPOWER-EQ", token="NSE_EQ|INE245A01021")])
+    decision = await authorize(monkeypatch, client=client, controls=limits(maximum_open_positions=2))
+    positions = check(decision, "live_positions")
+    assert positions.data["open_positions"] == 1
+    assert positions.data["in_flight"] == 0
+    assert positions.passed is True
 
 
 async def test_a_flat_position_row_does_not_hold_a_slot(monkeypatch: pytest.MonkeyPatch) -> None:

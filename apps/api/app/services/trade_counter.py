@@ -51,7 +51,39 @@ from app.services.trading_calendar import MARKET_TIMEZONE
 # A broker outcome that means an order exists at the exchange. RESOLVED_PLACED
 # is an UNKNOWN that recovery later found in the order book, so it is as real as
 # an ACCEPTED one; excluding it would let a lost response buy an extra trade.
+#
+# Used for money: P&L, reconciliation, execution quality, the broker's own day
+# figures. Those are questions about trades that really happened, and an order
+# still in flight has not happened.
 LIVE_PLACED_STATUSES = ("ACCEPTED", "RESOLVED_PLACED")
+
+# An order that MAY exist at the exchange, which for a ceiling is the same thing
+# as one that does.
+#
+# PREPARED is written and committed *before* the request leaves the process, on
+# purpose -- an order at the exchange that this system has no record of is the
+# worse failure. So between that commit and the broker's answer there is a row
+# for a real order, and reading only LIVE_PLACED_STATUSES made every daily gate
+# blind to it for the length of a round trip. On 9 November four entries were
+# sent in the same second, 09:37:01, and all three daily gates passed all four:
+# the trade ceiling of 3 took 4, the risk budget of 375 took 500, and the
+# two-position limit took four positions held together for two and a half
+# hours. Three of the four were banks.
+#
+# UNKNOWN is a lost response: the order may be live and we were not told.
+# NEEDS_REVIEW is recovery giving up on an UNKNOWN, and its own resolution text
+# says "this is not proof it was never placed; resolve it by hand before
+# trading this instrument again" -- which a ceiling must take at its word.
+#
+# REJECTED is the only outcome that frees what it reserved, because the broker
+# said no and there is nothing at the exchange.
+LIVE_IN_FLIGHT_STATUSES = ("PREPARED", "UNKNOWN", "NEEDS_REVIEW")
+
+# What a *ceiling* counts: everything the account may be on the hook for. Used
+# by the daily trade count here and by the daily risk allocation in live_risk.
+# Erring this way costs at most a trade not taken; erring the other way cost
+# 2.0% of capital on a day configured for 1.5%.
+LIVE_COMMITTED_STATUSES = LIVE_PLACED_STATUSES + LIVE_IN_FLIGHT_STATUSES
 
 
 def session_bounds_utc(session_date: date) -> tuple[datetime, datetime]:
@@ -144,12 +176,57 @@ class TradeCount:
         return f"{self.total} of {ceiling} used — {detail}."
 
 
+async def filled_entry_instruments(session: AsyncSession, session_date: date) -> tuple[str, ...]:
+    """The instruments today's filled entries were taken on, once each.
+
+    The sector ceiling needs names, not a number: "how many of today's trades
+    are in this candidate's group" cannot be answered by a count. Read from the
+    same two sources and the same statuses as ``count_filled_entries`` so the
+    two can never disagree about what today has taken.
+
+    Paper rows carry the token directly. A live row carries it in its request
+    snapshot, because ``trading_symbol`` holds what the broker was asked for and
+    the brokers disagree about what that is -- Upstox is handed the token and
+    Firstock a tradable name, so only the snapshot answers for both.
+    """
+    start, end = session_bounds_utc(session_date)
+    tokens: list[str] = []
+
+    paper_rows = await session.scalars(
+        select(PaperOrder.instrument_token).where(
+            PaperOrder.session_date == session_date,
+            PaperOrder.order_role == "ENTRY",
+            PaperOrder.filled_quantity > 0,
+        )
+    )
+    for value in paper_rows:
+        if value and value not in tokens:
+            tokens.append(str(value))
+
+    live_rows = await session.scalars(
+        select(LiveOrderSubmission).where(
+            LiveOrderSubmission.created_at >= start,
+            LiveOrderSubmission.created_at < end,
+            LiveOrderSubmission.status.in_(LIVE_COMMITTED_STATUSES),
+            # An entry, not the stop behind it or the exit that closes it.
+            LiveOrderSubmission.planned_risk.is_not(None),
+        )
+    )
+    for row in live_rows:
+        token = row.instrument_token
+        if token and token not in tokens:
+            tokens.append(token)
+
+    return tuple(tokens)
+
+
 async def count_filled_entries(
     session: AsyncSession,
     session_date: date,
     *,
     strategy_type: str | None = None,
     side: str | None = None,
+    instrument_token: str | None = None,
 ) -> TradeCount:
     """Today's trades, counted from fills rather than intentions.
 
@@ -177,12 +254,20 @@ async def count_filled_entries(
     a budget under this count; nothing in the system creates that today, and a
     signal would have to carry its configuration's id for it to be fixable.
 
+    ``instrument_token`` narrows it to one share, for the per-share ceiling.
+    Across every strategy, because the thing that ceiling is about is the
+    company: on 6 November two different strategies entered JSWSTEEL short in
+    the same minute, each inside its own per-strategy cap, and the account held
+    two trades' worth of risk on one company's news. Neither strategy knew
+    what the other had taken; this count does.
+
     A live order with no signal behind it cannot be attributed to a strategy,
     so it is left out of a narrowed count. It still reaches the account-wide
     ceiling, where an order resting at the exchange belongs however it got
-    there.
+    there. The same is true of the per-share count: a signal-less order cannot
+    be attributed to a share either.
     """
-    narrowed = strategy_type is not None or side is not None
+    narrowed = strategy_type is not None or side is not None or instrument_token is not None
     signal_ids: set[str] | None = None
     if narrowed:
         conditions = [PaperSignal.session_date == session_date]
@@ -190,6 +275,8 @@ async def count_filled_entries(
             conditions.append(PaperSignal.strategy_version.startswith(f"{strategy_type}@"))
         if side is not None:
             conditions.append(PaperSignal.side == side)
+        if instrument_token is not None:
+            conditions.append(PaperSignal.instrument_token == instrument_token)
         rows = await session.scalars(select(PaperSignal.id).where(*conditions))
         signal_ids = {str(value) for value in rows.all()}
         if not signal_ids:
@@ -223,7 +310,10 @@ async def count_filled_entries(
         .where(
             LiveOrderSubmission.created_at >= start,
             LiveOrderSubmission.created_at < end,
-            LiveOrderSubmission.status.in_(LIVE_PLACED_STATUSES),
+            # Committed, not placed: see LIVE_IN_FLIGHT_STATUSES. A ceiling that
+            # waits for the broker's answer is not a ceiling for the length of a
+            # round trip, which is exactly long enough to send another order.
+            LiveOrderSubmission.status.in_(LIVE_COMMITTED_STATUSES),
         )
         .distinct()
     )

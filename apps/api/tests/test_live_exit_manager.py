@@ -238,6 +238,9 @@ def wiring(monkeypatch: pytest.MonkeyPatch):
         # falls the trail back to the signal's intended price.
         fills={},
         stops=[stop_row()],
+        # Other trades' working stops on the same share, as covering_stops
+        # reports them. None by default.
+        others=[],
         deadline=None,
     )
 
@@ -298,6 +301,11 @@ def wiring(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(module, "_signal_for", find_signal)
     monkeypatch.setattr(module, "_latest_candle", latest_candle)
     monkeypatch.setattr(module, "_recorded_stops", resting)
+
+    async def covering(_session, **_kwargs):
+        return state.others
+
+    monkeypatch.setattr(module, "covering_stops", covering)
     monkeypatch.setattr(module, "prepare_submission", prepare)
     monkeypatch.setattr(module, "apply_outcome", lambda *_a, **_k: None)
     return state
@@ -550,8 +558,15 @@ async def test_the_stop_is_cancelled_before_the_exit_is_sent(wiring) -> None:
 
 @pytest.mark.asyncio
 async def test_a_position_past_its_square_off_is_closed_regardless_of_price(wiring) -> None:
-    past = (datetime.now(UTC).astimezone(module.MARKET_TIMEZONE) - timedelta(minutes=5)).strftime("%H:%M")
-    wiring.signal = signal(target="9999", square_off=past)
+    # "Five minutes ago" is not a time of day. Between 00:00 and 00:05 IST it
+    # wrapped to 23:5x, which the deadline arithmetic correctly reads as still
+    # ahead, and this test failed for those five minutes every night while
+    # saying nothing at all about the code.
+    #
+    # 00:00 instead, which needs no clock: minutes_until_square_off builds the
+    # deadline as *today* at that time, so midnight is behind every moment of
+    # every day.
+    wiring.signal = signal(target="9999", square_off="00:00")
     wiring.close = Decimal("2840")  # nowhere near the target
     wiring.adapter = FakeAdapter([position(Decimal("50"))])
     result = await sweep(wiring)
@@ -1282,3 +1297,53 @@ async def test_an_unprotected_position_is_protected_before_it_is_trailed(trailin
     assert result.exits[0].step == "unprotected"
     # The protection call, not a trail: the level is the signal's, untouched.
     assert "stop_price" not in trailing.moves[0]
+
+
+# --- another trade's stop on the same share --------------------------------
+#
+# The position is the broker's net for the share. An earlier trade's stop
+# still resting on it closes part of that position; ignoring it read as a
+# shortfall, a second stop went down, and the two together came to more than
+# was held (IDFCFIRSTB on 28 October, JSWSTEEL on 6 November).
+
+
+@pytest.mark.asyncio
+async def test_another_trades_working_stop_counts_as_cover(wiring, monkeypatch) -> None:
+    calls = []
+
+    async def spy(_session, _adapter, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(protected=True, flattened=False, detail="")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.stops = [stop_row()]
+    wiring.stops[0].quantity = 100
+    wiring.others = [stop_row(numbers=("other-stop",))]
+    wiring.others[0].quantity = 43
+    wiring.signal = signal(target="2900")
+    wiring.close = Decimal("2880")
+    wiring.adapter = FakeAdapter([position(Decimal("143"))])
+
+    await sweep(wiring)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_top_up_leaves_out_what_another_trade_already_covers(wiring, monkeypatch) -> None:
+    calls = []
+
+    async def spy(_session, _adapter, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(protected=True, flattened=False, detail="")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.stops = []
+    wiring.others = [stop_row(numbers=("other-stop",))]
+    wiring.others[0].quantity = 100
+    wiring.signal = signal(target="2900")
+    wiring.close = Decimal("2880")
+    wiring.adapter = FakeAdapter([position(Decimal("143"))])
+
+    await sweep(wiring)
+    assert len(calls) == 1
+    assert calls[0]["net"] == Decimal("43")

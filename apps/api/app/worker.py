@@ -32,7 +32,20 @@ from app.services.upstox_backfill import backfill_daily_history, backfill_today_
 from app.services.upstox_instruments import InstrumentRefreshError, refresh_is_due, refresh_upstox_instruments
 from app.services.upstox_market_data import UpstoxMarketDataService
 from app.services.upstox_oauth import UpstoxOAuthError, load_access_token
+from app.services.worker_alerts import (
+    ALERT_AFTER_FAILURES,
+    alert_worker_degraded,
+    alert_worker_giving_up,
+    alert_worker_recovered,
+)
 from app.services.worker_supervision import WORKER_STATE_KEY, RestartBackoff, completed_task_detail
+
+# Consecutive failed iterations before the worker hands the process back to
+# the supervisor. At the loop's 30-second ceiling this is about ten minutes of
+# a worker that is achieving nothing -- long enough that a blip, a restarting
+# Redis or a brief network stall is ridden out, short enough that a structural
+# fault costs minutes rather than the four days it once did.
+GIVE_UP_AFTER_FAILURES = 20
 
 
 async def _publish_worker_state(redis: Redis, status: str, detail: str, restart_count: int) -> None:
@@ -45,6 +58,33 @@ async def _publish_worker_state(redis: Redis, status: str, detail: str, restart_
             "updated_at": datetime.now(UTC).isoformat(),
         },
     )
+
+
+async def _announce_start(redis: Redis, logger) -> None:  # noqa: ANN001 - a structlog logger
+    """Say the worker is up, and survive Redis not being ready to hear it.
+
+    This was an unguarded await, and it sat above the loop's try, so the first
+    thing the worker did was the one thing that could kill it outright. Redis
+    answers every command with BusyLoadingError while it reads its dump back
+    after a restart -- a condition it reports precisely because it is
+    temporary -- and that error left run(), left asyncio.run(), and ended the
+    process. Docker restarted it into a Redis that was still loading.
+
+    Each restart costs far more than the announcement is worth: the worker
+    re-runs the whole intraday backfill, twenty-eight instruments at a few
+    seconds each, and until that finishes the newest candle it can see is
+    minutes old -- so entries fire late in a clump and the exit manager
+    refuses to judge a target it cannot measure. One position sat more than an
+    hour past its target this way.
+
+    Every other state publish is already either inside the loop's try or
+    wrapped. This one is now too: a failure here is logged and the loop starts
+    anyway, where the ordinary backoff will retry against Redis.
+    """
+    try:
+        await _publish_worker_state(redis, "RUNNING", "Scanner worker supervisor started", 0)
+    except Exception as exc:
+        logger.warning("scanner.worker_state_announce_failed", error=f"{type(exc).__name__}: {exc}")
 
 
 async def run() -> None:
@@ -76,11 +116,14 @@ async def run() -> None:
     last_universe_refresh: object = None
     market_data_backoff = RestartBackoff()
     loop_backoff = RestartBackoff(maximum_seconds=30)
+    # Whether the operator has been told the scanner stopped. Kept so the
+    # recovery message is only sent to someone who got the alarm.
+    degraded_alerted = False
     calendar = TradingCalendar.from_settings(settings)
     logger.info(
         "scanner.worker_started", mode=settings.application_mode, live_trading_enabled=settings.live_trading_enabled
     )
-    await _publish_worker_state(redis, "RUNNING", "Scanner worker supervisor started", 0)
+    await _announce_start(redis, logger)
     try:
         while True:
             try:
@@ -332,6 +375,11 @@ async def run() -> None:
                         await _publish_worker_state(
                             redis, "RUNNING", "Scanner worker recovered after a transient error", 0
                         )
+                if degraded_alerted:
+                    # The operator was told this had stopped. Close it, or the
+                    # next alarm is one they have learned to ignore.
+                    await alert_worker_recovered(settings, after_failures=loop_backoff.failures)
+                    degraded_alerted = False
                 loop_backoff.reset()
                 await asyncio.sleep(2)
             except asyncio.CancelledError:
@@ -339,6 +387,10 @@ async def run() -> None:
             except Exception as exc:
                 delay = loop_backoff.record_failure()
                 logger.exception("scanner.worker_iteration_failed", error=str(exc), retry_in_seconds=delay)
+                if loop_backoff.failures == ALERT_AFTER_FAILURES:
+                    # Once, on the way past, not every thirty seconds.
+                    degraded_alerted = True
+                    await alert_worker_degraded(settings, error=str(exc), failures=loop_backoff.failures)
                 with contextlib.suppress(Exception):
                     await _publish_worker_state(
                         redis,
@@ -346,6 +398,32 @@ async def run() -> None:
                         f"Worker iteration failed: {type(exc).__name__}; retrying in {delay:g} seconds",
                         loop_backoff.failures,
                     )
+                if loop_backoff.failures >= GIVE_UP_AFTER_FAILURES:
+                    # Give the process back to the supervisor rather than
+                    # retrying something structural forever.
+                    #
+                    # Retrying suits a blip. It does not suit a worker holding
+                    # an engine built against an address that cannot work:
+                    # that state is decided once, at import, so every one of
+                    # these iterations was always going to fail the same way.
+                    # The loop retried it every thirty seconds for four days,
+                    # stored no candles, and placed no orders on three trading
+                    # days. Exiting re-runs the startup that chose the address.
+                    logger.error(
+                        "scanner.worker_giving_up",
+                        error=str(exc),
+                        consecutive_failures=loop_backoff.failures,
+                        detail="every iteration has failed; exiting so the supervisor restarts this process",
+                    )
+                    with contextlib.suppress(Exception):
+                        await _publish_worker_state(
+                            redis,
+                            "DEGRADED",
+                            f"{loop_backoff.failures} consecutive failures ({type(exc).__name__}); restarting",
+                            loop_backoff.failures,
+                        )
+                    await alert_worker_giving_up(settings, error=str(exc), failures=loop_backoff.failures)
+                    raise SystemExit(1) from exc
                 await asyncio.sleep(delay)
     except asyncio.CancelledError:
         logger.info("scanner.worker_stopped")

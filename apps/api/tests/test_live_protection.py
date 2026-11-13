@@ -123,9 +123,15 @@ class FakeSession:
         self._tick_paise = tick_paise
         self.added: list = []
         self.commits = 0
+        # Stops recorded today, as covering_stops reads them. Empty by default:
+        # nothing else is resting on the share.
+        self.stops: list = []
 
     async def get(self, _model, _pk):
         return self._signal
+
+    async def scalars(self, _statement):
+        return SimpleNamespace(all=lambda: list(self.stops))
 
     async def scalar(self, _statement):
         """The instrument master, as instrument_tick_size reads it.
@@ -215,9 +221,11 @@ def _fake_prepare(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(module, "apply_outcome", lambda *_a, **_k: None)
 
 
-async def protect(adapter, *, sig=None, sub=None):
+async def protect(adapter, *, sig=None, sub=None, stops=None):
     sig = sig or signal()
-    return await module.protect_after_fill(FakeSession(sig), SimpleNamespace(), adapter, sub or submission())
+    session = FakeSession(sig)
+    session.stops = list(stops or [])
+    return await module.protect_after_fill(session, SimpleNamespace(), adapter, sub or submission())
 
 
 # --- the position is protected ----------------------------------------------
@@ -802,3 +810,90 @@ async def test_an_order_the_book_has_never_heard_of_is_not_a_hanging_risk() -> N
 
     outcome = await protect(adapter, sub=submission(numbers=["2610050001"]))
     assert "by hand" not in outcome.detail
+
+
+# --- a second trade on a share that already has a stop ----------------------
+#
+# 28 October: IDFCFIRSTB was bought 198 and stopped for 198, then bought 198
+# again and stopped for 396 -- the whole net position -- while the first stop
+# still rested. Both triggered, 594 were sold against 396 held, and the account
+# was short 198 for seven minutes. JSWSTEEL did the same on 6 November.
+
+
+def resting_stop(*, side="SELL", quantity=198, token="NSE_EQ|INE415G01027", number="old-stop", signal_id=None):
+    from app.db.models import LiveOrderSubmission
+
+    return LiveOrderSubmission(
+        client_order_id=f"sidra-{number}",
+        paper_signal_id=signal_id or uuid4(),
+        broker="UPSTOX",
+        exchange="NSE_EQ",
+        trading_symbol="RVNL",
+        product="I",
+        price_type="SL-M",
+        transaction_type=side,
+        quantity=quantity,
+        status="ACCEPTED",
+        broker_order_numbers=[number],
+        request_snapshot={"canonical": {"instrumentToken": token, "side": side, "orderType": "SL-M"}},
+    )
+
+
+def working(number="old-stop"):
+    return book_row(order_id=number, status="OPEN")
+
+
+@pytest.mark.asyncio
+async def test_a_second_entry_is_stopped_only_for_what_the_first_stop_does_not_cover() -> None:
+    adapter = FakeAdapter([position(Decimal("396"))], [accepted()])
+    adapter.orders = [working()]
+    outcome = await protect(adapter, stops=[resting_stop()])
+    assert outcome.protected is True
+    assert len(adapter.submitted) == 1
+    assert adapter.submitted[0].quantity == 198
+
+
+@pytest.mark.asyncio
+async def test_a_position_already_fully_covered_gets_no_further_stop() -> None:
+    adapter = FakeAdapter([position(Decimal("198"))], [accepted()])
+    adapter.orders = [working()]
+    outcome = await protect(adapter, stops=[resting_stop()])
+    assert outcome.protected is True
+    assert outcome.step == "covered"
+    assert adapter.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_a_stop_the_broker_has_finished_with_covers_nothing() -> None:
+    adapter = FakeAdapter([position(Decimal("396"))], [accepted()])
+    adapter.orders = [book_row(order_id="old-stop", status="COMPLETE")]
+    await protect(adapter, stops=[resting_stop()])
+    assert adapter.submitted[0].quantity == 396
+
+
+@pytest.mark.asyncio
+async def test_a_stop_on_another_share_covers_nothing() -> None:
+    adapter = FakeAdapter([position(Decimal("396"))], [accepted()])
+    adapter.orders = [working()]
+    await protect(adapter, stops=[resting_stop(token="NSE_EQ|INE092T01019")])
+    assert adapter.submitted[0].quantity == 396
+
+
+@pytest.mark.asyncio
+async def test_a_stop_on_the_entry_side_covers_nothing() -> None:
+    """A resting order on the same side as the position adds to it rather than
+    closing it, so it is no cover."""
+    adapter = FakeAdapter([position(Decimal("396"))], [accepted()])
+    adapter.orders = [working()]
+    await protect(adapter, stops=[resting_stop(side="BUY")])
+    assert adapter.submitted[0].quantity == 396
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_book_counts_recorded_stops_as_working() -> None:
+    """Under-stopped until the next sweep reads the book is recoverable. Two
+    stops for more than is held reverses the position."""
+    adapter = FakeAdapter([position(Decimal("396"))], [accepted()])
+    adapter.orders = RuntimeError("book down")
+    await protect(adapter, stops=[resting_stop()])
+    assert adapter.submitted[0].quantity == 198

@@ -148,15 +148,34 @@ async def test_a_protective_stop_adds_nothing_to_the_day() -> None:
     assert await allocated() == (Decimal("86.08"), 1)
 
 
-async def test_an_order_that_never_reached_the_broker_allocates_nothing() -> None:
-    """PREPARED is written before the request is sent, REJECTED came back no.
-
-    Neither is money at risk, and holding budget against them would stop the
-    day on orders that never existed at the broker.
-    """
-    for status in ("PREPARED", "REJECTED", "FAILED", "UNKNOWN"):
+async def test_an_order_the_broker_refused_allocates_nothing() -> None:
+    """REJECTED came back no, and FAILED never left this process. Holding budget
+    against either would stop the day on orders that do not exist."""
+    for status in ("REJECTED", "FAILED"):
         await submission(signal_id=(await signal("86.08")).id, status=status)
     assert await allocated() == (Decimal("0"), 0)
+
+
+@pytest.mark.parametrize("status", ["PREPARED", "UNKNOWN", "NEEDS_REVIEW"])
+async def test_an_order_that_may_be_at_the_broker_allocates_its_risk(status: str) -> None:
+    """This test asserted that PREPARED allocates nothing, and 9 November is
+    what that cost: 500 of planned risk committed against a 375 budget.
+
+    Four entries left for the broker in the same second, 09:37:01, and each
+    read the budget as untouched because the other three were PREPARED --
+    written and committed before their requests left, which is deliberate and
+    is also what makes them visible. The risk is committed when the order is
+    prepared, not when the broker answers; planned_risk is written onto the row
+    at exactly that moment.
+
+    UNKNOWN is a lost response and may be live. NEEDS_REVIEW is recovery giving
+    up on one, and its own resolution text says it is not proof the order was
+    never placed. A budget has to hold against all three. The cost of erring
+    this way is a trade not taken; the cost of the other way was 2.0% of
+    capital on a day configured for 1.5%.
+    """
+    await submission(signal_id=(await signal("86.08")).id, status=status)
+    assert await allocated() == (Decimal("86.08"), 1)
 
 
 async def test_a_resolved_placed_order_allocates_its_risk() -> None:

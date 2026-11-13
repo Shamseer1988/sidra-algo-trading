@@ -11,7 +11,6 @@ import sys
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -20,6 +19,7 @@ from sqlalchemy import delete
 from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY
 from app.db.models import ApplicationSetting, LiveOrderSubmission, PaperSignal, ScannerEvaluation
 from app.db.session import SessionLocal
+from app.services.broker_adapter import BrokerPositionRecord
 from app.services.live_usage import live_usage
 from app.services.trade_counter import session_bounds_utc
 
@@ -49,13 +49,21 @@ class FakeAdapter:
         return self._positions
 
 
-def position(symbol: str, *, quantity="10", price="500"):  # noqa: ANN001
-    return SimpleNamespace(
+def position(symbol: str, *, quantity="10", price="500", token: str | None = None):  # noqa: ANN001
+    """The real record, not a stand-in.
+
+    It was a SimpleNamespace until the position count started matching rows
+    against in-flight entries through ``identifies()``. A hand-built double
+    with the five fields this report reads would have passed every test here
+    and raised AttributeError live -- which is the shape of the bug that left a
+    real short with no stop behind it, three callers reaching for
+    ``instrument_token`` on objects that each had it only in tests.
+    """
+    return BrokerPositionRecord(
         symbol=symbol,
         net_quantity=Decimal(quantity) if quantity is not None else None,
         last_price=Decimal(price) if price is not None else None,
-        average_price=None,
-        instrument_token=None,
+        instrument_token=token,
     )
 
 
@@ -167,6 +175,79 @@ async def reset():
 async def report(*, adapter=None):  # noqa: ANN001
     async with SessionLocal() as session:
         return await live_usage(session, adapter=adapter, session_date=DAY)
+
+
+async def in_flight_entry(token: str = TOKEN) -> None:
+    """An entry the broker has not reported a fill for.
+
+    ``planned_risk`` set makes it an entry; ``fill_seen_at`` null means the
+    broker has not told us about it, which is the same moment the position book
+    cannot show it; the canonical token in the snapshot is what the position
+    count matches on.
+    """
+    async with SessionLocal() as session:
+        session.add(
+            LiveOrderSubmission(
+                client_order_id=f"sidra-{uuid4().hex[:12]}",
+                broker="UPSTOX",
+                exchange="NSE_EQ",
+                trading_symbol=token,
+                product="I",
+                price_type="LIMIT",
+                transaction_type="BUY",
+                quantity=10,
+                price=Decimal("1000"),
+                status="PREPARED",
+                planned_risk=Decimal("86.08"),
+                created_at=MIDDAY,
+                request_snapshot={"canonical": {"instrumentToken": token}},
+            )
+        )
+        await session.commit()
+
+
+# --- the position cap, including what the book cannot show yet ------------
+#
+# The gate counts the book plus what is in flight. This report has to count it
+# the same way: two readings of one ceiling means the one an operator reads is
+# the one enforcing nothing, and on 9 November this line read zero while four
+# positions were being opened against a limit of two.
+
+
+async def test_the_report_counts_an_entry_the_book_cannot_show_yet() -> None:
+    await save_controls(maximum_open_positions=2)
+    await in_flight_entry()
+    usage = await report(adapter=FakeAdapter(positions=[]))
+    assert usage.positions.used == Decimal("1")
+    assert "1 entry in flight" in usage.positions.detail
+
+
+async def test_the_report_names_the_settled_ones_and_counts_the_rest() -> None:
+    await save_controls(maximum_open_positions=3)
+    await in_flight_entry(OTHER)
+    usage = await report(adapter=FakeAdapter(positions=[position("HDFCBANK-EQ", token=TOKEN)]))
+    assert usage.positions.used == Decimal("2")
+    assert "HDFCBANK-EQ" in usage.positions.detail
+    assert "1 entry in flight" in usage.positions.detail
+
+
+async def test_the_report_does_not_count_one_position_twice() -> None:
+    """Between the fill being reported and the submission row being updated,
+    both sources name the same position. The gate drops the duplicate and so
+    must this, or an operator reads a limit as fuller than the gate finds it."""
+    await save_controls(maximum_open_positions=2)
+    await in_flight_entry(TOKEN)
+    usage = await report(adapter=FakeAdapter(positions=[position("HDFCBANK-EQ", token=TOKEN)]))
+    assert usage.positions.used == Decimal("1")
+    assert usage.positions.binding is False
+
+
+async def test_an_in_flight_entry_adds_nothing_to_exposure() -> None:
+    """Exposure is money and the fill price is not known yet."""
+    await save_controls(maximum_open_positions=3, maximum_open_exposure_percent=100.0)
+    await in_flight_entry(OTHER)
+    usage = await report(adapter=FakeAdapter(positions=[position("HDFCBANK-EQ", token=TOKEN, price="500")]))
+    assert usage.exposure.used == Decimal("5000")
 
 
 # --- the allocation cap ---------------------------------------------------

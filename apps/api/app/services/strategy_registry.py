@@ -18,7 +18,13 @@ from app.services.extra_strategies import (
     evaluate_vwap_pullback,
 )
 from app.services.market_calculations import CompletedCandle
-from app.services.paper_strategy import AWAITING, STRATEGY_VERSION, StrategyDecision, evaluate_orb_retest
+from app.services.paper_strategy import (
+    AWAITING,
+    SIGNALLED,
+    STRATEGY_VERSION,
+    StrategyDecision,
+    evaluate_orb_retest,
+)
 from app.services.signal_inputs import DEFAULT_REQUIRED_INPUTS, normalise_required
 
 STRATEGIES_KEY = "paper_strategies"
@@ -257,6 +263,39 @@ class StrategyRegistry:
             return StrategyDecision(next_state=AWAITING, reason="Instrument is outside this strategy universe")
         if not configuration.allows_regular_session():
             return StrategyDecision(next_state=AWAITING, reason="Regular-session signals are disabled")
-        return cls.definition(configuration.strategy_type).evaluate(
+        decision = cls.definition(configuration.strategy_type).evaluate(
             candle, indicators, benchmark, controls, configuration, prior_state
         )
+        return regime_filtered(decision, benchmark, controls)
+
+
+def regime_filtered(decision: StrategyDecision, benchmark: dict, controls: dict) -> StrategyDecision:
+    """With the regime filter on, only trade with the index: long on a rising day, short on a falling one.
+
+    Every strategy scores market agreement, but as points among others, so a
+    setup strong enough elsewhere signals against the market. On 13 November
+    three longs were taken in the same minute on a falling day and all three
+    were stopped. A filter is the rule a trader states, and it is the only way
+    the account takes the short side of a down day rather than fighting it.
+
+    Applied here, after the strategy has decided, so it holds for every
+    strategy alike and for the backtest, which evaluates through this same
+    method. NEUTRAL and INSUFFICIENT_DATA refuse as well: an index that has
+    not chosen a direction has not agreed with one. The setup goes back to
+    AWAITING rather than SIGNALLED, so it may form again later in the session
+    once the index agrees. Off by default, so deploying this changes nothing
+    until the operator turns it on.
+    """
+    if not controls.get("regime_filter_enabled") or decision.next_state != SIGNALLED or decision.side is None:
+        return decision
+    raw = benchmark.get("nifty_regime") if isinstance(benchmark, dict) else None
+    regime = raw.get("regime") if isinstance(raw, dict) else None
+    wanted = "BULLISH" if decision.side == "LONG" else "BEARISH"
+    if regime == wanted:
+        return decision
+    return StrategyDecision(
+        next_state=AWAITING,
+        score=decision.score,
+        score_breakdown=decision.score_breakdown,
+        reason=f"Market regime filter: NIFTY is {regime or 'unknown'}, a {decision.side.lower()} needs {wanted}",
+    )

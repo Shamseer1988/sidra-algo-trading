@@ -40,9 +40,21 @@ class MemoryRedis:
     async def get(self, key: str) -> str | None:
         return self.values.get(key)
 
-    async def set(self, key: str, value: str, **_: object) -> bool:
+    async def set(self, key: str, value: str, nx: bool = False, **_: object) -> bool | None:
+        # nx is honoured because the entry gate is a lock and a double that
+        # always said yes would be a double that cannot fail the test it exists
+        # for. px is ignored: nothing here waits long enough to expire.
+        if nx and key in self.values:
+            return None
         self.values[key] = value
         return True
+
+    async def eval(self, _script: str, _numkeys: int, key: str, token: str) -> int:
+        """Stands in for the gate's compare-and-delete, which is Lua on a server."""
+        if self.values.get(key) == token:
+            del self.values[key]
+            return 1
+        return 0
 
     async def publish(self, channel: str, payload: str) -> int:
         self.published.append((channel, payload))

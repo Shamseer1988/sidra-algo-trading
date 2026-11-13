@@ -210,6 +210,7 @@ async def main() -> int:
         funded = int(budget / per_trade) if per_trade > 0 else 0
         print(f"  maximum_daily_risk_percent : {controls.maximum_daily_risk_percent}  = {budget:,.2f}")
         print(f"  maximum_daily_trades       : {ceiling}")
+        print(f"  trades per share per day   : {controls.maximum_daily_trades_per_instrument}")
         print(f"  maximum_open_positions     : {controls.maximum_open_positions}")
         print(f"  daily_loss_limit           : {controls.daily_loss_limit:,.2f}")
         print(f"  daily_profit_target        : {controls.daily_profit_target:,.2f}")
@@ -226,6 +227,17 @@ async def main() -> int:
             )
         else:
             line(OK, f"Budget funds {funded} trades; the ceiling of {ceiling} is what binds.")
+
+        # The per-strategy caps are each blind to the others, so without this
+        # one two strategies that agree about a share both pass their own cap:
+        # JSWSTEEL, 6 November, twice short in the same minute.
+        per_share = controls.maximum_daily_trades_per_instrument
+        if per_share > 1:
+            warnings += 1
+            line(WARN, f"One share may take {per_share} trades in a day, so one company can hold")
+            line("      ", f"{per_share} trades' worth of risk. Two stops on one share do not fail independently.")
+        else:
+            line(OK, "One share takes at most one trade a day, across every strategy.")
 
         # Several positions open at once share one market. Planned risk per
         # trade stops being the worst case the moment this is above one.

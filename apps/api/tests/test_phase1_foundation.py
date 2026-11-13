@@ -166,7 +166,10 @@ async def test_signal_block_reason_handles_zero_cooldown_per_side_and_daily_ceil
         max_trades_per_side=1,
         cooldown_minutes=0,
     )
-    controls = {"maximum_daily_trades": 2}
+    # The per-share ceiling is opened up here on purpose: every signal below is on
+    # one synthetic instrument, and this test is about the account-wide, per-strategy
+    # and per-side caps. The per-share ceiling has its own test underneath.
+    controls = {"maximum_daily_trades": 2, "maximum_daily_trades_per_instrument": 5}
     orchestrator = PaperScannerOrchestrator(settings(), MemoryRedis())  # type: ignore[arg-type]
 
     def _candle(minute: int) -> CompletedCandle:

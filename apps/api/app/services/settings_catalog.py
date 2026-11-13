@@ -300,6 +300,36 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
         is_ceiling=True,
     ),
     SettingSpec(
+        key="maximum_daily_trades_per_instrument",
+        group=DAILY_RISK,
+        label="Maximum trades per share per day",
+        help=(
+            "How many filled entries one share may take in a day, across every strategy. The "
+            "per-strategy caps cannot see each other: on 6 November two strategies entered the "
+            "same share short in the same minute, each inside its own cap, and the day carried "
+            "two trades' worth of risk on one company's news. One also refuses a same-day "
+            "reversal on that share; set 2 to allow one."
+        ),
+        unit=COUNT,
+        effect=IMMEDIATE,
+        is_ceiling=True,
+    ),
+    SettingSpec(
+        key="maximum_daily_trades_per_sector",
+        group=DAILY_RISK,
+        label="Maximum trades per sector per day",
+        help=(
+            "How many filled entries one group of instruments that move together may take in a "
+            "day. On 9 November three PSU banks were entered in the same second: that is one "
+            "trade at three times the size, because those stops do not fail independently. The "
+            "groups are listed in services/sectors.py; an instrument the map does not know is "
+            "counted on its own and limits nothing."
+        ),
+        unit=COUNT,
+        effect=IMMEDIATE,
+        is_ceiling=True,
+    ),
+    SettingSpec(
         key="maximum_open_positions",
         group=DAILY_RISK,
         label="Maximum concurrent positions",
@@ -499,6 +529,20 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
             "are not comparable with older sessions."
         ),
         unit=POINTS,
+        effect=NEXT_SIGNAL,
+    ),
+    SettingSpec(
+        key="regime_filter_enabled",
+        group=SIGNAL_QUALITY,
+        label="Only trade with the NIFTY direction",
+        help=(
+            "On, a long is taken only while NIFTY is BULLISH and a short only while it is BEARISH; "
+            "a NEUTRAL index takes nothing. Off, the index direction is only a part of the score. "
+            "On 13 November three longs were entered in the same minute on a falling day and all "
+            "three were stopped. NIFTY needs 21 one-minute candles before it has a direction, so "
+            "nothing is taken before about 09:36 with this on."
+        ),
+        unit=BOOLEAN,
         effect=NEXT_SIGNAL,
     ),
     SettingSpec(

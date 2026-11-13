@@ -336,9 +336,17 @@ async def the_record(session, day: date) -> None:
         )
     cost = cost_of_trading(days)
     print()
+    # Net is gross less the charges on the line above it, so the three lines
+    # add up. It used to be the sum of each trade's net, which carries this
+    # system's rate-card estimate rather than the broker's bill -- three
+    # figures from two sources, ₹95 apart over five weeks, that no reader could
+    # reconcile. The per-strategy column above still uses per-trade nets,
+    # because the broker bills a day and never a trade.
     print(f"  gross                      : {money(total.gross_pnl)}")
     print(f"  charges                    : {money(cost.total)}" + ("" if cost.is_complete else "  (partly estimated)"))
-    print(f"  net                        : {money(total.net_pnl)}")
+    print(f"  net                        : {money(total.gross_pnl - cost.total)}")
+    if abs(total.net_pnl - (total.gross_pnl - cost.total)) > Decimal("1"):
+        print(f"  (per-trade estimates add to {money(total.net_pnl)}; the strategy rows above use those)")
     print(f"  -> {r_verdict(total)}")
     if excluded:
         # Said out loud because the alternative is a record that is quietly
