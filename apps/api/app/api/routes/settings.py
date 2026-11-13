@@ -83,6 +83,7 @@ DEFAULT_TRADING_CONTROLS = {
     "maximum_daily_trades_per_instrument": 1,
     "maximum_daily_trades_per_sector": 1,
     "minimum_score": 80,
+    "regime_filter_enabled": False,
     "minimum_rr": 1.5,
     "volume_multiplier": 1.3,
     "retest_tolerance_percent": 0.15,
@@ -144,6 +145,11 @@ class TradingControls(BaseModel):
     # drawn by co-movement rather than by industry.
     maximum_daily_trades_per_sector: int = Field(default=1, ge=1, le=5)
     minimum_score: int = Field(ge=0, le=100)
+    # Only trade with the index: a long needs NIFTY BULLISH, a short needs it
+    # BEARISH, and a NEUTRAL index takes nothing. Applied after every strategy
+    # decides (strategy_registry.regime_filtered). Off by default so a deploy
+    # changes nothing until the operator turns it on.
+    regime_filter_enabled: bool = Field(default=False)
     minimum_rr: float = Field(ge=1, le=10)
     volume_multiplier: float = Field(ge=0.5, le=10)
     retest_tolerance_percent: float = Field(ge=0.05, le=1)

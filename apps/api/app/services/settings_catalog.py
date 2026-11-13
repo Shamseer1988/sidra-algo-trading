@@ -532,6 +532,20 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
         effect=NEXT_SIGNAL,
     ),
     SettingSpec(
+        key="regime_filter_enabled",
+        group=SIGNAL_QUALITY,
+        label="Only trade with the NIFTY direction",
+        help=(
+            "On, a long is taken only while NIFTY is BULLISH and a short only while it is BEARISH; "
+            "a NEUTRAL index takes nothing. Off, the index direction is only a part of the score. "
+            "On 13 November three longs were entered in the same minute on a falling day and all "
+            "three were stopped. NIFTY needs 21 one-minute candles before it has a direction, so "
+            "nothing is taken before about 09:36 with this on."
+        ),
+        unit=BOOLEAN,
+        effect=NEXT_SIGNAL,
+    ),
+    SettingSpec(
         key="minimum_rr",
         group=SIGNAL_QUALITY,
         label="Minimum reward-to-risk",

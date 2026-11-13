@@ -235,18 +235,34 @@ def relative_strength(stock: list[CompletedCandle], benchmark: list[CompletedCan
 
 
 def nifty_regime(candles: list[CompletedCandle], fast_period: int, slow_period: int) -> dict[str, float | str | None]:
+    """The index's direction today: EMA order, and price on the right side of an anchor.
+
+    The anchor is the session VWAP when there is one and the session's opening
+    price when there is not. An index has no traded volume of its own -- every
+    NIFTY 50 candle the feed delivers carries volume 0 -- so ``session_vwap``
+    returns None for it, and this function, which required a VWAP for either
+    verdict, answered NEUTRAL on every candle of every session. All 54 live
+    trades from 7 October to 13 November scored nothing for market agreement,
+    and nothing anywhere could tell a falling day from a rising one.
+
+    The opening price is the anchor a trader reads off an index chart without
+    volume: above where the day began and with the fast EMA over the slow, the
+    day is going up. It is a weaker anchor than VWAP, which weights where the
+    trading happened, so VWAP still wins whenever it exists.
+    """
     if fast_period >= slow_period:
         raise ValueError("EMA fast period must be less than EMA slow period")
     if len(candles) < slow_period:
-        return {"regime": "INSUFFICIENT_DATA", "ema_fast": None, "ema_slow": None, "vwap": None}
+        return {"regime": "INSUFFICIENT_DATA", "ema_fast": None, "ema_slow": None, "vwap": None, "anchor": None}
     fast = ema(candles, fast_period)
     slow = ema(candles, slow_period)
     vwap = session_vwap(candles)
     assert fast is not None and slow is not None
     close = candles[-1].close
-    if vwap is not None and close >= vwap and fast > slow:
+    anchor = vwap if vwap is not None else candles[0].open
+    if close >= anchor and fast > slow:
         regime = "BULLISH"
-    elif vwap is not None and close <= vwap and fast < slow:
+    elif close <= anchor and fast < slow:
         regime = "BEARISH"
     else:
         regime = "NEUTRAL"
@@ -255,6 +271,7 @@ def nifty_regime(candles: list[CompletedCandle], fast_period: int, slow_period: 
         "ema_fast": _decimal(fast),
         "ema_slow": _decimal(slow),
         "vwap": _decimal(vwap) if vwap else None,
+        "anchor": "VWAP" if vwap is not None else "SESSION_OPEN",
     }
 
 
