@@ -67,6 +67,30 @@ SECTORS: dict[str, str] = {
     "RELIANCE": "ENERGY",
     "LT": "INFRA",
     "BHARTIARTL": "TELECOM",
+    # The 16 November watchlist: a sector-balanced list of liquid F&O names, so a
+    # falling day has defensives (pharma, FMCG, IT) to be long in, not only
+    # high-beta names to be short in. Names that left the watchlist stay above:
+    # history still resolves through this map.
+    "KOTAKBANK": "BANK",
+    "SHRIRAMFIN": "NBFC",
+    "JIOFIN": "NBFC",
+    "TECHM": "IT",
+    "HCLTECH": "IT",
+    "SUNPHARMA": "PHARMA",
+    "DRREDDY": "PHARMA",
+    "AUROPHARMA": "PHARMA",
+    "ITC": "FMCG",
+    "HINDUNILVR": "FMCG",
+    "NESTLEIND": "FMCG",
+    "TMPV": "AUTO",
+    "ASHOKLEY": "AUTO",
+    "ONGC": "ENERGY",
+    "COALINDIA": "ENERGY",
+    "NTPC": "POWER",
+    "BHEL": "INFRA",
+    "ETERNAL": "CONSUMER",
+    "AMBUJACEM": "CEMENT",
+    "DLF": "REALTY",
 }
 
 # What a broker appends to a tradable name. Upstox reports the instrument token
