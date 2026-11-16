@@ -394,6 +394,65 @@ async def test_a_stop_the_broker_has_finished_with_does_not_count(wiring, monkey
     assert len(calls) == 1
 
 
+def _rejected_stops(count: int):
+    ids = [f"stop-{n}" for n in range(1, count + 1)]
+    return [stop_row(numbers=(number,)) for number in ids], [book_order(number, status="REJECTED") for number in ids]
+
+
+@pytest.mark.asyncio
+async def test_three_rejected_stops_close_the_position_at_market(wiring, monkeypatch) -> None:
+    """16 November: every protective stop was rejected (16448, limit too far from
+    trigger) and the sweep placed another one each minute -- 38 rejected stops
+    behind three open longs for thirteen minutes. A refusal that repeats is not
+    going to stop repeating; after three, the position is closed instead."""
+    calls = []
+
+    async def spy(*_a, **_k):
+        calls.append(1)
+        return SimpleNamespace(protected=True, flattened=False, detail="Stop re-placed.")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.signal = signal(target="2900")
+    wiring.close = Decimal("2880")
+    wiring.stops, book = _rejected_stops(3)
+    wiring.adapter = FakeAdapter([position(Decimal("50"))], orders=book)
+
+    with _at_ist(10, 0):
+        result = await sweep(wiring)
+
+    assert calls == []
+    assert result.exits[0].step == "stops_rejected_closing"
+    assert result.exits[0].acted is True
+    assert "rejected 3 stops" in result.exits[0].detail
+    assert len(wiring.adapter.submitted) == 1
+    assert wiring.adapter.submitted[0].order_type == "MARKET"
+    assert wiring.adapter.submitted[0].side == "SELL"
+    assert wiring.adapter.submitted[0].quantity == 50
+
+
+@pytest.mark.asyncio
+async def test_two_rejected_stops_still_get_another_stop(wiring, monkeypatch) -> None:
+    """One refusal can be a blip; the guard is for a refusal that repeats."""
+    calls = []
+
+    async def spy(*_a, **_k):
+        calls.append(1)
+        return SimpleNamespace(protected=True, flattened=False, detail="Stop re-placed.")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.signal = signal(target="2900")
+    wiring.close = Decimal("2880")
+    wiring.stops, book = _rejected_stops(2)
+    wiring.adapter = FakeAdapter([position(Decimal("50"))], orders=book)
+
+    with _at_ist(10, 0):
+        result = await sweep(wiring)
+
+    assert len(calls) == 1
+    assert result.exits[0].step == "unprotected"
+    assert wiring.adapter.submitted == []
+
+
 @pytest.mark.asyncio
 async def test_a_working_stop_is_left_exactly_alone(wiring, monkeypatch) -> None:
     calls = []

@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.db.models import LiveOrderSubmission, MarketCandle, PaperSignal
 from app.db.session import SessionLocal
-from app.services.broker_adapter import BUY, INTRADAY, OPEN_STATUSES, SELL, BrokerAdapter
+from app.services.broker_adapter import BUY, INTRADAY, OPEN_STATUSES, SELL, STATUS_REJECTED, BrokerAdapter
 from app.services.exit_rules import (
     BREAKEVEN_AT_R,
     NO_TRAIL,
@@ -87,6 +87,14 @@ STOP_IS_POINTLESS_MINUTES = 5.0
 # judged against a price from twenty minutes ago is a decision made about a
 # market that has moved on.
 TARGET_PRICE_MAX_AGE_MINUTES = 5.0
+
+# How many of a trade's stops the broker may reject before the position is
+# closed instead. On 16 November every protective stop was rejected for the same
+# reason (16448, limit too far from trigger), and the sweep placed another one
+# each minute -- 38 rejected stops behind three open longs for thirteen minutes,
+# until they were closed by hand. A refusal that repeats is not going to stop
+# repeating, so after three the position is closed at market.
+STOPS_REJECTED_BEFORE_CLOSE = 3
 
 MARKET = "MARKET"
 STOP_MARKET = "SL-M"
@@ -273,6 +281,21 @@ def _working(stops: list[LiveOrderSubmission], book: list | None) -> list[LiveOr
         return stops
     open_ids = _open_ids(book)
     return [stop for stop in stops if any(str(number) in open_ids for number in (stop.broker_order_numbers or []))]
+
+
+def _rejected(stops: list[LiveOrderSubmission], book: list | None) -> int:
+    """How many of these stops the broker's book shows as rejected.
+
+    Our row says ACCEPTED for a stop the API took and the exchange refused a
+    second later, so only the book can say it was rejected. An unreadable book
+    counts nothing, which keeps the stop path rather than closing on a guess.
+    """
+    if book is None:
+        return 0
+    rejected = {
+        str(order.broker_order_id) for order in book if order.status == STATUS_REJECTED and order.broker_order_id
+    }
+    return sum(1 for stop in stops if any(str(number) in rejected for number in (stop.broker_order_numbers or [])))
 
 
 def _ids_resting_on(book: list | None, position) -> set[str]:  # noqa: ANN001
@@ -643,6 +666,38 @@ async def _hold_or_protect(
             status == ACCEPTED,
             "unprotected_closing",
             f"{gap}, with {left:.0f} minute(s) to square-off, so it was closed rather than stopped. {detail}".strip(),
+            quantity=quantity,
+        )
+
+    # The broker keeps refusing this trade's stops. Another stop would be refused
+    # the same way, so the position is closed instead, exactly as at the deadline.
+    rejected = _rejected(ours, book)
+    if rejected >= STOPS_REJECTED_BEFORE_CLOSE:
+        cleared, problem = await _cancel_orders(adapter, _ids_to_clear(position, ours, book))
+        if not cleared:
+            return PositionExit(
+                symbol,
+                False,
+                "cancel_failed",
+                f"{gap}; the broker rejected {rejected} stops, and the resting orders could not be "
+                f"cleared ({problem}). No exit was sent; close this by hand.",
+                quantity=quantity,
+            )
+        status, detail = await _market_exit(
+            session,
+            adapter,
+            instrument_token=signal.instrument_token,
+            side=SELL if net > 0 else BUY,
+            quantity=quantity,
+            product=(ours[0].canonical_product if ours else None) or INTRADAY,
+            paper_signal_id=signal.id,
+        )
+        return PositionExit(
+            symbol,
+            status == ACCEPTED,
+            "stops_rejected_closing",
+            f"{gap}, and the broker rejected {rejected} stops for it, so it was closed at market "
+            f"instead of stopped again. {detail}".strip(),
             quantity=quantity,
         )
 

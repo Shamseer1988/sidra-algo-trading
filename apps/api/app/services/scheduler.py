@@ -681,11 +681,26 @@ async def _send_exit_alert(settings: Settings, result) -> None:
         ist = datetime.now(UTC).astimezone(MARKET_TIMEZONE).strftime("%d-%b-%Y %I:%M %p")
         lines = []
         for item in result.noteworthy:
-            icon = "\u2705" if item.acted else "\U0001f6a8"
+            # A stop re-placed behind a naked position "acted", but it is a
+            # warning, not good news: on 16 November thirteen of these went out
+            # under a green tick and "POSITION CLOSED" while every one of those
+            # stops was being rejected and nothing had been closed at all.
+            warning = item.step in {"unprotected", "stops_rejected_closing", "unprotected_closing"}
+            icon = "\U0001f6a8" if not item.acted else ("\u26a0\ufe0f" if warning else "\u2705")
             lines.append(f"{icon} <b>{item.symbol}</b> — {item.detail}")
         body = "\n".join(lines)
+        steps = {item.step for item in result.noteworthy}
         problems = [item for item in result.noteworthy if not item.acted]
-        heading = "\U0001f6a8 <b>EXIT NEEDS ATTENTION</b>" if problems else "\u2705 <b>POSITION CLOSED</b>"
+        if problems:
+            heading = "\U0001f6a8 <b>EXIT NEEDS ATTENTION</b>"
+        elif "stops_rejected_closing" in steps:
+            heading = "\U0001f6a8 <b>STOPS REJECTED \u2014 CLOSED AT MARKET</b>"
+        elif "unprotected" in steps:
+            heading = "\u26a0\ufe0f <b>NO WORKING STOP \u2014 STOP SENT AGAIN</b>"
+        elif steps <= {"trailed"}:
+            heading = "\u2705 <b>STOP MOVED</b>"
+        else:
+            heading = "\u2705 <b>POSITION CLOSED</b>"
         await TelegramNotificationService(effective).send_message(
             f"{heading}\n\n\U0001f550 {ist} IST\n{body}", parse_mode="HTML"
         )
