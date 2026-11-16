@@ -277,7 +277,10 @@ async def test_every_order_states_its_market_protection(monkeypatch: pytest.Monk
     """
     fake = respond(200, {"status": "success", "data": {"order_ids": ["1"]}}, monkeypatch=monkeypatch)
     await order_client().place_order(**{**PLACE, "order_type": "SL-M", "trigger_price": 415.0})
-    assert fake.calls[0][1]["json"]["market_protection"] == -1
+    # Our own 2% band, not Upstox's automatic one: on 16 November 2026 the
+    # automatic band put stop limits ~10% past the trigger and the exchange
+    # rejected every protective stop.
+    assert fake.calls[0][1]["json"]["market_protection"] == 2
 
 
 async def test_market_protection_is_never_the_value_upstox_rejects(monkeypatch: pytest.MonkeyPatch) -> None:

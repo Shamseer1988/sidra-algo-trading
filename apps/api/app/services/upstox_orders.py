@@ -89,6 +89,17 @@ PRICELESS_ORDER_TYPES = frozenset({"MARKET", "SL-M"})
 # ours rather than theirs.
 MARKET_PROTECTION_AUTOMATIC = -1
 
+# 16 November 2026: the automatic value stopped being safe. Upstox turned every
+# protective SL-M into an SL whose limit sat about 10% past the trigger
+# (NESTLEIND trigger 1268.60, limit 1136.90), and the exchange rejected each
+# one: "16448 : Difference between limit price and trigger price is beyond
+# permissible range". Three filled longs stood with no stop for the morning.
+# Before that day the automatic band had been 1-2% and every stop was accepted.
+# So the band is now ours: 2% past the trigger for a stop, 2% past the price
+# for a market exit -- inside the range the exchange accepted for weeks, and
+# wide enough that a liquid share does not run through it.
+MARKET_PROTECTION_PERCENT = 2
+
 
 class UpstoxError(RuntimeError):
     """Base for every Upstox order-path failure."""
@@ -389,7 +400,7 @@ class UpstoxOrderClient(UpstoxReportClient):
         disclosed_quantity: int = 0,
         is_amo: bool = False,
         slice_order: bool = False,
-        market_protection: int = MARKET_PROTECTION_AUTOMATIC,
+        market_protection: int = MARKET_PROTECTION_PERCENT,
     ) -> list[str]:
         """Place one order and return every order id it produced.
 
