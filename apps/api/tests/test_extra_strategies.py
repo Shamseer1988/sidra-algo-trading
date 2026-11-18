@@ -162,7 +162,13 @@ def test_registry_exposes_all_strategies_and_routes_by_type() -> None:
     from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 
     identifiers = {item.identifier for item in StrategyRegistry.metadata()}
-    assert identifiers == {"orb-retest-v1", "vwap-pullback-v1", "ema-momentum-v1", "rs-pullback-v1"}
+    assert identifiers == {
+        "orb-retest-v1",
+        "vwap-pullback-v1",
+        "ema-momentum-v1",
+        "rs-pullback-v1",
+        "cpr-breakout-v1",
+    }
 
     strategy = StrategyConfiguration(name="VWAP Pullback A", strategy_type="vwap-pullback-v1")
     replayed = StrategyRegistry.evaluate(

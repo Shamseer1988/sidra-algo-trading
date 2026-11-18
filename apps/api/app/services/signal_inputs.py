@@ -61,8 +61,9 @@ DEFAULT_REQUIRED_INPUTS = {
     # The whole premise is outperformance against the benchmark.
     "rs-pullback-v1": [ATR, EMA, RELATIVE_STRENGTH],
     # Levels come from daily candles and the first hour, which the strategy
-    # checks itself and refuses without; none of the inputs above apply.
-    "cpr-breakout-v1": [],
+    # checks itself and refuses without. ATR is what the stop floor is sized
+    # against, and fourteen 1-minute candles have long existed by 10:15 AM.
+    "cpr-breakout-v1": [ATR],
 }
 
 
