@@ -322,6 +322,9 @@ async def test_a_live_strategy_is_still_offered(monkeypatch: pytest.MonkeyPatch)
 
 # --- paper-only fills stay out of the live ceilings ------------------------
 
+# A date no other test writes to: several record rows against today.
+DB_SESSION = date(2031, 3, 5)
+
 
 async def _clean() -> None:
     async with SessionLocal() as session:
@@ -343,8 +346,8 @@ async def _paper_fill(strategy_version: str) -> None:
         signal = PaperSignal(
             signal_key=f"cpr-{uuid4()}",
             instrument_token=TOKEN,
-            session_date=SESSION,
-            candle_opened_at=datetime(2026, 11, 18, 4, 50, tzinfo=UTC),
+            session_date=DB_SESSION,
+            candle_opened_at=datetime(2031, 3, 5, 4, 50, tzinfo=UTC),
             strategy_version=strategy_version,
             side="LONG",
             entry_price=Decimal("105"),
@@ -364,7 +367,7 @@ async def _paper_fill(strategy_version: str) -> None:
                 paper_signal_id=signal.id,
                 client_order_id=f"cpr-{uuid4()}",
                 instrument_token=TOKEN,
-                session_date=SESSION,
+                session_date=DB_SESSION,
                 strategy_version=strategy_version,
                 side="BUY",
                 order_type="MARKET",
@@ -372,7 +375,7 @@ async def _paper_fill(strategy_version: str) -> None:
                 quantity=10,
                 filled_quantity=10,
                 status="FILLED",
-                eligible_after=datetime(2026, 11, 18, 4, 50, tzinfo=UTC),
+                eligible_after=datetime(2031, 3, 5, 4, 50, tzinfo=UTC),
             )
         )
         await session.commit()
@@ -381,10 +384,10 @@ async def _paper_fill(strategy_version: str) -> None:
 async def test_a_paper_only_fill_does_not_spend_a_live_trade(clean_db) -> None:  # noqa: ANN001
     await _paper_fill(f"{CPR_BREAKOUT_VERSION}@1")
     async with SessionLocal() as session:
-        everything = await count_filled_entries(session, SESSION)
-        for_live = await count_filled_entries(session, SESSION, exclude_strategy_types=(CPR_BREAKOUT_VERSION,))
+        everything = await count_filled_entries(session, DB_SESSION)
+        for_live = await count_filled_entries(session, DB_SESSION, exclude_strategy_types=(CPR_BREAKOUT_VERSION,))
         names_for_live = await filled_entry_instruments(
-            session, SESSION, exclude_strategy_types=(CPR_BREAKOUT_VERSION,)
+            session, DB_SESSION, exclude_strategy_types=(CPR_BREAKOUT_VERSION,)
         )
     assert everything.total == 1
     assert for_live.total == 0
@@ -394,9 +397,9 @@ async def test_a_paper_only_fill_does_not_spend_a_live_trade(clean_db) -> None: 
 async def test_a_paper_only_strategy_counts_only_its_own_fills(clean_db) -> None:  # noqa: ANN001
     await _paper_fill("rs-pullback-v1@3")
     async with SessionLocal() as session:
-        own = await count_filled_entries(session, SESSION, strategy_type=CPR_BREAKOUT_VERSION)
-        own_names = await filled_entry_instruments(session, SESSION, only_strategy_type=CPR_BREAKOUT_VERSION)
-        live_names = await filled_entry_instruments(session, SESSION)
+        own = await count_filled_entries(session, DB_SESSION, strategy_type=CPR_BREAKOUT_VERSION)
+        own_names = await filled_entry_instruments(session, DB_SESSION, only_strategy_type=CPR_BREAKOUT_VERSION)
+        live_names = await filled_entry_instruments(session, DB_SESSION)
     assert own.total == 0
     assert own_names == ()
     assert TOKEN in live_names
