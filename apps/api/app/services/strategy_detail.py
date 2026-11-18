@@ -133,6 +133,24 @@ PROFILES: dict[str, StrategyProfile] = {
             "and this strategy would be looking to sell it."
         ),
     ),
+    "cpr-breakout-v1": StrategyProfile(
+        purpose=(
+            "Buys a break of the first hour's high on days the Central Pivot Range points up and is narrow, "
+            "following the G Stock Academy method. Long only. Paper only until it has evidence."
+        ),
+        regime=(
+            "Wants a trending day: today's CPR narrow and above or inside yesterday's, with room left below "
+            "today's R2. A wide CPR is a range day and it stands aside."
+        ),
+        entry=(
+            "After 10:15 AM, a completed candle closes above the 9:15-10:15 AM high, which itself cleared "
+            "yesterday's high. Stop 0.5% below entry, target 1:2. No new trade after 2:45 PM."
+        ),
+        does_not=(
+            "It does not short, and it does not chase: a share already above the first-hour high all "
+            "afternoon never arms."
+        ),
+    ),
 }
 
 GENERIC_PROFILE = StrategyProfile(

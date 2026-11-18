@@ -211,6 +211,59 @@ def opening_range(candles: list[CompletedCandle], minutes: int) -> dict[str, flo
     }
 
 
+FIRST_HOUR_MINUTES = 60
+
+
+def _pivot_levels(high: Decimal, low: Decimal, close: Decimal) -> dict[str, float]:
+    """Floor-trader pivot and Central Pivot Range from one day's high, low and close.
+
+    TC and BC are swapped when the formula puts BC above TC (a close below the
+    day's midpoint), so ``tc`` is always the top of the range and ``bc`` its
+    bottom. Width is the range as a percent of the pivot.
+    """
+    pivot = (high + low + close) / Decimal("3")
+    bc = (high + low) / Decimal("2")
+    tc = pivot * Decimal("2") - bc
+    tc, bc = max(tc, bc), min(tc, bc)
+    span = high - low
+    return {
+        "pivot": _decimal(pivot),
+        "tc": _decimal(tc),
+        "bc": _decimal(bc),
+        "r1": _decimal(pivot * Decimal("2") - low),
+        "s1": _decimal(pivot * Decimal("2") - high),
+        "r2": _decimal(pivot + span),
+        "s2": _decimal(pivot - span),
+        "width_percent": _decimal((tc - bc) / pivot * Decimal("100")) if pivot > 0 else 0.0,
+    }
+
+
+def cpr_levels(daily_candles: list[CompletedCandle], session: date) -> dict[str, object]:
+    """Today's and yesterday's CPR, plus yesterday's high, low and close.
+
+    Today's levels come from the last completed day before ``session``;
+    yesterday's from the day before that. Only days strictly before the session
+    are used, so a daily row for the session itself -- if one is ever stored
+    mid-day -- can never leak today's prices into today's levels.
+    """
+    prior = sorted(
+        (candle for candle in daily_candles if candle.session_date < session),
+        key=lambda candle: candle.opened_at,
+    )
+    if len(prior) < 2:
+        return {"today": None, "yesterday": None, "prior_day": None}
+    yesterday, day_before = prior[-1], prior[-2]
+    return {
+        "today": _pivot_levels(yesterday.high, yesterday.low, yesterday.close),
+        "yesterday": _pivot_levels(day_before.high, day_before.low, day_before.close),
+        "prior_day": {
+            "high": _decimal(yesterday.high),
+            "low": _decimal(yesterday.low),
+            "close": _decimal(yesterday.close),
+        },
+    }
+
+
 def relative_strength(stock: list[CompletedCandle], benchmark: list[CompletedCandle]) -> dict[str, float | None]:
     """Return stock return less NIFTY return, using only closed session candles."""
     benchmark_by_open = {candle.opened_at: candle for candle in benchmark}
@@ -446,6 +499,10 @@ def indicator_snapshot(
         "distance_to_prior_high_atr": _distance_atr(prior["high"]),
         "distance_to_prior_low_atr": _distance_atr(prior["low"]),
         "time_of_day_rvol": time_of_day_relative_volume(active, time_of_day_volume_baseline),
+        # For the CPR breakout strategy: pivot levels from the two prior days,
+        # and the 9:15-10:15 range, independent of opening_range_minutes.
+        "cpr": cpr_levels(daily, active[-1].session_date) if active else None,
+        "first_hour": opening_range(active, FIRST_HOUR_MINUTES),
     }
     values["relative_strength"] = (
         {

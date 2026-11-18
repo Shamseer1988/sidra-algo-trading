@@ -10,9 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import ApplicationSetting
 from app.services.exit_rules import ExitRules
 from app.services.extra_strategies import (
+    CPR_BREAKOUT_VERSION,
     EMA_MOMENTUM_VERSION,
     RS_PULLBACK_VERSION,
     VWAP_PULLBACK_VERSION,
+    evaluate_cpr_breakout,
     evaluate_ema_momentum,
     evaluate_rs_pullback,
     evaluate_vwap_pullback,
@@ -56,6 +58,12 @@ class StrategyConfiguration(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str = Field(min_length=3, max_length=80)
     enabled: bool = True
+    # False makes an enabled strategy paper-only: its signals are recorded,
+    # paper traded and alerted, but never offered to the broker, and its paper
+    # fills are kept out of the daily ceilings the live strategies are held to.
+    # Defaults to True so every configuration stored before this field existed
+    # keeps trading exactly as it did.
+    live_orders: bool = True
     strategy_type: str = STRATEGY_VERSION
     version: int = Field(default=1, ge=1)
     universe: list[str] = Field(default_factory=list, max_length=200)
@@ -219,6 +227,20 @@ class RsPullbackDefinition:
         )
 
 
+class CprBreakoutDefinition:
+    metadata = StrategyMetadata(
+        identifier=CPR_BREAKOUT_VERSION,
+        name="CPR First-Hour Breakout",
+        implementation_version=CPR_BREAKOUT_VERSION,
+        prerequisites=("completed candle", "two prior daily candles", "first hour range"),
+    )
+
+    def evaluate(self, candle, indicators, benchmark, controls, configuration, prior_state) -> StrategyDecision:
+        return _direction_gated(
+            evaluate_cpr_breakout(candle, indicators, benchmark, controls, prior_state), configuration
+        )
+
+
 def _direction_gated(decision: StrategyDecision, configuration: "StrategyConfiguration") -> StrategyDecision:
     if decision.side and decision.side not in configuration.allowed_sides:
         return StrategyDecision(next_state=AWAITING, reason=f"{decision.side.title()} signals are disabled")
@@ -236,6 +258,7 @@ class StrategyRegistry:
         VWAP_PULLBACK_VERSION: VwapPullbackDefinition(),
         EMA_MOMENTUM_VERSION: EmaMomentumDefinition(),
         RS_PULLBACK_VERSION: RsPullbackDefinition(),
+        CPR_BREAKOUT_VERSION: CprBreakoutDefinition(),
     }
 
     @classmethod
@@ -256,6 +279,24 @@ class StrategyRegistry:
             StrategyConfiguration.model_validate(item) for item in (setting.value if setting else DEFAULT_STRATEGIES)
         ]
         return [item for item in strategies if item.enabled and item.strategy_type in cls._definitions]
+
+    @classmethod
+    async def paper_only_types(cls, session: AsyncSession) -> tuple[str, ...]:
+        """Strategy types stored with live_orders=false, enabled or not.
+
+        Read from every stored configuration rather than only the enabled ones,
+        so a paper-only strategy switched off mid-session still has its
+        morning's paper fills kept out of the live ceilings.
+        """
+        setting = await session.get(ApplicationSetting, STRATEGIES_KEY)
+        strategies = [
+            StrategyConfiguration.model_validate(item) for item in (setting.value if setting else DEFAULT_STRATEGIES)
+        ]
+        paper = {item.strategy_type for item in strategies if not item.live_orders}
+        # A type that also has a live configuration is never excluded: its
+        # fills may be real trades, and a ceiling must not stop seeing those.
+        live = {item.strategy_type for item in strategies if item.live_orders}
+        return tuple(sorted(paper - live))
 
     @classmethod
     def evaluate(cls, configuration, candle, indicators, benchmark, controls, prior_state) -> StrategyDecision:

@@ -60,6 +60,9 @@ DEFAULT_REQUIRED_INPUTS = {
     "ema-momentum-v1": [ATR, EMA, RVOL],
     # The whole premise is outperformance against the benchmark.
     "rs-pullback-v1": [ATR, EMA, RELATIVE_STRENGTH],
+    # Levels come from daily candles and the first hour, which the strategy
+    # checks itself and refuses without; none of the inputs above apply.
+    "cpr-breakout-v1": [],
 }
 
 

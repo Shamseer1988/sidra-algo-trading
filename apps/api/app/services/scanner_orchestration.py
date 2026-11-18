@@ -175,13 +175,25 @@ class PaperScannerOrchestrator:
         """
         latest = None
         async with SessionLocal() as session:
+            # Paper-only strategies live in their own day. A live strategy's
+            # ceilings leave their paper fills out, so a simulation can never
+            # spend a real trade; a paper-only strategy's ceilings count only
+            # its own fills, so it is measured as if it traded the account alone.
+            if strategy.live_orders:
+                excluded = await StrategyRegistry.paper_only_types(session)
+                own_only = None
+            else:
+                excluded = ()
+                own_only = strategy.strategy_type
             # Counted from fills, not signals. A signal whose entry order never
             # filled did not use up one of the day's trades, and the previous
             # counter spent the budget on it anyway. The reason string carries
             # the numbers because "ceiling reached" without them sends an
             # operator to the database to find out which trades those were.
             ceiling = int(controls["maximum_daily_trades"])
-            taken = await count_filled_entries(session, candle.session_date)
+            taken = await count_filled_entries(
+                session, candle.session_date, strategy_type=own_only, exclude_strategy_types=excluded
+            )
             if taken.total >= ceiling:
                 return f"Daily trade ceiling reached: {taken.explain(ceiling)}"
             # Across strategies, from fills, for the same reasons as above. The
@@ -191,7 +203,11 @@ class PaperScannerOrchestrator:
             per_share_default = DEFAULT_TRADING_CONTROLS["maximum_daily_trades_per_instrument"]
             per_instrument = int(controls.get("maximum_daily_trades_per_instrument", per_share_default))
             on_this_share = await count_filled_entries(
-                session, candle.session_date, instrument_token=candle.instrument_token
+                session,
+                candle.session_date,
+                instrument_token=candle.instrument_token,
+                strategy_type=own_only,
+                exclude_strategy_types=excluded,
             )
             if on_this_share.total >= per_instrument:
                 return (
@@ -204,7 +220,9 @@ class PaperScannerOrchestrator:
             # independently and no ceiling above this one can tell.
             per_sector_default = DEFAULT_TRADING_CONTROLS["maximum_daily_trades_per_sector"]
             per_sector = int(controls.get("maximum_daily_trades_per_sector", per_sector_default))
-            taken_today = await filled_entry_instruments(session, candle.session_date)
+            taken_today = await filled_entry_instruments(
+                session, candle.session_date, exclude_strategy_types=excluded, only_strategy_type=own_only
+            )
             if taken_today:
                 group, held = await self._sector_usage(session, candle.instrument_token, taken_today)
                 if len(held) >= per_sector:
@@ -550,8 +568,13 @@ class PaperScannerOrchestrator:
         side_icon = "🟢" if signal.side == "LONG" else "🔴"
         side_text = "BUY / LONG" if signal.side == "LONG" else "SELL / SHORT"
 
+        # A paper-only strategy's signal never becomes an order, and its alert
+        # must say so before anything else, so it is never read as a live trade.
+        configuration = (signal.strategy_snapshot or {}).get("configuration") or {}
+        paper_only = configuration.get("live_orders") is False
         message = (
-            "🎯 <b>TRADING SIGNAL MATCHED</b>\n\n"
+            ("📝 <b>PAPER ONLY — NO REAL ORDER</b>\n" if paper_only else "")
+            + "🎯 <b>TRADING SIGNAL MATCHED</b>\n\n"
             f"📊 <b>Stock:</b> <b>{script_name}</b> (<code>{signal.instrument_token}</code>)\n"
             f"📈 <b>Direction:</b> {side_icon} <b>{side_text}</b>\n"
             f"🧠 <b>Strategy:</b> {signal.strategy_version}\n"
@@ -709,7 +732,17 @@ class PaperScannerOrchestrator:
             # the operator's price band -- it enforces too. What a paper refusal
             # still withholds is a paper order, which is the only thing it was ever
             # about.
-            if paper.blocks_live:
+            if not strategy.live_orders:
+                # Paper-only strategy: nothing reaches the broker, whatever the
+                # deployment's live settings. Checked before anything else on
+                # the live side so no later condition can route around it.
+                self._logger.info(
+                    "scanner.live_entry_skipped_paper_only",
+                    signal_id=str(signal.id),
+                    strategy_id=strategy.id,
+                    strategy_type=strategy.strategy_type,
+                )
+            elif paper.blocks_live:
                 self._logger.warning("scanner.live_entry_withheld", signal_id=str(signal.id), reason=paper.reason)
             else:
                 await self._offer_live_entry(signal)

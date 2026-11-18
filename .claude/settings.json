@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "grep -qiE '(apply_settings|purge_history|repair_unbalanced_positions)\\.py|(live-control|apply-[a-z0-9_-]*|restore-[a-z0-9_-]*)\\.sh' && printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Refused by .claude/settings.json. This script changes a live trading control, a saved setting or stored history, and this account places real orders automatically. Shamseer runs these himself: say which one you need and why, and wait for him.\"}}' || true",
+            "command": "grep -qiE '(apply_[a-z0-9_]*|purge_history|repair_unbalanced_positions)\\.py|(live-control|apply-[a-z0-9_-]*|restore-[a-z0-9_-]*)\\.sh' && printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Refused by .claude/settings.json. This script changes a live trading control, a saved setting or stored history, and this account places real orders automatically. Shamseer runs these himself: say which one you need and why, and wait for him.\"}}' || true",
             "shell": "bash",
             "timeout": 10,
             "onFailure": "block",

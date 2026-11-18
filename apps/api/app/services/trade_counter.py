@@ -176,7 +176,29 @@ class TradeCount:
         return f"{self.total} of {ceiling} used — {detail}."
 
 
-async def filled_entry_instruments(session: AsyncSession, session_date: date) -> tuple[str, ...]:
+async def signal_ids_of_types(session: AsyncSession, session_date: date, strategy_types) -> set[str]:  # noqa: ANN001
+    """Today's signal ids raised by any of ``strategy_types``.
+
+    Matched on the type prefix of ``strategy_version`` (``"{type}@{version}"``),
+    for the reason ``count_filled_entries`` gives: the version moves on every
+    settings save, the type does not.
+    """
+    types = set(strategy_types or ())
+    if not types:
+        return set()
+    result = await session.execute(
+        select(PaperSignal.id, PaperSignal.strategy_version).where(PaperSignal.session_date == session_date)
+    )
+    return {str(sid) for sid, version in result.all() if str(version or "").split("@", 1)[0] in types}
+
+
+async def filled_entry_instruments(
+    session: AsyncSession,
+    session_date: date,
+    *,
+    exclude_strategy_types: tuple[str, ...] = (),
+    only_strategy_type: str | None = None,
+) -> tuple[str, ...]:
     """The instruments today's filled entries were taken on, once each.
 
     The sector ceiling needs names, not a number: "how many of today's trades
@@ -191,16 +213,25 @@ async def filled_entry_instruments(session: AsyncSession, session_date: date) ->
     """
     start, end = session_bounds_utc(session_date)
     tokens: list[str] = []
+    # Scoping for paper-only strategies (see count_filled_entries).
+    excluded = await signal_ids_of_types(session, session_date, exclude_strategy_types)
+    only = await signal_ids_of_types(session, session_date, (only_strategy_type,)) if only_strategy_type else None
 
-    paper_rows = await session.scalars(
-        select(PaperOrder.instrument_token).where(
+    def wanted(signal_id) -> bool:  # noqa: ANN001
+        key = str(signal_id) if signal_id is not None else None
+        if only is not None:
+            return key is not None and key in only
+        return key is None or key not in excluded
+
+    paper_rows = await session.execute(
+        select(PaperOrder.instrument_token, PaperOrder.paper_signal_id).where(
             PaperOrder.session_date == session_date,
             PaperOrder.order_role == "ENTRY",
             PaperOrder.filled_quantity > 0,
         )
     )
-    for value in paper_rows:
-        if value and value not in tokens:
+    for value, signal_id in paper_rows.all():
+        if value and value not in tokens and wanted(signal_id):
             tokens.append(str(value))
 
     live_rows = await session.scalars(
@@ -214,7 +245,7 @@ async def filled_entry_instruments(session: AsyncSession, session_date: date) ->
     )
     for row in live_rows:
         token = row.instrument_token
-        if token and token not in tokens:
+        if token and token not in tokens and wanted(row.paper_signal_id):
             tokens.append(token)
 
     return tuple(tokens)
@@ -227,6 +258,7 @@ async def count_filled_entries(
     strategy_type: str | None = None,
     side: str | None = None,
     instrument_token: str | None = None,
+    exclude_strategy_types: tuple[str, ...] = (),
 ) -> TradeCount:
     """Today's trades, counted from fills rather than intentions.
 
@@ -253,6 +285,12 @@ async def count_filled_entries(
     a different type. Two enabled configurations of the *same* type would share
     a budget under this count; nothing in the system creates that today, and a
     signal would have to carry its configuration's id for it to be fixable.
+
+    ``exclude_strategy_types`` leaves out the trades of paper-only strategies
+    (``live_orders=false``). Their paper fills are a simulation running beside
+    the live account, and without this a paper CPR fill at 10:20 AM would spend
+    one of the live strategy's three trades -- the paper journal deciding what
+    real money may do, which the live path was separated from on 14 October.
 
     ``instrument_token`` narrows it to one share, for the per-share ceiling.
     Across every strategy, because the thing that ceiling is about is the
@@ -320,6 +358,11 @@ async def count_filled_entries(
     live_keys = {str(value) for value in live_rows if value is not None}
     if signal_ids is not None:
         live_keys &= signal_ids
+
+    excluded = await signal_ids_of_types(session, session_date, exclude_strategy_types)
+    if excluded:
+        paper_keys -= excluded
+        live_keys -= excluded
 
     return TradeCount(
         paper_fills=len(paper_keys),

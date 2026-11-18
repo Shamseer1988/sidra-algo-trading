@@ -46,6 +46,7 @@ saved settings, or history:
 ```
 apply_settings.py      live-control.sh        apply-*.sh
 restore-*.sh           purge_history.py       repair_unbalanced_positions.py
+apply_*.py             (e.g. apply_cpr_paper_strategy.py)
 ```
 
 Shamseer changes trading settings himself. If one needs to change, say which
@@ -108,8 +109,11 @@ commit.
 
 - Capital ₹25,000, risk 0.5% (₹125) a trade, 3 trades a day, 1:2, window
   09:30-11:30, flat by 15:00.
-- Four strategies exist; only **RS Pullback** is enabled. ORB Retest and VWAP
+- Five strategies exist; only **RS Pullback** trades live. ORB Retest and VWAP
   Pullback were disabled on sweep evidence, EMA Momentum never traded.
+  **CPR Breakout** (`cpr-breakout-v1`) runs paper-only: `live_orders: false`
+  on a strategy skips the broker entirely and keeps its paper fills out of the
+  live daily ceilings.
 - Four daily ceilings, all counted from fills: account trades, per share, per
   sector (`app/services/sectors.py`), per strategy. The per-sector map is keyed
   by trading symbol and `watchlist.py` warns when the watchlist outgrows it.
