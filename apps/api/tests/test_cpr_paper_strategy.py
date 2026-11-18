@@ -21,10 +21,12 @@ from app.services.exit_rules import ExitRules
 from app.services.extra_strategies import (
     AWAITING,
     CPR_ARMED,
+    CPR_ARMED_SHORT,
     CPR_BREAKOUT_VERSION,
     SIGNALLED,
     cpr_buy_setup,
     cpr_relation,
+    cpr_sell_setup,
     evaluate_cpr_breakout,
 )
 from app.services.market_calculations import CompletedCandle, cpr_levels
@@ -77,7 +79,7 @@ def configuration(**overrides) -> StrategyConfiguration:  # noqa: ANN003
         name="CPR First-Hour Breakout (paper)",
         live_orders=False,
         strategy_type=CPR_BREAKOUT_VERSION,
-        allowed_sides=["LONG"],
+        allowed_sides=["LONG", "SHORT"],
         max_trades_per_day=3,
         minimum_score=0,
         minimum_rr=2.0,
@@ -210,12 +212,70 @@ def test_the_account_trade_window_does_not_apply() -> None:
     assert decision.next_state == SIGNALLED
 
 
-def test_the_registry_knows_the_type_and_keeps_it_long_only() -> None:
+def test_the_registry_knows_the_type() -> None:
     assert CPR_BREAKOUT_VERSION in {item.identifier for item in StrategyRegistry.metadata()}
     decision = StrategyRegistry.evaluate(
         configuration(), candle(*AFTER_FIRST_HOUR, "104.9", "105.2"), indicators(), {}, controls(), AWAITING
     )
     assert decision.next_state == SIGNALLED and decision.side == "LONG"
+
+
+# --- the sell side: the buy rules reflected ---------------------------------
+
+# Day before yesterday H 105 L 95 C 100 -> yesterday's S1 95, S2 90.
+# Yesterday H 100 L 96 C 97.5 -> today's CPR 97.67-98.00 (0.34% wide), entirely
+# below yesterday's (LOWER), S2 93.83.
+SELL_DAILY = [
+    _daily(date(2026, 11, 16), "105", "95", "100"),
+    _daily(date(2026, 11, 17), "100", "96", "97.5"),
+]
+
+
+def sell_indicators(first_hour_low: float = 95.5) -> dict:
+    return {
+        "cpr": cpr_levels(SELL_DAILY, SESSION),
+        "first_hour": {"high": 97.0, "low": first_hour_low, "complete": True},
+        "atr": 0.2,
+    }
+
+
+def test_the_sell_setup_mirrors_the_buy_rules() -> None:
+    ok, why, levels = cpr_sell_setup(sell_indicators())
+    assert ok, why
+    assert levels["relation"] == "LOWER"
+    assert not cpr_buy_setup(sell_indicators())[0]
+
+
+def test_a_close_below_the_first_hour_low_sells_with_the_sheets_stop_and_target() -> None:
+    decision = evaluate_cpr_breakout(candle(*AFTER_FIRST_HOUR, "95.6", "95.3"), sell_indicators(), {}, controls())
+    assert decision.next_state == SIGNALLED and decision.side == "SHORT"
+    assert float(decision.stop_price) == pytest.approx(95.7765, abs=0.001)
+    assert float(decision.target_price) == pytest.approx(94.347, abs=0.001)
+
+
+def test_a_first_hour_low_above_yesterdays_low_is_refused() -> None:
+    ok, why, _ = cpr_sell_setup(sell_indicators(first_hour_low=96.2))
+    assert not ok and "yesterday's low" in why
+
+
+def test_the_sell_side_arms_above_the_low_and_fires_on_a_later_close_below() -> None:
+    armed = evaluate_cpr_breakout(candle(*AFTER_FIRST_HOUR, "95.9", "95.7"), sell_indicators(), {}, controls())
+    assert armed.next_state == CPR_ARMED_SHORT
+    fired = evaluate_cpr_breakout(candle(4, 51, "95.45", "95.3"), sell_indicators(), {}, controls(), CPR_ARMED_SHORT)
+    assert fired.next_state == SIGNALLED and fired.side == "SHORT"
+
+
+def test_a_long_only_configuration_refuses_the_short() -> None:
+    long_only = configuration(allowed_sides=["LONG"])
+    decision = StrategyRegistry.evaluate(
+        long_only,
+        candle(*AFTER_FIRST_HOUR, "95.6", "95.3"),
+        sell_indicators(),
+        {},
+        long_only.effective_controls(BASE_CONTROLS),
+        AWAITING,
+    )
+    assert decision.next_state == AWAITING
 
 
 # --- the paper-only switch ------------------------------------------------

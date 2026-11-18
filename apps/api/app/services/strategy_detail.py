@@ -135,20 +135,22 @@ PROFILES: dict[str, StrategyProfile] = {
     ),
     "cpr-breakout-v1": StrategyProfile(
         purpose=(
-            "Buys a break of the first hour's high on days the Central Pivot Range points up and is narrow, "
-            "following the G Stock Academy method. Long only. Paper only until it has evidence."
+            "Buys a break of the first hour's high when the Central Pivot Range points up and is narrow, and "
+            "sells a break of its low when it points down, following the G Stock Academy method. Paper only "
+            "until it has evidence."
         ),
         regime=(
-            "Wants a trending day: today's CPR narrow and above or inside yesterday's, with room left below "
-            "today's R2. A wide CPR is a range day and it stands aside."
+            "Wants a trending day: today's CPR narrow and above, below or inside yesterday's, with room left "
+            "before today's R2 or S2. A wide CPR is a range day and it stands aside."
         ),
         entry=(
-            "After 10:15 AM, a completed candle closes above the 9:15-10:15 AM high, which itself cleared "
-            "yesterday's high. Stop 0.5% below entry, target 1:2. No new trade after 2:45 PM."
+            "After 10:15 AM, a completed candle closes above the 9:15-10:15 AM high (which cleared yesterday's "
+            "high), or below its low (which broke yesterday's low) while under today's CPR. Stop 0.5%, target "
+            "1:2. No new trade after 2:45 PM."
         ),
         does_not=(
-            "It does not short, and it does not chase: a share already above the first-hour high all "
-            "afternoon never arms."
+            "It does not chase: a share already beyond the first-hour range all afternoon never arms. The "
+            "short side mirrors the notes' buy rules; the notes themselves give only buy rules."
         ),
     ),
 }

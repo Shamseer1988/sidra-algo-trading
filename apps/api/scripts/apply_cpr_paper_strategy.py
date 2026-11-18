@@ -8,7 +8,7 @@ The entry is enabled with ``live_orders: false``: it signals, paper trades and
 sends Telegram alerts marked PAPER ONLY, and it never sends an order to the
 broker. Its paper fills are kept out of the live strategy's daily ceilings.
 
-Rules (G Stock Academy notes and the money-management sheet): long only,
+Rules (G Stock Academy notes and the money-management sheet): buy and sell,
 10:15 AM - 2:45 PM, stop 0.5% below entry, target 1:2, up to 3 paper trades a
 day. minimum_score 0 because the CPR rules themselves are the filter.
 
@@ -50,7 +50,7 @@ def cpr_configuration() -> StrategyConfiguration:
         enabled=True,
         live_orders=False,
         strategy_type=CPR_BREAKOUT_VERSION,
-        allowed_sides=["LONG"],
+        allowed_sides=["LONG", "SHORT"],
         max_trades_per_day=3,
         minimum_score=0,
         minimum_rr=2.0,

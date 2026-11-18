@@ -477,13 +477,17 @@ def _score_rs_pullback(
 
 # --- CPR breakout (G Stock Academy method) -----------------------------------
 #
-# Long only. Built from the operator's tutorial notes and money-management
+# Long and short (the short side mirrors the notes' buy rules). Built from the operator's tutorial notes and money-management
 # sheet, not from evidence: the six-month backtest of these rules on 18 November
 # 2026 was not profitable after charges. It exists to be paper traded, which is
 # why the stored configuration carries live_orders=false.
 
 CPR_BREAKOUT_VERSION = "cpr-breakout-v1"
-CPR_ARMED = "CPR_ARMED"
+# Which side has seen a close on the near side of its level after 10:15 AM.
+CPR_ARMED = "CPR_ARMED"  # long side
+CPR_ARMED_SHORT = "CPR_ARMED_SHORT"
+CPR_ARMED_BOTH = "CPR_ARMED_BOTH"
+CPR_STATES = {AWAITING, CPR_ARMED, CPR_ARMED_SHORT, CPR_ARMED_BOTH}
 # The first hour must be complete before a breakout of its high means anything,
 # and the notes forbid new trades after 2:45 PM. Fixed rather than read from the
 # account's trade window, which belongs to the live strategy (9:45-11:30 AM).
@@ -573,6 +577,50 @@ def cpr_buy_setup(indicators: dict, narrow_percent: Decimal = DEFAULT_CPR_NARROW
     return True, "CPR buy conditions met", levels
 
 
+def cpr_sell_setup(indicators: dict, narrow_percent: Decimal = DEFAULT_CPR_NARROW_PERCENT) -> tuple[bool, str, dict]:
+    """The mirror image of ``cpr_buy_setup``, for a short.
+
+    The operator's notes give buy rules only; these are their reflection:
+      1. Two-day relation is LOWER, OVERLAP_LOWER or INSIDE.
+      2. Yesterday closed above its S1 and its low stayed above its S2.
+      3. Today's CPR is narrow and its bottom is above yesterday's S1.
+      4. The first hour's low is below yesterday's low and above today's S2.
+    The notes' own line -- a lower CPR is bearish only while price is below
+    today's CPR -- is applied at entry, where the price is known.
+    """
+    cpr = indicators.get("cpr") if isinstance(indicators, dict) else None
+    first_hour = indicators.get("first_hour") if isinstance(indicators, dict) else None
+    if not isinstance(cpr, dict) or not cpr.get("today") or not cpr.get("yesterday") or not cpr.get("prior_day"):
+        return False, "CPR levels are not available (needs two prior daily candles)", {}
+    if not isinstance(first_hour, dict) or not first_hour.get("complete") or first_hour.get("low") is None:
+        return False, "First hour (9:15-10:15 AM) is not complete", {}
+    today, yesterday, prior = cpr["today"], cpr["yesterday"], cpr["prior_day"]
+    fh_low = _level(first_hour, "low")
+    y_low, y_close = _level(prior, "low"), _level(prior, "close")
+    y_s1, y_s2 = _level(yesterday, "s1"), _level(yesterday, "s2")
+    t_bc, t_s2 = _level(today, "bc"), _level(today, "s2")
+    relation = cpr_relation(today, yesterday)
+    width = _level(today, "width_percent")
+    levels = {"relation": relation, "width_percent": width, "first_hour_low": fh_low, "today_bc": t_bc}
+    if None in (fh_low, y_low, y_close, y_s1, y_s2, t_bc, t_s2, width):
+        return False, "CPR levels are incomplete", levels
+    if relation not in {"LOWER", "OVERLAP_LOWER", "INSIDE"}:
+        return False, f"CPR relation is {relation}, not lower, overlapping-lower or inside", levels
+    if not y_close > y_s1:
+        return False, "Yesterday closed at or below its S1", levels
+    if not y_low > y_s2:
+        return False, "Yesterday's low reached its S2", levels
+    if width >= narrow_percent:
+        return False, f"Today's CPR is not narrow ({width}% is not below {narrow_percent}%)", levels
+    if not t_bc > y_s1:
+        return False, "Today's CPR is not above yesterday's S1", levels
+    if not fh_low < y_low:
+        return False, "First-hour low did not break yesterday's low", levels
+    if not fh_low > t_s2:
+        return False, "First-hour low is already at or below today's S2", levels
+    return True, "CPR sell conditions met", levels
+
+
 def evaluate_cpr_breakout(
     candle: CompletedCandle,
     indicators: dict,
@@ -580,44 +628,68 @@ def evaluate_cpr_breakout(
     controls: dict,
     prior_state: str = AWAITING,
 ) -> StrategyDecision:
-    """Buy the first completed candle that closes above the first-hour high.
+    """Buy a close above the first-hour high, or sell a close below its low.
 
-    The breakout has to happen after 10:15 AM: a candle that closes at or below
-    the first-hour high arms the setup, and the signal is a later close above it
-    -- or a candle that opens at or below it and closes above. A share already
-    trading above the level all afternoon never arms and is not chased.
+    The break has to happen after 10:15 AM. A candle that closes on the near
+    side of a level arms that side, and the signal is a later close through it
+    -- or a candle that opens on the near side and closes through. A share
+    already beyond the level all afternoon never arms and is not chased. A
+    short also needs the close below today's CPR, per the notes.
     """
     if not _cpr_window(candle):
         return StrategyDecision(next_state=AWAITING, reason="Outside the CPR window (10:15 AM - 2:45 PM)")
     if prior_state == SIGNALLED:
         return StrategyDecision(next_state=SIGNALLED, reason="Instrument already signalled this session")
-    if prior_state not in {AWAITING, CPR_ARMED}:
+    if prior_state not in CPR_STATES:
         return StrategyDecision(next_state=AWAITING, reason="Unknown strategy state was reset")
 
-    narrow = controls.get("cpr_narrow_percent")
-    ok, why, levels = cpr_buy_setup(
-        indicators, Decimal(str(narrow)) if narrow is not None else DEFAULT_CPR_NARROW_PERCENT
-    )
-    if not ok:
-        return StrategyDecision(next_state=AWAITING, reason=why)
-    level = levels["first_hour_high"]
-    broke_out = candle.close > level and (candle.open <= level or prior_state == CPR_ARMED)
-    if not broke_out:
-        if candle.close <= level:
-            return StrategyDecision(next_state=CPR_ARMED, reason="Below the first-hour high; waiting for a breakout")
-        return StrategyDecision(next_state=prior_state, reason="Already above the first-hour high; not chasing")
+    narrow_raw = controls.get("cpr_narrow_percent")
+    narrow = Decimal(str(narrow_raw)) if narrow_raw is not None else DEFAULT_CPR_NARROW_PERCENT
+    long_ok, long_why, long_levels = cpr_buy_setup(indicators, narrow)
+    short_ok, short_why, short_levels = cpr_sell_setup(indicators, narrow)
+    if not long_ok and not short_ok:
+        return StrategyDecision(next_state=AWAITING, reason=f"Buy: {long_why}. Sell: {short_why}")
+
+    armed_long = prior_state in {CPR_ARMED, CPR_ARMED_BOTH}
+    armed_short = prior_state in {CPR_ARMED_SHORT, CPR_ARMED_BOTH}
+    side: Side | None = None
+    levels: dict = {}
+    if long_ok:
+        high = long_levels["first_hour_high"]
+        if candle.close > high and (candle.open <= high or armed_long):
+            side, levels = "LONG", long_levels
+    if side is None and short_ok:
+        low = short_levels["first_hour_low"]
+        below_cpr = candle.close < short_levels["today_bc"]
+        if candle.close < low and below_cpr and (candle.open >= low or armed_short):
+            side, levels = "SHORT", short_levels
+
+    if side is None:
+        armed_long = armed_long or (long_ok and candle.close <= long_levels["first_hour_high"])
+        armed_short = armed_short or (short_ok and candle.close >= short_levels["first_hour_low"])
+        state = (
+            CPR_ARMED_BOTH
+            if armed_long and armed_short
+            else CPR_ARMED
+            if armed_long
+            else CPR_ARMED_SHORT
+            if armed_short
+            else AWAITING
+        )
+        return StrategyDecision(next_state=state, reason="Waiting for a close through the first-hour range; not chasing")
 
     refusal = _required_refusal(indicators, benchmark, controls)
     if refusal is not None:
         return refusal
-    breakdown = _score_cpr_breakout(levels, benchmark)
+    breakdown = _score_cpr_breakout(side, levels, benchmark)
     score = sum(breakdown.values())
     if score < int(controls["minimum_score"]):
         return StrategyDecision(
             next_state=AWAITING, score=score, score_breakdown=breakdown, reason="Breakout failed score threshold"
         )
-    structural_stop = candle.close * (Decimal("1") - CPR_STOP_PERCENT / Decimal("100"))
-    plan = plan_trade("LONG", candle.close, structural_stop, indicators, controls)
+    offset = candle.close * CPR_STOP_PERCENT / Decimal("100")
+    structural_stop = candle.close - offset if side == "LONG" else candle.close + offset
+    plan = plan_trade(side, candle.close, structural_stop, indicators, controls)
     if plan is None:
         return StrategyDecision(
             next_state=AWAITING, score=score, score_breakdown=breakdown, reason="Risk plan is invalid"
@@ -625,7 +697,7 @@ def evaluate_cpr_breakout(
     stop, target, quantity, risk_amount = plan
     return StrategyDecision(
         next_state=SIGNALLED,
-        side="LONG",
+        side=side,
         entry_price=candle.close,
         stop_price=stop,
         target_price=target,
@@ -637,20 +709,24 @@ def evaluate_cpr_breakout(
     )
 
 
-def _score_cpr_breakout(levels: dict, benchmark: dict) -> dict[str, int]:
+def _score_cpr_breakout(side: Side, levels: dict, benchmark: dict) -> dict[str, int]:
     """Informational only: every rule has already passed when this runs.
 
     Kept so the signal carries a breakdown like every other strategy. The
     stored configuration sets minimum_score to 0, so this never filters.
     """
-    relation_points = {"HIGHER": 30, "OVERLAP_HIGHER": 25, "INSIDE": 20}.get(levels.get("relation"), 0)
+    if side == "LONG":
+        relation_points = {"HIGHER": 30, "OVERLAP_HIGHER": 25, "INSIDE": 20}.get(levels.get("relation"), 0)
+    else:
+        relation_points = {"LOWER": 30, "OVERLAP_LOWER": 25, "INSIDE": 20}.get(levels.get("relation"), 0)
     width = Decimal(str(levels.get("width_percent") or DEFAULT_CPR_NARROW_PERCENT))
     narrow = Decimal("30") * _clamp(
         (DEFAULT_CPR_NARROW_PERCENT - width) / DEFAULT_CPR_NARROW_PERCENT, Decimal("0"), Decimal("1")
     )
+    wanted = "BULLISH" if side == "LONG" else "BEARISH"
     return {
         "cpr_relation": relation_points,
         "cpr_narrowness": _round_points(narrow, Decimal("30")),
         "first_hour_breakout": 20,
-        "market_confirmation": 20 if _regime_name(benchmark) == "BULLISH" else 0,
+        "market_confirmation": 20 if _regime_name(benchmark) == wanted else 0,
     }
