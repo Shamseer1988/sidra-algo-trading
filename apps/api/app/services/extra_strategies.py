@@ -477,9 +477,10 @@ def _score_rs_pullback(
 
 # --- CPR breakout (G Stock Academy method) -----------------------------------
 #
-# Long and short (the short side mirrors the notes' buy rules). Built from the operator's tutorial notes and money-management
-# sheet, not from evidence: the six-month backtest of these rules on 18 November
-# 2026 was not profitable after charges. It exists to be paper traded, which is
+# Long and short (the short side mirrors the notes' buy rules). Built from the
+# operator's tutorial notes and money-management sheet, not from evidence: the
+# six-month backtest of these rules on 18 November 2026 was not profitable after
+# charges. It exists to be paper traded, which is
 # why the stored configuration carries live_orders=false.
 
 CPR_BREAKOUT_VERSION = "cpr-breakout-v1"
@@ -676,7 +677,9 @@ def evaluate_cpr_breakout(
             if armed_short
             else AWAITING
         )
-        return StrategyDecision(next_state=state, reason="Waiting for a close through the first-hour range; not chasing")
+        return StrategyDecision(
+            next_state=state, reason="Waiting for a close through the first-hour range; not chasing"
+        )
 
     refusal = _required_refusal(indicators, benchmark, controls)
     if refusal is not None:
