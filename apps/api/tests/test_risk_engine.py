@@ -180,3 +180,106 @@ async def test_a_signal_above_the_cap_is_refused_and_the_refusal_is_recorded() -
                 stored.value = previous if previous is not None else DEFAULT_TRADING_CONTROLS
             await session.commit()
         await engine.dispose()
+
+
+# --- a paper-only strategy keeps its own paper budget -------------------------
+#
+# On 19 November RS Pullback's three paper mirrors spent the whole paper budget
+# at 9:46 AM and CPR's only signal of the day was refused at 11:25 AM. The trade
+# ceilings were already split this way; the paper risk budget was not.
+
+CPR = "cpr-breakout-v1"
+
+
+def test_a_paper_only_strategy_sees_only_its_own_risk() -> None:
+    from app.services.risk_engine import same_book
+
+    assert same_book(CPR, CPR, (CPR,)) is True
+    assert same_book(CPR, "rs-pullback-v1", (CPR,)) is False
+
+
+def test_a_live_strategy_does_not_see_paper_only_risk() -> None:
+    from app.services.risk_engine import same_book
+
+    assert same_book("rs-pullback-v1", CPR, (CPR,)) is False
+    assert same_book("rs-pullback-v1", "orb-retest-v1", (CPR,)) is True
+
+
+def test_with_no_paper_only_strategy_everything_is_one_book_as_before() -> None:
+    from app.services.risk_engine import same_book
+
+    assert same_book("rs-pullback-v1", CPR, ()) is True
+    assert same_book(CPR, "rs-pullback-v1", ()) is True
+
+
+def test_the_type_is_read_without_the_version() -> None:
+    from app.services.risk_engine import strategy_type_of
+
+    assert strategy_type_of("rs-pullback-v1@8") == "rs-pullback-v1"
+    assert strategy_type_of("cpr-breakout-v1") == "cpr-breakout-v1"
+    assert strategy_type_of(None) == ""
+
+
+async def test_a_full_live_budget_does_not_refuse_a_paper_only_signal(monkeypatch) -> None:  # noqa: ANN001
+    from app.services.strategy_registry import StrategyRegistry
+
+    async def _paper_only(_session):  # noqa: ANN001, ANN202
+        return (CPR,)
+
+    monkeypatch.setattr(StrategyRegistry, "paper_only_types", _paper_only)
+    await engine.dispose()
+    session_date = date(2031, 1, 4)
+    async with SessionLocal() as session:
+        setting = await session.get(ApplicationSetting, TRADING_KEY)
+        controls = TradingControls.model_validate(setting.value if setting else DEFAULT_TRADING_CONTROLS)
+    whole_budget = (
+        Decimal(str(controls.account_capital)) * Decimal(str(controls.maximum_daily_risk_percent)) / Decimal("100")
+    )
+
+    def _signal(key: str, version: str, minute: int) -> PaperSignal:
+        return PaperSignal(
+            signal_key=f"risk-book-{key}",
+            instrument_token=f"NSE:BOOK{key}",
+            session_date=session_date,
+            candle_opened_at=datetime(2031, 1, 4, 4, minute, tzinfo=UTC),
+            strategy_version=version,
+            side="LONG",
+            entry_price=Decimal("100"),
+            stop_price=Decimal("99"),
+            target_price=Decimal("102"),
+            quantity=1,
+            risk_amount=whole_budget,
+            score=90,
+            score_breakdown={},
+            strategy_snapshot={},
+            indicator_snapshot={},
+        )
+
+    live_first = _signal("rs1", "rs-pullback-v1@8", 1)
+    paper = _signal("cpr1", f"{CPR}@1", 2)
+    live_second = _signal("rs2", "rs-pullback-v1@8", 3)
+    paper_second = _signal("cpr2", f"{CPR}@1", 4)
+    signals = [live_first, paper, live_second, paper_second]
+    async with SessionLocal() as session:
+        session.add_all(signals)
+        await session.commit()
+        for signal in signals:
+            await session.refresh(signal)
+    try:
+        engine_ = PaperRiskEngine()
+        assert (await engine_.reserve_signal(live_first)).allowed is True
+        # The live strategy spent the whole budget; the paper-only one still trades.
+        assert (await engine_.reserve_signal(paper)).allowed is True
+        # Each book is still bounded by its own budget.
+        second_live = await engine_.reserve_signal(live_second)
+        second_paper = await engine_.reserve_signal(paper_second)
+        assert second_live.allowed is False
+        assert second_live.reason == "Daily paper-risk allocation limit reached"
+        assert second_paper.allowed is False
+        assert second_paper.reason == "Daily paper-risk allocation limit reached"
+    finally:
+        async with SessionLocal() as session:
+            await session.execute(delete(RiskReservation).where(RiskReservation.session_date == session_date))
+            await session.execute(delete(PaperSignal).where(PaperSignal.session_date == session_date))
+            await session.commit()
+        await engine.dispose()

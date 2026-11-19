@@ -28,6 +28,34 @@ def _decimal(value: object) -> Decimal:
     return Decimal(str(value))
 
 
+def strategy_type_of(strategy_version: str | None) -> str:
+    """``"rs-pullback-v1@8"`` -> ``"rs-pullback-v1"``; the type is what is stable."""
+    return (strategy_version or "").split("@", 1)[0]
+
+
+def same_book(candidate_type: str, other_type: str, paper_only_types: tuple[str, ...]) -> bool:
+    """Whether another signal's risk shares this candidate's paper budget.
+
+    The same split the trade ceilings use (``trade_counter``): a paper-only
+    strategy (``live_orders=false``) is measured as if it traded the account
+    alone, so it counts only its own reservations; every other strategy counts
+    every strategy except the paper-only ones.
+
+    Without this, the paper journal was one budget for all of them. On
+    19 November RS Pullback's three paper mirrors spent the day's 750 at
+    9:46 AM, and CPR's only signal -- SUNPHARMA at 11:25 AM -- was refused with
+    "Daily paper-risk allocation limit reached". A paper-only test that can only
+    trade on days the live strategy is quiet is measuring the quiet days.
+
+    Nothing live reads this. The live account's allocation, position and
+    exposure limits are enforced from live submissions in ``live_risk``, and a
+    paper-only strategy never reaches the broker at all.
+    """
+    if candidate_type in paper_only_types:
+        return other_type == candidate_type
+    return other_type not in paper_only_types
+
+
 class PaperRiskEngine:
     """Serializes paper signal allocations before a simulated entry order is queued."""
 
@@ -47,17 +75,27 @@ class PaperRiskEngine:
                 )
             setting = await session.get(ApplicationSetting, TRADING_KEY)
             controls = TradingControls.model_validate(setting.value if setting else DEFAULT_TRADING_CONTROLS)
-            reservations = list(
-                (
-                    await session.scalars(
-                        select(RiskReservation)
+            # Imported here: the registry pulls in every strategy module, and
+            # this engine is imported by the scanner that also imports them.
+            from app.services.strategy_registry import StrategyRegistry
+
+            paper_only_types = await StrategyRegistry.paper_only_types(session)
+            candidate_type = strategy_type_of(signal.strategy_version)
+            reservations = [
+                reservation
+                for reservation, version in (
+                    await session.execute(
+                        select(RiskReservation, PaperSignal.strategy_version)
+                        .join(PaperSignal, PaperSignal.id == RiskReservation.paper_signal_id)
                         .where(RiskReservation.session_date == signal.session_date)
-                        .with_for_update()
+                        .with_for_update(of=RiskReservation)
                     )
                 ).all()
-            )
-            positions = list(
-                (
+                if same_book(candidate_type, strategy_type_of(version), paper_only_types)
+            ]
+            positions = [
+                position
+                for position in (
                     await session.scalars(
                         select(PaperPosition)
                         .where(
@@ -67,7 +105,8 @@ class PaperRiskEngine:
                         .with_for_update()
                     )
                 ).all()
-            )
+                if same_book(candidate_type, strategy_type_of(position.strategy_version), paper_only_types)
+            ]
             risk_amount = _decimal(signal.risk_amount)
             daily_limit = _decimal(controls.account_capital) * _decimal(controls.maximum_daily_risk_percent) / 100
             reserved = sum(
