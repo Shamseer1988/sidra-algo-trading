@@ -107,8 +107,10 @@ commit.
 
 ## Context worth having
 
-- Capital ₹25,000, risk 0.5% (₹125) a trade, 3 trades a day, 1:2, window
-  09:30-11:30, flat by 15:00.
+- Capital ₹50,000 (raised from ₹25,000 in Nov 2026), risk 0.5% (₹250) a
+  trade, 3 trades a day, daily loss limit ₹750, 1:2, window 09:45-11:30,
+  flat by 15:00. These live in Postgres; `check_settings.py` is the source
+  of truth if this line drifts again.
 - Five strategies exist; only **RS Pullback** trades live. ORB Retest and VWAP
   Pullback were disabled on sweep evidence, EMA Momentum never traded.
   **CPR Breakout** (`cpr-breakout-v1`) runs paper-only: `live_orders: false`
