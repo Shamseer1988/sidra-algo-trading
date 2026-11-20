@@ -44,7 +44,7 @@ from app.core.config import Settings
 from app.db.models import LiveOrderSubmission, MarketCandle, PaperSignal
 from app.db.session import SessionLocal
 from app.services.broker_adapter import BUY, OPEN_STATUSES, SELL, STATUS_REJECTED, BrokerAdapter
-from app.services.desks import ExitProductUnknownError, exit_product, normalise_desk
+from app.services.desks import INTRADAY_DESK, ExitProductUnknownError, exit_product, normalise_desk
 from app.services.exit_rules import (
     BREAKEVEN_AT_R,
     NO_TRAIL,
@@ -143,6 +143,8 @@ class ExitSweepOutcome:
                 # Nothing was sent because the product could not be named; a
                 # person has to close or protect it, so a person has to hear.
                 "product_unknown",
+                # Both desks in one broker position: neither can close it safely.
+                "desk_conflict",
             }
         ]
 
@@ -202,6 +204,22 @@ def price_refusal(closed_at: datetime | None, now: datetime) -> str | None:
     return None
 
 
+class HeldByAnotherDesk(Exception):
+    """The position on this share was opened by a desk these exits do not manage.
+
+    Raised rather than returned as None, because None already means "no entry
+    of ours", which is reported as a problem once a minute. A swing holding is
+    not a problem; it is somebody else's position. ``conflict`` is the case that
+    is a problem: both desks entered this share today, the broker nets them into
+    one position, and closing it here could sell the swing shares at 15:00.
+    """
+
+    def __init__(self, desks: set[str]) -> None:
+        self.desks = desks
+        self.conflict = INTRADAY_DESK in desks
+        super().__init__(", ".join(sorted(desks)))
+
+
 async def _signal_for(session: AsyncSession, position, start, end) -> PaperSignal | None:  # noqa: ANN001
     """The trade this position belongs to, by the entry we placed for it today.
 
@@ -219,6 +237,12 @@ async def _signal_for(session: AsyncSession, position, start, end) -> PaperSigna
     match found nothing and every position this system opened was reported as
     having no entry behind it, once a minute, while going unmanaged. The day's
     rows are few, so reading them and matching on the token costs nothing.
+
+    Intraday entries only. Every entry on this share today is read, of either
+    desk, because the answer depends on all of them: only intraday entries, and
+    the latest one is the trade; any swing entry, and these exits must not touch
+    the position (``HeldByAnotherDesk``). A swing position managed against an
+    intraday target and square-off would be sold the same afternoon.
     """
     rows = await session.scalars(
         select(LiveOrderSubmission)
@@ -230,6 +254,8 @@ async def _signal_for(session: AsyncSession, position, start, end) -> PaperSigna
         )
         .order_by(LiveOrderSubmission.created_at.desc())
     )
+    latest_intraday = None
+    desks: set[str] = set()
     for submission in rows:
         # Entries only, and the stop is excluded by its CANONICAL type. The
         # column holds the broker's spelling -- "SL-M" at Upstox, "SL-MKT" at
@@ -238,8 +264,15 @@ async def _signal_for(session: AsyncSession, position, start, end) -> PaperSigna
         if submission.canonical_order_type == STOP_MARKET:
             continue
         if position.identifies(submission.instrument_token, submission.trading_symbol):
-            return await session.get(PaperSignal, submission.paper_signal_id)
-    return None
+            desk = normalise_desk(submission.desk)
+            desks.add(desk)
+            if desk == INTRADAY_DESK and latest_intraday is None:
+                latest_intraday = submission
+    if desks - {INTRADAY_DESK}:
+        raise HeldByAnotherDesk(desks)
+    if latest_intraday is None:
+        return None
+    return await session.get(PaperSignal, latest_intraday.paper_signal_id)
 
 
 async def _recorded_stops(session: AsyncSession, signal_id, start, end) -> list[LiveOrderSubmission]:  # noqa: ANN001
@@ -934,7 +967,26 @@ async def _consider(
     long = net > 0
     symbol = position.symbol
 
-    signal = await _signal_for(session, position, start, end)
+    try:
+        signal = await _signal_for(session, position, start, end)
+    except HeldByAnotherDesk as held:
+        if held.conflict:
+            return PositionExit(
+                symbol,
+                False,
+                "desk_conflict",
+                f"{quantity} open, entered today by both the intraday and the swing desk. The broker holds them "
+                "as one position, so the intraday exits left it alone rather than risk selling the swing shares. "
+                "Check it by hand.",
+                quantity=quantity,
+            )
+        return PositionExit(
+            symbol,
+            False,
+            "other_desk",
+            f"{quantity} held on the {', '.join(sorted(held.desks)).lower()} desk; the intraday exits leave it alone.",
+            quantity=quantity,
+        )
     if signal is None:
         return PositionExit(
             symbol,
