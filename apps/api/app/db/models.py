@@ -1057,3 +1057,96 @@ class BrokerDaySnapshot(Base):
     trade_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class CorporateEvent(TimestampMixin, Base):
+    """A split, bonus, dividend or results date for one share (swing desk).
+
+    Daily candles are stored as the broker sent them. Whether a split shows in
+    them as a real overnight crash or has already been adjusted away depends on
+    the source, and a swing strategy reading an unadjusted split sees a 50%
+    gap that never happened. So adjustments are applied when the candles are
+    read, and only from events in this table -- never inferred on the fly.
+
+    ``confirmed`` separates what an operator checked from what a detector
+    suspected. Only confirmed SPLIT and BONUS rows adjust prices; a suspected
+    one is a question for a person, not an answer.
+
+    ``price_factor`` is what prices before ``ex_date`` are divided by: 2 for a
+    1:2 split or a 1:1 bonus, 1.5 for a 1:2 bonus. Volume is multiplied by it.
+    Dividends carry ``amount`` and adjust nothing; results carry only a date,
+    which the swing desk uses to stay out of a share around its announcement.
+    """
+
+    __tablename__ = "corporate_events"
+    __table_args__ = (
+        UniqueConstraint("instrument_token", "event_type", "ex_date", name="uq_corporate_events_token_type_date"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    instrument_token: Mapped[str] = mapped_column(String(64), index=True)
+    symbol: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(16))
+    ex_date: Mapped[date] = mapped_column(Date, index=True)
+    price_factor: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    confirmed: Mapped[bool] = mapped_column(default=False, server_default="false")
+    source: Mapped[str] = mapped_column(String(60), default="manual")
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class SwingPaperPosition(TimestampMixin, Base):
+    """One swing trade on paper, from the evening plan to the day it is closed.
+
+    Its own ledger, apart from ``paper_orders`` and ``paper_positions``. Those
+    belong to the intraday paper engine, which fills on one-minute candles and
+    squares everything off by the afternoon; a swing position put there would
+    be closed by that engine the same day, and its fills would be counted by
+    the intraday desk's daily ceilings.
+
+    Paper only. Nothing reads this table to place, cancel or protect a real
+    order, and the live risk engine refuses every swing order regardless.
+
+    Status runs PLANNED -> OPEN -> CLOSED, or PLANNED -> CANCELLED when the
+    entry trigger is not reached before the plan expires or a pre-open check
+    fails. ``stop_price`` is the stop now; ``initial_stop`` is the one the trade
+    was sized from, kept so R is always measured against what was risked.
+    """
+
+    __tablename__ = "swing_paper_positions"
+    __table_args__ = (
+        UniqueConstraint("paper_signal_id", name="uq_swing_paper_positions_signal"),
+        Index("ix_swing_paper_positions_status_plan", "status", "plan_date"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    paper_signal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("paper_signals.id", ondelete="SET NULL"), nullable=True
+    )
+    instrument_token: Mapped[str] = mapped_column(String(64), index=True)
+    symbol: Mapped[str] = mapped_column(String(40))
+    sector: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    strategy_version: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(16), default="PLANNED", index=True)
+    plan_date: Mapped[date] = mapped_column(Date)
+    entry_trigger: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    quantity: Mapped[int] = mapped_column(Integer)
+    initial_stop: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    stop_price: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    target_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    risk_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    max_holding_days: Mapped[int] = mapped_column(Integer)
+    entry_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    entry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    partial_exit_quantity: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    partial_exit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    exit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    exit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    gross_pnl: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    charges: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    net_pnl: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    # Why the plan was made and every decision since: the scores, the reasons a
+    # rule was or was not met, each stop move. The columns above say what; this
+    # says why, which is the part a review needs.
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
