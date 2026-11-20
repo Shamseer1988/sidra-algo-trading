@@ -431,7 +431,23 @@ export type ConnectionsView = {
   upstox: { fields: CredentialField[]; login_ready: boolean; auto_login_ready: boolean; token_valid_until: string | null };
   telegram: { fields: CredentialField[]; ready: boolean };
 };
-export type ConnectionCheck = { ok: boolean; detail: string; checked_at: string };
+export type SwingJob = { id: string; status: "running" | "done" | "failed"; started_at: string; finished_at: string | null; detail: string };
+export type SwingJobs = { market_hours: boolean; jobs: Partial<Record<"backfill" | "backtest", SwingJob>> };
+export type SwingMetrics = { trades: number; wins: number; win_rate: number; net_pnl: number; charges: number; per_trade: number; average_r: number; profit_factor: number | null; max_drawdown: number; average_holding_days: number };
+export type SwingBacktestRun = {
+  id: string; finished_at: string; years: number; from_date: string | null; to_date: string | null; out_of_sample_from: string | null;
+  strategies: string[]; shares_with_data: number; charges: SwingCharges;
+  in_sample: SwingMetrics; out_of_sample: SwingMetrics; per_strategy: Record<string, { in_sample: SwingMetrics; out_of_sample: SwingMetrics }>;
+  exits: Record<string, number>; skipped: Record<string, number>;
+};
+export type SwingCoverage = {
+  from_date: string; to_date: string; index_days: number; last_index_day: string | null; minimum_sessions: number;
+  counts: Record<"complete" | "gaps" | "short" | "empty", number>;
+  shares: { symbol: string; instrument_token: string; sessions: number; first: string | null; last: string | null; missing: number; status: string }[];
+  suspects: { symbol: string; instrument_token: string; ex_date: string; previous_close: number; open: number; jump: number; nearest_factor: number; confirmed: boolean }[];
+};
+export type CorporateEvent = { id: string; symbol: string | null; instrument_token: string; event_type: string; ex_date: string; price_factor: number | null; amount: number | null; confirmed: boolean; source: string; note: string | null };
+export type ConnectionCheck ={ ok: boolean; detail: string; checked_at: string };
 export type ChargesView = { intraday: IntradayCharges; swing: SwingCharges; intraday_example: RoundTrip; swing_example: RoundTrip };
 export type PaperStrategy = { id: string; name: string; enabled: boolean; live_orders: boolean; strategy_type: string; version: number; universe: string[]; allowed_sides: string[]; allowed_sessions: string[]; max_trades_per_day: number; max_trades_per_side: number | null; cooldown_minutes: number; risk_per_trade_percent: number | null; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number; rs_threshold_percent: number | null; exit_rules: ExitRules };
 export type UniverseEntry = { instrument_token: string; script_name: string; session_date: string; rank: number; score: number; selected: boolean; eligible: boolean; rejection_reason: string | null; liquidity_score: number; volatility_score: number; gap_score: number; trend_score: number; metrics: Record<string, number> };
@@ -560,6 +576,16 @@ export const api = {
   swingStrategies: () => request<SwingStrategy[]>("/swing/strategies"),
   setSwingStrategyMode: (id: string, mode: StrategyMode, reason: string | null) =>
     request<SwingStrategy[]>(`/swing/strategies/${encodeURIComponent(id)}/mode`, { method: "PUT", body: JSON.stringify({ mode, reason }) }),
+  swingJobs: () => request<SwingJobs>("/swing/jobs"),
+  swingCoverage: () => request<SwingCoverage>("/swing/data/coverage"),
+  startSwingBackfill: (years: number) => request<SwingJobs>("/swing/data/backfill", { method: "POST", body: JSON.stringify({ years }) }),
+  startSwingBacktest: (years: number, strategies: string[]) =>
+    request<SwingJobs>("/swing/backtests", { method: "POST", body: JSON.stringify({ years, strategies }) }),
+  swingBacktests: () => request<SwingBacktestRun[]>("/swing/backtests"),
+  corporateEvents: () => request<CorporateEvent[]>("/swing/corporate-events"),
+  recordCorporateEvent: (body: { symbol: string; event_type: string; ex_date: string; price_factor: number | null; amount: number | null; note: string | null }) =>
+    request<CorporateEvent>("/swing/corporate-events", { method: "POST", body: JSON.stringify(body) }),
+  deleteCorporateEvent: (id: string) => request<void>(`/swing/corporate-events/${encodeURIComponent(id)}`, { method: "DELETE" }),
   connections: () => request<ConnectionsView>("/connections"),
   saveUpstoxConnection: (values: Record<string, string | boolean>, clear: string[], reason: string | null) =>
     request<ConnectionsView>("/connections/upstox", { method: "PUT", body: JSON.stringify({ values, clear, reason }) }),
