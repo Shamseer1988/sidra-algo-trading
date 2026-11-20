@@ -129,3 +129,19 @@ def exit_product(desk: str | None, recorded_product: str | None) -> ExitProduct:
         f"No product is recorded for this {desk.lower()} position, so no exit was sent. "
         "Guessing INTRADAY could open a short against delivery shares. Close it by hand and check the order record."
     )
+
+
+# Which desk each on/off switch belongs to, and what it is when nothing is
+# saved: exactly what every deployment did before the desks existed.
+DESK_SWITCHES = {INTRADAY_DESK: ("intraday_desk_enabled", True), SWING_DESK: ("swing_desk_enabled", False)}
+
+
+def desk_enabled(controls, desk: str | None) -> bool:  # noqa: ANN001 - a dict or a TradingControls
+    """Whether this desk may open new trades.
+
+    Only new entries ask. Exits, stops and the square-off never do: a desk
+    switched off with a position open must still be able to close it.
+    """
+    key, default = DESK_SWITCHES[normalise_desk(desk)]
+    value = controls.get(key, default) if isinstance(controls, dict) else getattr(controls, key, default)
+    return bool(value)

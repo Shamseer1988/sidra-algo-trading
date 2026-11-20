@@ -171,3 +171,42 @@ async def test_the_database_accepts_swing_and_refuses_a_misspelt_desk():
         with pytest.raises(IntegrityError, match="ck_paper_signals_desk"):
             await session.flush()
         await session.rollback()
+
+
+# -- the on/off switches (step 0.4a) -------------------------------------------
+
+
+def test_with_nothing_saved_intraday_is_on_and_swing_is_off():
+    """What every deployment did before the desks existed, so a deploy changes nothing."""
+    from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TradingControls
+    from app.services.desks import desk_enabled
+
+    assert desk_enabled({}, INTRADAY_DESK) is True
+    assert desk_enabled({}, SWING_DESK) is False
+    saved = TradingControls.model_validate(DEFAULT_TRADING_CONTROLS)
+    assert desk_enabled(saved, INTRADAY_DESK) is True
+    assert desk_enabled(saved, SWING_DESK) is False
+
+
+def test_a_switch_is_read_from_a_dict_or_a_model():
+    from app.services.desks import desk_enabled
+
+    assert desk_enabled({"intraday_desk_enabled": False}, INTRADAY_DESK) is False
+    assert desk_enabled({"swing_desk_enabled": True}, SWING_DESK) is True
+
+
+def test_saving_one_change_over_a_row_that_predates_the_switches_records_one_change():
+    """A row saved before the switches existed must not make the next edit look like three.
+
+    Section D of the daily review flags two settings moved in one session.
+    """
+    from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TradingControls, _as_saved
+    from app.services.settings_history import summarise
+
+    stored = {
+        k: v for k, v in DEFAULT_TRADING_CONTROLS.items() if k not in ("intraday_desk_enabled", "swing_desk_enabled")
+    }
+    edited = TradingControls.model_validate({**stored, "daily_loss_limit": 750.0}).model_dump()
+    assert summarise(_as_saved(stored), edited).changed_keys == ["daily_loss_limit"]
+    # And the bare comparison it replaces really did report three.
+    assert len(summarise(stored, edited).changed_keys) == 3

@@ -954,3 +954,10 @@ async def test_without_a_swing_owner_the_same_position_still_fills_the_slot(monk
         controls=limits(maximum_open_positions=1),
     )
     assert check(decision, "live_positions").passed is False
+
+
+async def test_an_intraday_order_is_refused_while_the_intraday_desk_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second lock: an approval answered after the switch went off."""
+    decision = await authorize(monkeypatch, controls=limits(intraday_desk_enabled=False))
+    assert decision.authorized is False
+    assert "Intraday trading is switched off" in check(decision, "desk").detail

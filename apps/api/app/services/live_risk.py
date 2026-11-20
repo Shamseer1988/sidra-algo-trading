@@ -55,7 +55,7 @@ from app.core.config import Settings
 from app.db.models import ApplicationSetting, ExecutionReconciliation, LiveOrderSubmission
 from app.services import daily_limits
 from app.services.broker_adapter import BrokerAdapter, BrokerOrder, BrokerOrderDescription
-from app.services.desks import INTRADAY_DESK, SWING_DESK, normalise_desk
+from app.services.desks import INTRADAY_DESK, SWING_DESK, desk_enabled, normalise_desk
 from app.services.live_readiness import inspect_live_readiness
 from app.services.trade_counter import (
     LIVE_COMMITTED_STATUSES,
@@ -758,6 +758,12 @@ async def authorize_live_order(
         # enforced only by the paper risk engine, so the real money was bounded
         # by a simulation: the two agree while nothing diverges and are
         # unrelated the moment anything does.
+        if desk == INTRADAY_DESK and not desk_enabled(controls, INTRADAY_DESK):
+            # The scanner already stops offering intraday entries; this is the
+            # second lock, for an approval answered after the switch went off.
+            checks.append(
+                LiveRiskCheck("desk", False, "Intraday trading is switched off in Settings; no new intraday entries.")
+            )
         if desk == INTRADAY_DESK:
             checks.append(await _live_allocation_check(session, controls, candidate_risk))
             checks.append(await _live_position_check(session, adapter, controls, order, description))

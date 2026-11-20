@@ -33,6 +33,7 @@ from typing import Any
 import annotated_types as at
 
 # Groups, in the order the brief asks for them.
+DESKS = "TRADING_DESKS"
 ACCOUNT = "ACCOUNT_AND_BROKER"
 DAILY_RISK = "DAILY_RISK"
 SESSION = "TRADING_SESSION"
@@ -41,6 +42,7 @@ EXECUTION = "EXECUTION"
 INDICATORS = "INDICATORS"
 
 GROUP_LABELS = {
+    DESKS: "Trading desks",
     ACCOUNT: "Account and broker",
     DAILY_RISK: "Daily risk",
     SESSION: "Trading session",
@@ -139,6 +141,32 @@ def _kind_of(annotation: Any, unit: str) -> str:
 
 
 TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
+    # --- trading desks -----------------------------------------------------
+    SettingSpec(
+        key="intraday_desk_enabled",
+        group=DESKS,
+        label="Intraday trading",
+        help=(
+            "Buy and sell within the day; every position is closed by the square-off time. Turning "
+            "this off stops new intraday trades from the next candle. Positions already open are not "
+            "abandoned: their stops, targets and square-off keep working until they are closed."
+        ),
+        unit=BOOLEAN,
+        effect=NEXT_SIGNAL,
+    ),
+    SettingSpec(
+        key="swing_desk_enabled",
+        group=DESKS,
+        label="Swing trading",
+        help=(
+            "Hold delivery positions for several days, protected overnight by a stop at the broker. "
+            "Not ready for real money yet: until the swing desk has its own limits, every live swing "
+            "order is refused, whatever this switch says. Turning it off later stops new swing trades "
+            "and leaves open holdings protected until they are sold."
+        ),
+        unit=BOOLEAN,
+        effect=NEXT_SIGNAL,
+    ),
     # --- account and broker ------------------------------------------------
     SettingSpec(
         key="account_capital",
@@ -732,4 +760,4 @@ INDICATOR_SPECS_BY_KEY: dict[str, SettingSpec] = {spec.key: spec for spec in IND
 # those settings live under a different key and are served by their own
 # endpoint, so listing the group here would promise a section the trading
 # catalogue cannot fill.
-GROUP_ORDER: tuple[str, ...] = (ACCOUNT, DAILY_RISK, SESSION, SIGNAL_QUALITY, EXECUTION)
+GROUP_ORDER: tuple[str, ...] = (DESKS, ACCOUNT, DAILY_RISK, SESSION, SIGNAL_QUALITY, EXECUTION)

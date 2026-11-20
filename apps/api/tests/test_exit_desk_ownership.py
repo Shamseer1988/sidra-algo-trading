@@ -21,7 +21,7 @@ from app.services import live_exit_manager as module
 from app.services.broker_adapter import BrokerPositionRecord
 from app.services.trade_counter import session_bounds_utc
 
-DAY = date(2031, 3, 4)
+DAY = date(2031, 4, 7)
 START, END = session_bounds_utc(DAY)
 TOKEN = "NSE_EQ|INE0DESK0001"
 POSITION = BrokerPositionRecord(symbol="DESKTEST", net_quantity=Decimal("5"), instrument_token=TOKEN)

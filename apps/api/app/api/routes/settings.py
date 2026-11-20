@@ -74,6 +74,10 @@ LIVE_ENTRY_ORDER_TYPES = frozenset({"MARKET", "LIMIT"})
 # 10,000 of cash. That is the ceiling Shamseer specified, and it is exposure,
 # never cash.
 DEFAULT_TRADING_CONTROLS = {
+    # Which desks may open new trades (app.services.desks). Intraday on and swing
+    # off is exactly what every deployment did before the desks existed.
+    "intraday_desk_enabled": True,
+    "swing_desk_enabled": False,
     "account_capital": 10000.0,
     "risk_per_trade_percent": 1.0,
     "maximum_daily_risk_percent": 4.0,
@@ -121,6 +125,14 @@ DEFAULT_TRADING_CONTROLS = {
 
 
 class TradingControls(BaseModel):
+    # Whether each desk may open new trades. Off stops new entries on that desk
+    # and nothing else: its open positions keep their stops, targets and
+    # square-off until they are flat, because a switch that abandoned a live
+    # position would be the most dangerous control on the page. Defaults are
+    # what every deployment did before the desks existed, so a deploy changes
+    # nothing; rows saved before these fields exist read as these defaults.
+    intraday_desk_enabled: bool = Field(default=True)
+    swing_desk_enabled: bool = Field(default=False)
     account_capital: float = Field(gt=0, le=100_000_000)
     risk_per_trade_percent: float = Field(gt=0, le=5)
     maximum_daily_risk_percent: float = Field(gt=0, le=10)
@@ -436,6 +448,22 @@ async def update_trading_controls(
     return await _persist_controls(session, controls, user)
 
 
+def _as_saved(stored: dict) -> dict:
+    """The stored controls, with every field they predate filled in as its default.
+
+    A row saved before a control existed does not mention it, and the value in
+    force was that control's default. Comparing the bare row against a full new
+    payload reported every such control as changed on the next save -- two or
+    three "changes" for one edit, which is exactly what section D of the daily
+    review is there to flag. Filling the default in records what was true.
+    """
+    filled = dict(stored)
+    for name, field in TradingControls.model_fields.items():
+        if name not in filled and not field.is_required():
+            filled[name] = field.get_default(call_default_factory=True)
+    return filled
+
+
 async def _persist_controls(session: DbSession, controls: TradingControls, user: User) -> TradingControls:
     """Save, version and audit one settings change. The one write path.
 
@@ -448,7 +476,7 @@ async def _persist_controls(session: DbSession, controls: TradingControls, user:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, contradiction)
 
     setting = await session.get(ApplicationSetting, TRADING_KEY)
-    previous = dict(setting.value) if setting else dict(DEFAULT_TRADING_CONTROLS)
+    previous = _as_saved(dict(setting.value)) if setting else dict(DEFAULT_TRADING_CONTROLS)
     payload = controls.model_dump()
     summary = summarise(previous, payload)
 
