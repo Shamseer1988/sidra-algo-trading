@@ -42,10 +42,11 @@ three paper trades deserves to know what the fourth was.
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 
-from sqlalchemy import String, cast, func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import LiveOrderSubmission, PaperOrder, PaperSignal
+from app.services.desks import INTRADAY_DESK
 from app.services.trading_calendar import MARKET_TIMEZONE
 
 # A broker outcome that means an order exists at the exchange. RESOLVED_PLACED
@@ -192,12 +193,30 @@ async def signal_ids_of_types(session: AsyncSession, session_date: date, strateg
     return {str(sid) for sid, version in result.all() if str(version or "").split("@", 1)[0] in types}
 
 
+def _paper_entries_on_desk(columns, desk: str | None):  # noqa: ANN001
+    """Today's filled paper entries, kept to one desk by their own signal's desk.
+
+    Joined to each fill's signal rather than filtered by today's signal ids,
+    because a swing entry usually fills the day after its signal: an end-of-day
+    scan, an entry next morning. A filter by today's signals would miss it and
+    let it spend the intraday desk's trades. A fill with no signal behind it
+    stays in the intraday count, where every such row has always been.
+    """
+    query = select(*columns)
+    if desk is None:
+        return query
+    return query.outerjoin(PaperSignal, PaperSignal.id == PaperOrder.paper_signal_id).where(
+        or_(PaperSignal.desk == desk, PaperSignal.id.is_(None)) if desk == INTRADAY_DESK else PaperSignal.desk == desk
+    )
+
+
 async def filled_entry_instruments(
     session: AsyncSession,
     session_date: date,
     *,
     exclude_strategy_types: tuple[str, ...] = (),
     only_strategy_type: str | None = None,
+    desk: str | None = INTRADAY_DESK,
 ) -> tuple[str, ...]:
     """The instruments today's filled entries were taken on, once each.
 
@@ -224,7 +243,7 @@ async def filled_entry_instruments(
         return key is None or key not in excluded
 
     paper_rows = await session.execute(
-        select(PaperOrder.instrument_token, PaperOrder.paper_signal_id).where(
+        _paper_entries_on_desk((PaperOrder.instrument_token, PaperOrder.paper_signal_id), desk).where(
             PaperOrder.session_date == session_date,
             PaperOrder.order_role == "ENTRY",
             PaperOrder.filled_quantity > 0,
@@ -241,6 +260,7 @@ async def filled_entry_instruments(
             LiveOrderSubmission.status.in_(LIVE_COMMITTED_STATUSES),
             # An entry, not the stop behind it or the exit that closes it.
             LiveOrderSubmission.planned_risk.is_not(None),
+            *_live_on_desk(desk),
         )
     )
     for row in live_rows:
@@ -251,6 +271,11 @@ async def filled_entry_instruments(
     return tuple(tokens)
 
 
+def _live_on_desk(desk: str | None) -> tuple:
+    """The condition keeping live rows to one desk; nothing when ``desk`` is None."""
+    return () if desk is None else (LiveOrderSubmission.desk == desk,)
+
+
 async def count_filled_entries(
     session: AsyncSession,
     session_date: date,
@@ -259,6 +284,7 @@ async def count_filled_entries(
     side: str | None = None,
     instrument_token: str | None = None,
     exclude_strategy_types: tuple[str, ...] = (),
+    desk: str | None = INTRADAY_DESK,
 ) -> TradeCount:
     """Today's trades, counted from fills rather than intentions.
 
@@ -304,6 +330,12 @@ async def count_filled_entries(
     ceiling, where an order resting at the exchange belongs however it got
     there. The same is true of the per-share count: a signal-less order cannot
     be attributed to a share either.
+
+    ``desk`` keeps the count to one desk, the intraday desk by default, so every
+    existing ceiling counts intraday trades only. The swing desk is bounded by
+    its open positions and open risk instead; a swing entry spending one of the
+    intraday desk's three trades would stop the intraday desk for a reason that
+    has nothing to do with it. ``None`` counts both desks.
     """
     narrowed = strategy_type is not None or side is not None or instrument_token is not None
     signal_ids: set[str] | None = None
@@ -321,7 +353,7 @@ async def count_filled_entries(
             return TradeCount(paper_fills=0, live_submissions=0, both=0)
 
     paper_rows = await session.scalars(
-        select(PaperOrder.paper_signal_id).where(
+        _paper_entries_on_desk((PaperOrder.paper_signal_id,), desk).where(
             PaperOrder.session_date == session_date,
             PaperOrder.order_role == "ENTRY",
             # Greater than zero, not "is filled": a partially filled entry is a
@@ -352,6 +384,7 @@ async def count_filled_entries(
             # waits for the broker's answer is not a ceiling for the length of a
             # round trip, which is exactly long enough to send another order.
             LiveOrderSubmission.status.in_(LIVE_COMMITTED_STATUSES),
+            *_live_on_desk(desk),
         )
         .distinct()
     )
