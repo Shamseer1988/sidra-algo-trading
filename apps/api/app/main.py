@@ -29,6 +29,7 @@ from app.api.routes import (
     scanner,
     shadow,
     swing,
+    swing_tools,
     system,
     telegram,
     universe,
@@ -165,3 +166,4 @@ app.include_router(universe.router, prefix="/api/v1")
 app.include_router(swing.router, prefix="/api/v1")
 app.include_router(charges.router, prefix="/api/v1")
 app.include_router(connections.router, prefix="/api/v1")
+app.include_router(swing_tools.router, prefix="/api/v1")

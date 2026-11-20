@@ -4,6 +4,7 @@ import { CalendarClock, History, Layers, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { api, type SwingPosition, type SwingSummary } from "../../components/api";
+import { SwingBacktestPanel, SwingDataPanel } from "./swing-tools";
 
 /**
  * The swing desk, on paper.
@@ -66,7 +67,7 @@ const REASON_LABELS: Record<string, string> = {
   results: "Sold before results",
 };
 
-export function SwingWorkspace({ tab, onMessage }: { tab: string; onMessage: (message: string) => void }) {
+export function SwingWorkspace({ tab, isAdmin = false, onMessage }: { tab: string; isAdmin?: boolean; onMessage: (message: string) => void }) {
   const [summary, setSummary] = useState<SwingSummary | null>(null);
   const [history, setHistory] = useState<SwingPosition[] | null>(null);
 
@@ -84,6 +85,9 @@ export function SwingWorkspace({ tab, onMessage }: { tab: string; onMessage: (me
     void load();
   }, [load]);
 
+  // The tools tabs stand on their own: they work before the desk has traded, or while it is off.
+  if (tab === "backtest") return <section className="mt-6"><SwingBacktestPanel isAdmin={isAdmin} onMessage={onMessage} /></section>;
+  if (tab === "data") return <section className="mt-6"><SwingDataPanel isAdmin={isAdmin} onMessage={onMessage} /></section>;
   if (!summary) return <p className="mt-6 text-sm text-slate-500">Loading the swing desk…</p>;
 
   return (

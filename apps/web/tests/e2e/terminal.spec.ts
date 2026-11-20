@@ -2798,3 +2798,96 @@ test.describe("Connections", () => {
     await expect(page.getByTestId("connection-upstox").getByLabel("Login PIN")).toBeDisabled();
   });
 });
+
+// --- Swing backtest and data (U4) ----------------------------------------------------
+
+const M = (trades: number, perTrade: number) => ({ trades, wins: Math.round(trades * 0.4), win_rate: 0.4, net_pnl: trades * perTrade, charges: trades * 120, per_trade: perTrade, average_r: 0.1, profit_factor: 1.1, max_drawdown: 3000, average_holding_days: 6 });
+const RUN = {
+  id: "r1", finished_at: "2026-11-21T12:00:00Z", years: 2, from_date: "2024-11-21", to_date: "2026-11-20", out_of_sample_from: "2026-04-10",
+  strategies: ["swing-trend-pullback-v1"], shares_with_data: 200, charges: { brokerage_per_order: 20, stt_percent: 0.1, exchange_transaction_percent: 0.00297, sebi_percent: 0.0001, stamp_duty_buy_percent: 0.015, gst_percent: 18, dp_charge_per_sale: 20 },
+  in_sample: M(90, 67), out_of_sample: M(40, -33),
+  per_strategy: { "swing-trend-pullback-v1": { in_sample: M(90, 67), out_of_sample: M(40, -33) } },
+  exits: { trail: 20 }, skipped: { regime: 5 },
+};
+
+async function mockSwingTools(page: Page, opts: { marketHours?: boolean } = {}) {
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  let jobs: Record<string, unknown> = {};
+  await page.route("**/api/v1/swing/jobs", async (route: Route) => {
+    await route.fulfill({ json: { market_hours: Boolean(opts.marketHours), jobs } });
+  });
+  await page.route("**/api/v1/swing/backtests", async (route: Route) => {
+    if (route.request().method() === "POST") {
+      calls.push({ url: route.request().url(), method: "POST", body: route.request().postDataJSON() });
+      jobs = { backtest: { id: "j", status: "running", started_at: "", finished_at: null, detail: "Started." } };
+      await route.fulfill({ status: 202, json: { market_hours: false, jobs } });
+    } else {
+      await route.fulfill({ json: [RUN] });
+    }
+  });
+  await page.route("**/api/v1/swing/data/coverage", async (route: Route) => {
+    await route.fulfill({
+      json: {
+        from_date: "2024-11-21", to_date: "2026-11-21", index_days: 496, last_index_day: "2026-11-20", minimum_sessions: 250,
+        counts: { complete: 197, gaps: 0, short: 3, empty: 0 },
+        shares: [{ symbol: "VAML", instrument_token: "NSE_EQ|X", sessions: 110, first: "2026-06-01", last: "2026-11-20", missing: 0, status: "short" }],
+        suspects: [{ symbol: "SIEMENS", instrument_token: "NSE_EQ|S", ex_date: "2025-04-07", previous_close: 5400, open: 2686, jump: 2.0104, nearest_factor: 2, confirmed: false }],
+      },
+    });
+  });
+  await page.route("**/api/v1/swing/corporate-events", async (route: Route) => {
+    if (route.request().method() === "POST") {
+      calls.push({ url: route.request().url(), method: "POST", body: route.request().postDataJSON() });
+      await route.fulfill({ status: 201, json: {} });
+    } else {
+      await route.fulfill({ json: [] });
+    }
+  });
+  return calls;
+}
+
+test.describe("Swing backtest and data", () => {
+  test("shows the last backtest with out-of-sample first-class, and starts a new one", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockDesks(page, { intraday: true, swing: true });
+    await mockSwing(page);
+    const calls = await mockSwingTools(page);
+    await page.goto("/");
+    await go(page, "Swing (paper)", "Backtest");
+    await expect(page.getByTestId("metrics-OUT-OF-SAMPLE")).toContainText("−₹33");
+    await shot(page, "u4-backtest");
+    await page.getByLabel("Base Breakout").uncheck();
+    await page.getByRole("button", { name: "Run backtest" }).click();
+    await expect(page.getByTestId("job-backtest")).toContainText("Running");
+    expect(calls[0].body).toEqual({ years: 2, strategies: ["swing-trend-pullback-v1"] });
+  });
+
+  test("heavy jobs are locked during market hours", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockDesks(page, { intraday: true, swing: true });
+    await mockSwing(page);
+    await mockSwingTools(page, { marketHours: true });
+    await page.goto("/");
+    await go(page, "Swing (paper)", "Data & events");
+    await expect(page.getByRole("button", { name: "Fetch daily candles (2 years)" })).toBeDisabled();
+    await expect(page.getByTestId("market-hours-note")).toBeVisible();
+  });
+
+  test("a suspected split is reviewed and recorded from the screen", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockDesks(page, { intraday: true, swing: true });
+    await mockSwing(page);
+    const calls = await mockSwingTools(page);
+    await page.goto("/");
+    await go(page, "Swing (paper)", "Data & events");
+    await page.getByRole("button", { name: "Check data" }).click();
+    await expect(page.getByTestId("swing-coverage")).toContainText("VAML");
+    await page.getByTestId("suspect-SIEMENS").getByRole("button", { name: "Review" }).click();
+    const form = page.getByTestId("event-form");
+    await form.getByLabel("Note").fill("Siemens Energy demerger");
+    await shot(page, "u4-data");
+    await form.getByRole("button", { name: "Record" }).click();
+    const post = calls.find((call) => call.url.includes("corporate-events"));
+    expect(post?.body).toEqual({ symbol: "SIEMENS", event_type: "SPLIT", ex_date: "2025-04-07", price_factor: 2.0104, amount: null, note: "Siemens Energy demerger" });
+  });
+});
