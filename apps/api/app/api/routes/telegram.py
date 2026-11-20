@@ -27,7 +27,7 @@ from app.services.live_approval import APPROVE_ACTION, CALLBACK_PREFIX, REJECT_A
 from app.services.live_execution_gateway import live_order_adapter
 from app.services.safety import emergency_stop
 from app.services.telegram import TelegramError, TelegramNotificationService
-from app.services.telegram_config import save_telegram_config
+from app.services.telegram_config import configured_settings, save_telegram_config
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ async def _save_alert(
 
 @router.get("/status", response_model=TelegramStatus)
 async def telegram_status(settings: AppSettings, _: CurrentUser) -> TelegramStatus:
-    return get_telegram_status(settings)
+    return get_telegram_status(await configured_settings(settings))
 
 
 @router.put("/configuration", status_code=status.HTTP_204_NO_CONTENT)
@@ -94,6 +94,8 @@ async def configure_telegram(
 async def test_telegram(
     settings: AppSettings, session: DbSession, user: User = Depends(require_roles(UserRole.ADMIN))
 ) -> TelegramStatus:
+    # The bot saved in Settings > Connections, else .env -- the same one alerts use.
+    settings = await configured_settings(settings)
     if not settings.telegram_is_configured:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Telegram bot token and chat ID are required")
     service = TelegramNotificationService(settings)
@@ -122,6 +124,7 @@ async def test_telegram(
 async def register_webhook(
     settings: AppSettings, user: User = Depends(require_roles(UserRole.ADMIN))
 ) -> TelegramStatus:
+    settings = await configured_settings(settings)
     try:
         await TelegramNotificationService(settings).register_webhook()
     except TelegramError as exc:

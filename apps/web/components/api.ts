@@ -425,6 +425,13 @@ export type SwingStrategy = { id: string; name: string; mode: StrategyMode; live
 export type IntradayCharges = { slippage_bps: number; participation_percent: number; brokerage_percent: number; brokerage_cap: number; stt_sell_percent: number; exchange_transaction_percent: number; gst_percent: number; sebi_percent: number; stamp_duty_buy_percent: number };
 export type SwingCharges = { brokerage_per_order: number; stt_percent: number; exchange_transaction_percent: number; sebi_percent: number; stamp_duty_buy_percent: number; gst_percent: number; dp_charge_per_sale: number };
 export type RoundTrip = { trade_value: number; buy: number; sell: number; total: number; lines: Record<string, number> };
+export type CredentialField = { name: string; label: string; kind: "secret" | "identifier" | "text" | "boolean"; help: string; configured: boolean; source: "screen" | "server file" | null; shown: string | null; value: boolean | null };
+export type ConnectionsView = {
+  encryption_ready: boolean;
+  upstox: { fields: CredentialField[]; login_ready: boolean; auto_login_ready: boolean; token_valid_until: string | null };
+  telegram: { fields: CredentialField[]; ready: boolean };
+};
+export type ConnectionCheck = { ok: boolean; detail: string; checked_at: string };
 export type ChargesView = { intraday: IntradayCharges; swing: SwingCharges; intraday_example: RoundTrip; swing_example: RoundTrip };
 export type PaperStrategy = { id: string; name: string; enabled: boolean; live_orders: boolean; strategy_type: string; version: number; universe: string[]; allowed_sides: string[]; allowed_sessions: string[]; max_trades_per_day: number; max_trades_per_side: number | null; cooldown_minutes: number; risk_per_trade_percent: number | null; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number; rs_threshold_percent: number | null; exit_rules: ExitRules };
 export type UniverseEntry = { instrument_token: string; script_name: string; session_date: string; rank: number; score: number; selected: boolean; eligible: boolean; rejection_reason: string | null; liquidity_score: number; volatility_score: number; gap_score: number; trend_score: number; metrics: Record<string, number> };
@@ -553,6 +560,12 @@ export const api = {
   swingStrategies: () => request<SwingStrategy[]>("/swing/strategies"),
   setSwingStrategyMode: (id: string, mode: StrategyMode, reason: string | null) =>
     request<SwingStrategy[]>(`/swing/strategies/${encodeURIComponent(id)}/mode`, { method: "PUT", body: JSON.stringify({ mode, reason }) }),
+  connections: () => request<ConnectionsView>("/connections"),
+  saveUpstoxConnection: (values: Record<string, string | boolean>, clear: string[], reason: string | null) =>
+    request<ConnectionsView>("/connections/upstox", { method: "PUT", body: JSON.stringify({ values, clear, reason }) }),
+  saveTelegramConnection: (body: { bot_token: string; chat_id: string; reason: string | null }) =>
+    request<ConnectionsView>("/connections/telegram", { method: "PUT", body: JSON.stringify(body) }),
+  checkUpstoxConnection: () => request<ConnectionCheck>("/connections/upstox/check", { method: "POST" }),
   charges: () => request<ChargesView>("/charges"),
   saveIntradayCharges: (charges: IntradayCharges, reason: string | null) =>
     request<ChargesView>("/charges/intraday", { method: "PUT", body: JSON.stringify({ charges, reason }) }),

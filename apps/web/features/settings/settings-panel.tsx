@@ -8,6 +8,7 @@ import type { WorkspaceId } from "../../lib/navigation";
 import { formatIstTimestamp } from "../../lib/formatting";
 import type { DeskState } from "../../lib/desks";
 import { ChargesForm } from "./charges-form";
+import { ConnectionsForm } from "./connections-form";
 import { IndicatorSettingsForm } from "./indicator-settings-form";
 import { TradingControlsForm } from "./trading-controls-form";
 
@@ -31,6 +32,10 @@ const TAB_COPY: Record<string, { title: string; copy: string }> = {
   indicators: {
     title: "Indicator periods",
     copy: "The ruler every strategy, the universe builder and the backtester measure with. Changing one changes what a signal means, so they take effect from the next session.",
+  },
+  connections: {
+    title: "Connections",
+    copy: "Your broker account and Telegram bot. Secrets are stored encrypted and never shown again once saved; leaving a box empty keeps what is there.",
   },
   charges: {
     title: "Charges",
@@ -82,6 +87,8 @@ export function SettingsPanel({
 
       {tab === "indicators" ? (
         <IndicatorSettingsForm isAdmin={isAdmin} onMessage={onMessage} />
+      ) : tab === "connections" ? (
+        <ConnectionsForm isAdmin={isAdmin} onMessage={onMessage} />
       ) : tab === "charges" ? (
         <ChargesForm isAdmin={isAdmin} desks={desks} onMessage={onMessage} />
       ) : tab === "alerts" ? (

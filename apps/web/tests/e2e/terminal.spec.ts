@@ -2714,3 +2714,87 @@ test.describe("Charges", () => {
     await expect(page.getByRole("button", { name: /Save .* charges/ })).toHaveCount(0);
   });
 });
+// --- Connections (U3) ---------------------------------------------------------------
+
+const cred = (name: string, label: string, kind: string, configured: boolean, source: string | null, shown: string | null, value: boolean | null = null) =>
+  ({ name, label, kind, help: `${label} help`, configured, source, shown, value });
+
+const CONNECTIONS = {
+  encryption_ready: true,
+  upstox: {
+    fields: [
+      cred("api_key", "API key", "identifier", true, "server file", "••••123"),
+      cred("api_secret", "API secret", "secret", true, "server file", "Set"),
+      cred("redirect_uri", "Redirect URL", "text", true, "server file", "https://host/cb"),
+      cred("mobile_number", "Mobile number", "identifier", false, null, null),
+      cred("pin", "Login PIN", "secret", false, null, null),
+      cred("totp_secret", "TOTP secret", "secret", false, null, null),
+      cred("auto_auth_enabled", "Morning auto-login", "boolean", false, null, null, false),
+    ],
+    login_ready: true,
+    auto_login_ready: false,
+    token_valid_until: null,
+  },
+  telegram: {
+    fields: [cred("bot_token", "Bot token", "secret", true, "server file", "Set"), cred("chat_id", "Chat ID", "identifier", true, "server file", "••••789")],
+    ready: true,
+  },
+};
+
+async function mockConnections(page: Page, view = CONNECTIONS) {
+  const calls: { url: string; body: Record<string, unknown> | null }[] = [];
+  await page.route("**/api/v1/connections", async (route: Route) => {
+    await route.fulfill({ json: view });
+  });
+  await page.route("**/api/v1/connections/upstox", async (route: Route) => {
+    calls.push({ url: route.request().url(), body: route.request().postDataJSON() as Record<string, unknown> });
+    await route.fulfill({ json: { ...view, upstox: { ...view.upstox, auto_login_ready: true } } });
+  });
+  await page.route("**/api/v1/connections/upstox/check", async (route: Route) => {
+    calls.push({ url: route.request().url(), body: null });
+    await route.fulfill({ json: { ok: true, detail: "Connected to Upstox account ••••4K2 (exchanges: NSE).", checked_at: "2026-11-21T03:00:00Z" } });
+  });
+  return calls;
+}
+
+test.describe("Connections", () => {
+  test("shows where each credential comes from, never the secret itself", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockConnections(page);
+    await page.goto("/");
+    await go(page, "Settings", "Connections");
+    const upstox = page.getByTestId("connection-upstox");
+    await expect(upstox).toContainText("From server file");
+    await expect(upstox).toContainText("Morning auto-login not set");
+    await expect(upstox.getByLabel("API secret")).toHaveValue("");
+    await expect(upstox.getByLabel("API secret")).toHaveAttribute("type", "password");
+    await shot(page, "u3-connections");
+  });
+
+  test("saving sends only the boxes that were filled, then the connection can be checked", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const calls = await mockConnections(page);
+    await page.goto("/");
+    await go(page, "Settings", "Connections");
+    const upstox = page.getByTestId("connection-upstox");
+    await expect(upstox.getByRole("button", { name: "Save Upstox" })).toBeDisabled();
+    await upstox.getByLabel("Mobile number").fill("9876543210");
+    await upstox.getByLabel("Login PIN").fill("246810");
+    await upstox.getByLabel("Morning auto-login").check();
+    await upstox.getByRole("button", { name: "Save Upstox" }).click();
+    await expect(upstox).toContainText("Morning auto-login ready");
+    expect(calls[0].body).toEqual({ values: { mobile_number: "9876543210", pin: "246810", auto_auth_enabled: true }, clear: [], reason: null });
+    await expect(upstox.getByLabel("Login PIN")).toHaveValue("");
+    await upstox.getByRole("button", { name: "Check connection" }).click();
+    await expect(page.getByTestId("upstox-check")).toContainText("Connected to Upstox account");
+  });
+
+  test("without a server key the boxes are locked and the reason is given", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockConnections(page, { ...CONNECTIONS, encryption_ready: false });
+    await page.goto("/");
+    await go(page, "Settings", "Connections");
+    await expect(page.getByTestId("no-server-key")).toBeVisible();
+    await expect(page.getByTestId("connection-upstox").getByLabel("Login PIN")).toBeDisabled();
+  });
+});

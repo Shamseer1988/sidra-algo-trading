@@ -15,6 +15,7 @@ from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import AuditLog, MarketCandle, User, UserRole
 from app.db.session import SessionLocal
 from app.services.broker_controls import BrokerControls, load_broker_controls, save_broker_controls
+from app.services.credential_store import effective_settings
 from app.services.scheduler import AUTO_AUTH_STATUS_KEY, send_auto_auth_telegram_alert
 from app.services.upstox_auto_auth import UpstoxAutoAuthError, perform_auto_login
 from app.services.upstox_instruments import InstrumentRefreshError, refresh_upstox_instruments
@@ -162,6 +163,7 @@ async def market_candles(
 async def start_upstox_oauth(
     settings: AppSettings, user: User = Depends(require_roles(UserRole.ADMIN))
 ) -> OAuthStartResponse:
+    settings = await effective_settings(settings)
     if not settings.upstox_oauth_is_configured:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Upstox OAuth configuration is incomplete")
     state = secrets.token_urlsafe(32)
@@ -217,7 +219,7 @@ async def complete_upstox_oauth(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized or inactive admin user")
 
     try:
-        token = await exchange_authorization_code(settings, code)
+        token = await exchange_authorization_code(await effective_settings(settings), code)
         expires_at = await store_access_token(settings, token, user_uuid)
     except UpstoxOAuthError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
@@ -280,6 +282,7 @@ class AutoAuthTriggerResponse(BaseModel):
 @router.get("/upstox/auto-auth/status", response_model=AutoAuthStatus)
 async def upstox_auto_auth_status(settings: AppSettings, _: CurrentUser) -> AutoAuthStatus:
     """Return the current state of the Upstox auto-auth scheduler."""
+    settings = await effective_settings(settings)
     result = AutoAuthStatus(
         enabled=settings.upstox_auto_auth_enabled,
         configured=settings.upstox_auto_auth_is_configured,
@@ -317,10 +320,11 @@ async def trigger_upstox_auto_auth(
     user: User = Depends(require_roles(UserRole.ADMIN)),
 ) -> AutoAuthTriggerResponse:
     """Manually trigger the headless Upstox auto-login (admin only)."""
+    settings = await effective_settings(settings)
     if not settings.upstox_auto_auth_is_configured:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Upstox auto-auth is not configured. Set UPSTOX_MOBILE_NUMBER, UPSTOX_PIN, UPSTOX_TOTP_SECRET and UPSTOX_AUTO_AUTH_ENABLED in .env",
+            detail="Upstox auto-auth is not configured. Fill in the mobile number, PIN and TOTP secret and turn on Morning auto-login in Settings > Connections",
         )
 
     try:

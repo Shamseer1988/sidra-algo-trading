@@ -263,7 +263,7 @@ export function FirstockConsole({
         <div className="space-y-1">
           <strong className="text-slate-900 dark:text-slate-200">Firstock Server Environment Configuration:</strong>
           <p>
-            Firstock requires <code className="font-mono text-slate-800 dark:text-slate-200">FIRSTOCK_USER_ID</code>, <code className="font-mono text-slate-800 dark:text-slate-200">FIRSTOCK_API_KEY</code>, <code className="font-mono text-slate-800 dark:text-slate-200">FIRSTOCK_VENDOR_CODE</code>, <code className="font-mono text-slate-800 dark:text-slate-200">FIRSTOCK_PASSWORD</code>, and <code className="font-mono text-slate-800 dark:text-slate-200">FIRSTOCK_TOTP_KEY</code> in <code className="font-mono text-slate-800 dark:text-slate-200">.env</code>.
+            Firstock requires <code className="font-mono text-slate-800 dark:text-slate-200">FIRSTOCK_USER_ID</code>, <code className="font-mono text-slate-800 dark:text-slate-200">FIRSTOCK_API_KEY</code>, <code className="font-mono text-slate-800 dark:text-slate-200">FIRSTOCK_VENDOR_CODE</code>, <code className="font-mono text-slate-800 dark:text-slate-200">FIRSTOCK_PASSWORD</code>, and <code className="font-mono text-slate-800 dark:text-slate-200">FIRSTOCK_TOTP_SECRET</code> in <code className="font-mono text-slate-800 dark:text-slate-200">.env</code>.
           </p>
         </div>
       </div>
