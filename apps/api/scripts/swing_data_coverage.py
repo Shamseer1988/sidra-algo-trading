@@ -24,6 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.services.market_calculations import MARKET_TIMEZONE  # noqa: E402
 
 RULE = "=" * 78
+# The strategies need 200 sessions of warm-up for the 200-day average, and the
+# backtest more again before it has anything to test.
+MIN_SESSIONS = 250
 
 
 async def main() -> int:
@@ -51,7 +54,7 @@ async def main() -> int:
             print("  No index history: run scripts/swing_backfill.py first. Nothing else can be judged.")
             return 1
 
-        empty, gappy, complete = [], [], 0
+        empty, gappy, short, complete = [], [], [], 0
         suspects = []
         confirmed_tokens = set()
         for member in members:
@@ -61,6 +64,8 @@ async def main() -> int:
                 empty.append(member)
             elif result.missing:
                 gappy.append((member, result))
+            elif result.sessions < MIN_SESSIONS:
+                short.append((member, result))
             else:
                 complete += 1
             suspects.extend((member, suspect) for suspect in suspected_splits(bars))
@@ -69,11 +74,16 @@ async def main() -> int:
 
     print(f"\n  complete     : {complete} of {len(members)}")
     print(f"  with gaps    : {len(gappy)}")
+    print(f"  too short    : {len(short)}  (fewer than {MIN_SESSIONS} sessions; the strategies cannot use them yet)")
     print(f"  no data      : {len(empty)}")
     if empty:
         print("\n  No daily candles at all:")
         for member in empty:
             print(f"    {member.symbol:<14} {member.instrument_token}")
+    if short:
+        print(f"\n  Too short to trade (under {MIN_SESSIONS} sessions -- re-run swing_backfill.py):")
+        for member, result in sorted(short, key=lambda item: item[1].sessions):
+            print(f"    {member.symbol:<14} {result.sessions:>4} sessions from {result.first}")
     if gappy:
         print("\n  Missing index trading days (from each share's own first candle):")
         for member, result in sorted(gappy, key=lambda item: -len(item[1].missing)):
