@@ -2448,6 +2448,8 @@ const SWING_POSITION = {
 const SWING_SUMMARY = {
   enabled: true,
   paper_only: true,
+  strategies: ["swing-trend-pullback-v1"],
+  status_note: "Forward test on paper. Did not pass the backtest gate after charges.",
   last_processed: "2026-11-20",
   capital: 100000,
   risk_per_trade: 750,
@@ -2529,6 +2531,7 @@ test.describe("Swing desk (paper)", () => {
     const screen = page.getByTestId("swing-workspace");
     await expect(screen).toContainText("Paper only.");
     await expect(screen).toContainText("No order from this desk reaches the broker");
+    await expect(page.getByTestId("swing-strategies")).toContainText("Running: Trend Pullback. Forward test on paper.");
     const portfolio = page.getByTestId("swing-portfolio");
     await expect(portfolio).toContainText("CGPOWER");
     await expect(portfolio).toContainText("1.6R");

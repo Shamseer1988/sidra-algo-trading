@@ -17,7 +17,7 @@ from app.db.models import ApplicationSetting, MarketCandle, SwingPaperPosition
 from app.services.desks import SWING_DESK, desk_enabled
 from app.services.swing_backtest import SwingRules
 from app.services.swing_data import DAILY_TIMEFRAME_SECONDS
-from app.services.swing_paper import CANCELLED, CLOSED, OPEN, PLANNED, last_processed
+from app.services.swing_paper import CANCELLED, CLOSED, OPEN, PAPER_STATUS, PAPER_STRATEGIES, PLANNED, last_processed
 
 router = APIRouter(prefix="/swing", tags=["Swing desk (paper)"])
 
@@ -55,6 +55,8 @@ class SwingPositionView(BaseModel):
 class SwingSummary(BaseModel):
     enabled: bool
     paper_only: bool = True
+    strategies: list[str] = list(PAPER_STRATEGIES)
+    status_note: str = PAPER_STATUS
     last_processed: date | None
     capital: float
     risk_per_trade: float
@@ -137,7 +139,7 @@ def view(row: SwingPaperPosition, last: tuple[Decimal, date] | None = None) -> S
 @router.get("/summary", response_model=SwingSummary)
 async def summary(_: CurrentUser, session: DbSession) -> SwingSummary:
     controls = await session.get(ApplicationSetting, "trading_controls")
-    rules = SwingRules()
+    rules = SwingRules(strategies=PAPER_STRATEGIES)
     rows = list(
         (await session.scalars(select(SwingPaperPosition).where(SwingPaperPosition.status.in_((OPEN, PLANNED))))).all()
     )

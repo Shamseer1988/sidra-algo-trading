@@ -94,6 +94,9 @@ export function SwingWorkspace({ tab, onMessage }: { tab: string; onMessage: (me
           <b>Paper only.</b> No order from this desk reaches the broker. Figures are simulated on ₹
           {summary.capital.toLocaleString("en-IN")} of paper capital, after charges.
           {summary.last_processed ? ` Last evening processed: ${summary.last_processed}.` : " No evening processed yet."}
+          <span className="mt-1 block text-xs opacity-90" data-testid="swing-strategies">
+            Running: {summary.strategies.map((name) => STRATEGY_LABELS[name] ?? name).join(", ")}. {summary.status_note}
+          </span>
         </p>
         <button onClick={() => void load()} className="secondary-button px-3 py-1.5 text-xs">
           <RefreshCw className="h-3.5 w-3.5" />

@@ -35,8 +35,10 @@ from app.db.models import ApplicationSetting, CorporateEvent, SwingPaperPosition
 from app.db.session import SessionLocal
 from app.services.desks import SWING_DESK, desk_enabled
 from app.services.market_calculations import MARKET_TIMEZONE
+from app.services.swing_backtest import SwingRules
 from app.services.swing_data import backfill_daily_range, load_adjusted_daily
 from app.services.swing_paper import (
+    PAPER_STRATEGIES,
     EveningReport,
     days_to_process,
     last_processed,
@@ -132,6 +134,7 @@ async def process(settings, now: datetime, *, new_entries: bool = True) -> list[
                 symbols=symbols,
                 events=events,
                 new_entries=new_entries,
+                rules=SwingRules(strategies=PAPER_STRATEGIES),
             )
             await mark_processed(session, day)
             await session.commit()

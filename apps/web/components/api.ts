@@ -341,6 +341,8 @@ export type SwingPosition = {
 export type SwingSummary = {
   enabled: boolean;
   paper_only: boolean;
+  strategies: string[];
+  status_note: string;
   last_processed: string | null;
   capital: number;
   risk_per_trade: number;

@@ -315,6 +315,8 @@ async def test_the_summary_shows_open_and_planned_positions_with_their_numbers()
             await session.execute(delete(MarketCandle).where(MarketCandle.instrument_token == "A"))
             await session.commit()
     assert result.paper_only is True
+    assert result.strategies == ["swing-trend-pullback-v1"]
+    assert "did not pass" in result.status_note.lower()
     [held] = result.open_positions
     assert held.symbol == "A" and held.entry_price == 101.0 and held.last_close == 100.0
     assert held.unrealised == pytest.approx(-1.0 * held.quantity)
@@ -337,3 +339,13 @@ async def test_switched_off_the_desk_still_closes_what_it_holds_and_buys_nothing
     assert by_symbol["A"].exit_date == day(12)
     assert by_symbol["B"].status == CANCELLED and by_symbol["B"].exit_reason == "desk switched off"
     assert len(rows) == 2  # B's setup on evening 15 made no new plan
+
+
+def test_the_paper_desk_runs_trend_pullback_only_and_the_worker_says_so():
+    """Base Breakout lost money in-sample and out; it does not run on paper."""
+    from app.services.swing_paper import PAPER_STRATEGIES
+    from app.services.swing_strategies import TREND_PULLBACK
+
+    assert PAPER_STRATEGIES == (TREND_PULLBACK,)
+    source = (Path(__file__).resolve().parents[1] / "app" / "swing_worker.py").read_text(encoding="utf-8")
+    assert "rules=SwingRules(strategies=PAPER_STRATEGIES)" in source

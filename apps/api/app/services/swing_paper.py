@@ -44,9 +44,22 @@ from app.services.swing_backtest import (
     find_setups,
     regime_by_day,
 )
-from app.services.swing_strategies import STRATEGIES, Series, SwingSetup
+from app.services.swing_strategies import STRATEGIES, TREND_PULLBACK, Series, SwingSetup
 
 PROGRESS_KEY = "swing_paper_progress"
+
+# What the paper desk runs: Trend Pullback only, as a forward test.
+#
+# Neither strategy passed the Phase 2 gate. On the NAS's two years of NIFTY 200
+# history (21 Nov 2024 - 19 Nov 2026), after charges, out-of-sample:
+#   Trend Pullback  40 trades  -Rs 33 a trade  (in-sample +Rs 67)
+#   Base Breakout    3 trades  -Rs 354 a trade (negative in-sample too)
+# Trend Pullback was about +Rs 87 a trade before charges; Base Breakout lost
+# either way. So Trend Pullback runs on paper to gather evidence the backtest
+# cannot give -- days it has never seen -- and Base Breakout does not run.
+# Chosen by Shamseer on 20 Nov 2026. Not validated; paper only.
+PAPER_STRATEGIES = (TREND_PULLBACK,)
+PAPER_STATUS = "Forward test on paper. Did not pass the backtest gate after charges."
 RESULTS_AVOID_DAYS = 5  # no new plan when results are due within this many calendar days
 RESULTS_EXIT_DAYS = 3  # sell at the next open when results are due within this many
 
