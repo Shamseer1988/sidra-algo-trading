@@ -110,6 +110,7 @@ class SwingTrade:
     proceeds: Decimal = Decimal("0")
     sales: int = 0
     partial_done: bool = False
+    partial_price: Decimal | None = None
     holding_days: int = 0
     exit_next_open: str | None = None
     exit_date: date | None = None
@@ -160,6 +161,148 @@ def _close(trade: SwingTrade, price: Decimal, day: date, reason: str, costs: Cos
     trade.exit_date, trade.exit_reason = day, reason
 
 
+def advance_open(trade: SwingTrade, series: Series, i: int, costs: CostModel) -> bool:
+    """One session for a position already held. Returns True when it closed.
+
+    Pending exits at the open first, then the stop, then the 2R target; after the
+    close, count the day and decide whether tomorrow's open sells the rest.
+    """
+    bar = series.bars[i]
+    if trade.exit_next_open:
+        _close(trade, bar.open, bar.session_date, trade.exit_next_open, costs)
+    elif bar.low <= trade.stop:
+        reason = "stop" if not trade.partial_done else "breakeven stop"
+        _close(trade, min(bar.open, trade.stop), bar.session_date, reason, costs)
+    elif not trade.partial_done and bar.high >= trade.setup.target:
+        half = trade.remaining // 2
+        if half:
+            trade.partial_price = max(bar.open, trade.setup.target)
+            _sell(trade, half, trade.partial_price, costs)
+        trade.partial_done = True
+        trade.stop = max(trade.stop, trade.entry_price)
+    if trade.exit_date:
+        return True
+    trade.holding_days += 1
+    level = trail_level(series, i, trade.setup.trail)
+    if trade.partial_done and level is not None and float(bar.close) < level:
+        trade.exit_next_open = "trail"
+    elif trade.holding_days >= trade.setup.max_holding_days:
+        trade.exit_next_open = "time"
+    return False
+
+
+def fill_plan(
+    token: str,
+    sector: str,
+    setup: SwingSetup,
+    quantity: int,
+    bar: CompletedCandle,
+    rules: SwingRules,
+    costs: CostModel,
+) -> tuple[SwingTrade | None, str | None]:
+    """Yesterday evening's plan against today's candle: the trade, or why there is none."""
+    if bar.open > setup.entry_trigger * (1 + rules.gap_skip):
+        return None, "gapped above trigger"
+    if bar.high < setup.entry_trigger:
+        return None, "not triggered"
+    price = max(bar.open, setup.entry_trigger)
+    trade = SwingTrade(token, sector, setup, quantity, bar.session_date, price, setup.initial_stop)
+    trade.charges += costs.buy(price * quantity)
+    if bar.low <= trade.stop:
+        # Filled and stopped the same day: a daily candle cannot say the order,
+        # so the losing one is assumed.
+        _close(trade, trade.stop, bar.session_date, "stop same day", costs)
+    return trade, None
+
+
+def find_setups(
+    series: dict[str, Series],
+    position_of: dict[str, dict[date, int]],
+    bench_close: dict,
+    day: date,
+    strategies: dict[str, Callable],
+) -> list[tuple[str, SwingSetup]]:
+    """Every setup found on this evening's close, best-ranked first."""
+    found: list[tuple[str, SwingSetup]] = []
+    for token, s in series.items():
+        i = position_of[token].get(day)
+        if i is None:
+            continue
+        for fn in strategies.values():
+            setup = fn(s, bench_close, i)
+            if setup is not None:
+                found.append((token, setup))
+    found.sort(key=lambda item: item[1].rank, reverse=True)
+    return found
+
+
+def size(setup: SwingSetup, rules: SwingRules) -> int:
+    """Shares: the trade's risk over the stop distance, capped by the share of capital one position may take."""
+    by_risk = int((rules.risk_per_trade / setup.risk_per_share).to_integral_value(rounding=ROUND_DOWN))
+    by_value = int(
+        (rules.capital * rules.max_position_percent / 100 / setup.entry_trigger).to_integral_value(rounding=ROUND_DOWN)
+    )
+    return min(by_risk, by_value)
+
+
+def choose_plans(
+    found: Sequence[tuple[str, SwingSetup]],
+    open_trades: Sequence[SwingTrade],
+    sectors: dict[str, str],
+    rules: SwingRules,
+    *,
+    avoid: dict[str, str] | None = None,
+) -> tuple[list[tuple[str, SwingSetup, int]], list[tuple[str, SwingSetup, str]]]:
+    """Which setups become tomorrow's orders, inside the desk's limits, and why the rest do not.
+
+    ``avoid`` maps a share to a reason it must not be bought now -- a results
+    date close ahead, on the paper desk. The backtest has no such calendar.
+    """
+    plans: list[tuple[str, SwingSetup, int]] = []
+    refused: list[tuple[str, SwingSetup, str]] = []
+    held = {trade.token for trade in open_trades}
+    sectors_used: dict[str, int] = defaultdict(int)
+    for trade in open_trades:
+        sectors_used[trade.sector] += 1
+    heat = sum((trade.open_risk for trade in open_trades), start=Decimal("0"))
+    for token, setup in found:
+        if token in held:
+            continue
+        if avoid and token in avoid:
+            refused.append((token, setup, avoid[token]))
+            continue
+        if len(open_trades) + len(plans) >= rules.max_open_positions:
+            refused.append((token, setup, "position limit"))
+            continue
+        sector = sectors.get(token, "")
+        if sectors_used[sector] >= rules.max_per_sector:
+            refused.append((token, setup, "sector limit"))
+            continue
+        quantity = size(setup, rules)
+        if quantity < 1:
+            refused.append((token, setup, "too dear for the risk"))
+            continue
+        new_risk = setup.risk_per_share * quantity
+        if heat + new_risk > rules.heat_cap:
+            refused.append((token, setup, "heat cap"))
+            continue
+        plans.append((token, setup, quantity))
+        held.add(token)
+        sectors_used[sector] += 1
+        heat += new_risk
+    return plans, refused
+
+
+def regime_by_day(benchmark: Sequence[CompletedCandle], period: int) -> dict[date, bool]:
+    """Whether NIFTY closed above its ``period``-day average, per session."""
+    closes = [float(bar.close) for bar in benchmark]
+    averages = sma(closes, period)
+    return {
+        bar.session_date: (avg is not None and close > avg)
+        for bar, close, avg in zip(benchmark, closes, averages, strict=False)
+    }
+
+
 def run_backtest(
     universe: dict[str, Sequence[CompletedCandle]],
     sectors: dict[str, str],
@@ -169,6 +312,7 @@ def run_backtest(
     costs: CostModel | None = None,
     strategies: dict[str, Callable] | None = None,
 ) -> BacktestResult:
+    """The same steps the paper desk takes each evening, replayed over the history."""
     rules = rules or SwingRules()
     costs = costs or CostModel()
     chosen = {name: fn for name, fn in (strategies or STRATEGIES).items() if name in rules.strategies}
@@ -176,46 +320,19 @@ def run_backtest(
     series = {token: Series.of(bars) for token, bars in universe.items() if bars}
     position_of = {token: {bar.session_date: i for i, bar in enumerate(s.bars)} for token, s in series.items()}
     bench_close = {bar.session_date: float(bar.close) for bar in benchmark}
-    bench_dates = [bar.session_date for bar in benchmark]
-    bench_sma = sma([float(bar.close) for bar in benchmark], rules.regime_sma)
-    regime_ok = {
-        day: (avg is not None and bench_close[day] > avg) for day, avg in zip(bench_dates, bench_sma, strict=False)
-    }
+    regime_ok = regime_by_day(benchmark, rules.regime_sma)
 
-    result = BacktestResult(dates=bench_dates)
+    result = BacktestResult(dates=[bar.session_date for bar in benchmark])
     open_trades: list[SwingTrade] = []
     plans: list[tuple[str, SwingSetup, int]] = []
 
-    for day in bench_dates:
-        # 1. Positions already held: pending exits at the open, then stop, then target.
+    for day in result.dates:
+        # 1. Positions already held.
         for trade in list(open_trades):
             i = position_of[trade.token].get(day)
-            if i is None:
-                continue
-            bar = series[trade.token].bars[i]
-            if trade.exit_next_open:
-                _close(trade, bar.open, day, trade.exit_next_open, costs)
-            elif bar.low <= trade.stop:
-                _close(
-                    trade, min(bar.open, trade.stop), day, "stop" if not trade.partial_done else "breakeven stop", costs
-                )
-            elif not trade.partial_done and bar.high >= trade.setup.target:
-                half = trade.remaining // 2
-                if half:
-                    _sell(trade, half, max(bar.open, trade.setup.target), costs)
-                trade.partial_done = True
-                trade.stop = max(trade.stop, trade.entry_price)
-            if trade.exit_date:
+            if i is not None and advance_open(trade, series[trade.token], i, costs):
                 open_trades.remove(trade)
                 result.trades.append(trade)
-                continue
-            # After the close: count the day, and decide tomorrow's exit if any.
-            trade.holding_days += 1
-            level = trail_level(series[trade.token], i, trade.setup.trail)
-            if trade.partial_done and level is not None and float(bar.close) < level:
-                trade.exit_next_open = "trail"
-            elif trade.holding_days >= trade.setup.max_holding_days:
-                trade.exit_next_open = "time"
 
         # 2. Yesterday evening's plans: fill, skip on a gap, or lapse.
         for token, setup, quantity in plans:
@@ -223,71 +340,25 @@ def run_backtest(
             if i is None:
                 result.skipped["no candle"] += 1
                 continue
-            bar = series[token].bars[i]
-            if bar.open > setup.entry_trigger * (1 + rules.gap_skip):
-                result.skipped["gapped above trigger"] += 1
-                continue
-            if bar.high < setup.entry_trigger:
-                result.skipped["not triggered"] += 1
-                continue
-            price = max(bar.open, setup.entry_trigger)
-            trade = SwingTrade(token, sectors.get(token, ""), setup, quantity, day, price, setup.initial_stop)
-            trade.charges += costs.buy(price * quantity)
-            if bar.low <= trade.stop:
-                # Filled and stopped the same day: a daily candle cannot say the
-                # order, so the losing one is assumed.
-                _close(trade, trade.stop, day, "stop same day", costs)
+            trade, reason = fill_plan(
+                token, sectors.get(token, ""), setup, quantity, series[token].bars[i], rules, costs
+            )
+            if trade is None:
+                result.skipped[reason] += 1
+            elif trade.exit_date:
                 result.trades.append(trade)
-                continue
-            open_trades.append(trade)
+            else:
+                open_trades.append(trade)
         plans = []
 
         # 3. This evening: new setups for tomorrow, inside the desk's limits.
         if not regime_ok.get(day):
             continue
-        found: list[tuple[str, SwingSetup]] = []
-        for token, s in series.items():
-            i = position_of[token].get(day)
-            if i is None:
-                continue
-            for fn in chosen.values():
-                setup = fn(s, bench_close, i)
-                if setup is not None:
-                    found.append((token, setup))
-        found.sort(key=lambda item: item[1].rank, reverse=True)
-        held = {trade.token for trade in open_trades}
-        sectors_used = defaultdict(int)
-        for trade in open_trades:
-            sectors_used[trade.sector] += 1
-        heat = sum((trade.open_risk for trade in open_trades), start=Decimal("0"))
-        for token, setup in found:
-            if token in held:
-                continue
-            if len(open_trades) + len(plans) >= rules.max_open_positions:
-                result.skipped["position limit"] += 1
-                continue
-            sector = sectors.get(token, "")
-            if sectors_used[sector] >= rules.max_per_sector:
-                result.skipped["sector limit"] += 1
-                continue
-            quantity = int((rules.risk_per_trade / setup.risk_per_share).to_integral_value(rounding=ROUND_DOWN))
-            by_value = int(
-                (rules.capital * rules.max_position_percent / 100 / setup.entry_trigger).to_integral_value(
-                    rounding=ROUND_DOWN
-                )
-            )
-            quantity = min(quantity, by_value)
-            if quantity < 1:
-                result.skipped["too dear for the risk"] += 1
-                continue
-            new_risk = setup.risk_per_share * quantity
-            if heat + new_risk > rules.heat_cap:
-                result.skipped["heat cap"] += 1
-                continue
-            plans.append((token, setup, quantity))
-            held.add(token)
-            sectors_used[sector] += 1
-            heat += new_risk
+        plans, refused = choose_plans(
+            find_setups(series, position_of, bench_close, day, chosen), open_trades, sectors, rules
+        )
+        for _token, _setup, reason in refused:
+            result.skipped[reason] += 1
 
     # Anything still open at the end is marked at the last close, and said so.
     for trade in open_trades:

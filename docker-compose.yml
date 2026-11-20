@@ -77,6 +77,28 @@ services:
     pids_limit: 256
     networks: [internal, edge]
 
+  # The swing desk's paper worker. Its own service so nothing it does can slow
+  # or stop the intraday scanner. Idle while the swing desk is switched off
+  # (the default) and while the market is open. Paper only: it builds no order.
+  swing-worker:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    command: ["python", "-m", "app.swing_worker"]
+    env_file: .env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    volumes:
+      - app_logs:/app/logs
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    pids_limit: 128
+    networks: [internal, edge]
+
   web:
     build:
       context: .
