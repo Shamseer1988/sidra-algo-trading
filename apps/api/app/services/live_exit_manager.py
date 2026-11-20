@@ -43,7 +43,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.db.models import LiveOrderSubmission, MarketCandle, PaperSignal
 from app.db.session import SessionLocal
-from app.services.broker_adapter import BUY, INTRADAY, OPEN_STATUSES, SELL, STATUS_REJECTED, BrokerAdapter
+from app.services.broker_adapter import BUY, OPEN_STATUSES, SELL, STATUS_REJECTED, BrokerAdapter
+from app.services.desks import ExitProductUnknownError, exit_product, normalise_desk
 from app.services.exit_rules import (
     BREAKEVEN_AT_R,
     NO_TRAIL,
@@ -379,6 +380,25 @@ def _ids_to_clear(position, stops: list[LiveOrderSubmission], book: list | None)
     return sorted(_ids_resting_on(book, position) | ours)
 
 
+def _exit_product(signal: PaperSignal, records: list[LiveOrderSubmission]) -> tuple[str | None, str | None]:
+    """The product to close or protect this position with, or why there is none.
+
+    Decided before anything is cancelled. A branch that cancelled the stop and
+    only then found it could not name the product would leave the position
+    with nothing behind it and no exit either.
+
+    The product recorded on our own orders for this trade when there is one.
+    Otherwise INTRADAY on the intraday desk -- what this module has always
+    used -- and a refusal on any other desk, because selling delivery shares
+    as an intraday order either fails or opens a short.
+    """
+    recorded = records[0].canonical_product if records else None
+    try:
+        return exit_product(signal.desk, recorded).product, None
+    except ExitProductUnknownError as exc:
+        return None, str(exc)
+
+
 async def _market_exit(
     session: AsyncSession,
     adapter: BrokerAdapter,
@@ -388,6 +408,7 @@ async def _market_exit(
     quantity: int,
     product: str,
     paper_signal_id,  # noqa: ANN001
+    desk: str | None = None,
 ) -> tuple[str, str]:
     request = LiveOrderRequest(
         instrument_token=instrument_token,
@@ -396,6 +417,7 @@ async def _market_exit(
         order_type=MARKET,
         product=product,
         price=Decimal("0"),
+        desk=normalise_desk(desk),
     )
     client_order_id = new_client_order_id()
     description = await adapter.describe(request.to_broker_order(client_order_id))
@@ -627,6 +649,9 @@ async def _hold_or_protect(
         if covered == 0
         else f"{quantity} of {symbol} was open with a working stop covering only {covered}"
     )
+    product, refusal = _exit_product(signal, ours)
+    if product is None:
+        return PositionExit(symbol, False, "product_unknown", f"{gap}. {refusal}", quantity=quantity)
 
     # Near the deadline a stop is the wrong instrument. It would be cancelled
     # within minutes by the square-off that is about to run, it protects almost
@@ -658,8 +683,9 @@ async def _hold_or_protect(
             instrument_token=signal.instrument_token,
             side=SELL if net > 0 else BUY,
             quantity=quantity,
-            product=(ours[0].canonical_product if ours else None) or INTRADAY,
+            product=product,
             paper_signal_id=signal.id,
+            desk=signal.desk,
         )
         return PositionExit(
             symbol,
@@ -689,8 +715,9 @@ async def _hold_or_protect(
             instrument_token=signal.instrument_token,
             side=SELL if net > 0 else BUY,
             quantity=quantity,
-            product=(ours[0].canonical_product if ours else None) or INTRADAY,
+            product=product,
             paper_signal_id=signal.id,
+            desk=signal.desk,
         )
         return PositionExit(
             symbol,
@@ -711,7 +738,7 @@ async def _hold_or_protect(
         adapter,
         signal=signal,
         net=uncovered,
-        product=(ours[0].canonical_product if ours else None) or INTRADAY,
+        product=product,
         symbol=symbol,
     )
     return PositionExit(
@@ -829,6 +856,17 @@ async def _trail_stop(
     if close is not None and (level >= close if long else level <= close):
         return None
 
+    product, refusal = _exit_product(signal, working)
+    if product is None:
+        return PositionExit(
+            symbol,
+            False,
+            "trail_blocked",
+            f"The stop for {symbol} should move from {current} to {level}, but {refusal} "
+            "The stop stands where it was; the position is still protected.",
+            quantity=quantity,
+        )
+
     # Cancel first, always. Placing the new stop while the old one rests leaves
     # two live stops behind one position, and when one fills the other opens a
     # reversed one.
@@ -848,7 +886,7 @@ async def _trail_stop(
         adapter,
         signal=signal,
         net=net,
-        product=(working[0].canonical_product if working else None) or INTRADAY,
+        product=product,
         symbol=symbol,
         stop_price=level,
     )
@@ -972,6 +1010,16 @@ async def _consider(
         reason = f"Target reached at {close}"
 
     stops = await _recorded_stops(session, signal.id, start, end)
+    product, refusal = _exit_product(signal, stops)
+    if product is None:
+        return PositionExit(
+            symbol,
+            False,
+            "product_unknown",
+            f"{reason}, but no exit was sent and nothing was cancelled: {refusal}",
+            reason,
+            quantity,
+        )
     clearing = _ids_to_clear(position, stops, book)
     if clearing:
         # Logged because this list can hold orders we did not place -- a stop put
@@ -1000,8 +1048,9 @@ async def _consider(
         quantity=quantity,
         # Canonical, for the same reason the stop is: stops[0].product is
         # the broker's word and describe() would translate it twice.
-        product=(stops[0].canonical_product if stops else None) or INTRADAY,
+        product=product,
         paper_signal_id=signal.id,
+        desk=signal.desk,
     )
     if status == ACCEPTED:
         return PositionExit(symbol, True, "exited", f"{reason}. Exit sent for {quantity}.", reason, quantity)
