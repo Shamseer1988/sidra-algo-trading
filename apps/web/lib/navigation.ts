@@ -110,7 +110,7 @@ export const navigationSections: NavigationSection[] = [
 
 export const workspaceMeta: Record<WorkspaceId, { eyebrow: string; title: string }> = {
   dashboard: { eyebrow: "Operations overview", title: "Dashboard" },
-  strategies: { eyebrow: "Scanner configuration", title: "Strategies" },
+  strategies: { eyebrow: "Strategy control", title: "Strategies" },
   scanner: { eyebrow: "What we are watching today", title: "Scanner & Universe" },
   orders: { eyebrow: "Execution workspace", title: "Orders & Positions" },
   history: { eyebrow: "Trading record", title: "History" },

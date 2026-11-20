@@ -38,11 +38,11 @@ from app.services.market_calculations import MARKET_TIMEZONE
 from app.services.swing_backtest import SwingRules
 from app.services.swing_data import backfill_daily_range, load_adjusted_daily
 from app.services.swing_paper import (
-    PAPER_STRATEGIES,
     EveningReport,
     days_to_process,
     last_processed,
     mark_processed,
+    paper_strategies,
     run_evening,
     summary_message,
 )
@@ -106,6 +106,8 @@ async def process(settings, now: datetime, *, new_entries: bool = True) -> list[
             if bar.session_date <= final
         ]
         days = days_to_process([bar.session_date for bar in benchmark], await last_processed(session))
+        # Chosen in the UI; read once per run so an evening uses one consistent set.
+        strategies = await paper_strategies(session)
         if not days:
             return []
         universe = {
@@ -134,7 +136,7 @@ async def process(settings, now: datetime, *, new_entries: bool = True) -> list[
                 symbols=symbols,
                 events=events,
                 new_entries=new_entries,
-                rules=SwingRules(strategies=PAPER_STRATEGIES),
+                rules=SwingRules(strategies=strategies),
             )
             await mark_processed(session, day)
             await session.commit()
