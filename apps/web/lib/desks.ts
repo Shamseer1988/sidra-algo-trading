@@ -62,15 +62,15 @@ export function deskNotice(state: DeskState): DeskNotice | null {
       title: "Intraday trading is off",
       body:
         "No new intraday trades. Intraday positions already open keep their stops and are still closed by the " +
-        "square-off time. Swing trading is on, but no swing order is sent to the broker yet.",
+        "square-off time. Swing trading is on, on paper only.",
     };
   }
   if (state.swing) {
     return {
       tone: "info",
-      title: "Swing trading is on, but not live yet",
+      title: "Swing trading is on — paper only",
       body:
-        "The swing desk is still being built. Until it has its own risk limits, no swing order is sent to the " +
+        "Each evening the swing desk plans and simulates trades with ₹1,00,000 of paper money. No swing order is sent to the " +
         "broker. Intraday trading is working as normal.",
     };
   }
@@ -85,6 +85,6 @@ export function switchConsequence(desk: Desk, turningOn: boolean): string {
       : "From the next candle no new intraday trade is opened. Positions already open are not abandoned: their stops, targets and the square-off keep working until they close.";
   }
   return turningOn
-    ? "The swing desk is switched on, but it is not live yet: no swing order is sent to the broker until it has its own risk limits."
-    : "No new swing trades. Holdings already open stay protected by their stops until they are sold.";
+    ? "Each evening after the close the swing desk plans trades for the next session and simulates them with ₹1,00,000 of paper money. No swing order is sent to the broker."
+    : "No new swing plans. Paper positions already open are still managed until they close; plans not yet bought are cancelled.";
 }

@@ -185,8 +185,14 @@ async def run_evening(
     rules: SwingRules | None = None,
     costs: CostModel | None = None,
     strategies: dict | None = None,
+    new_entries: bool = True,
 ) -> EveningReport:
-    """Process one trading day. The caller commits."""
+    """Process one trading day. The caller commits.
+
+    `new_entries` is False while the swing desk is switched off: positions already
+    held are still managed to their exits -- a switch never abandons a position --
+    but plans not yet bought are cancelled and no new plan is made.
+    """
     rules = rules or SwingRules()
     costs = costs or CostModel()
     chosen = {name: fn for name, fn in (strategies or STRATEGIES).items() if name in rules.strategies}
@@ -217,6 +223,10 @@ async def run_evening(
         )
     ).all()
     for row in planned:
+        if not new_entries:
+            row.status, row.exit_reason = CANCELLED, "desk switched off"
+            report.lapsed.append((row, "desk switched off"))
+            continue
         i = position_of.get(row.instrument_token, {}).get(day)
         if i is None:
             row.status, row.exit_reason = CANCELLED, "no candle"
@@ -257,7 +267,7 @@ async def run_evening(
     already = await session.scalar(select(SwingPaperPosition.id).where(SwingPaperPosition.plan_date == day).limit(1))
     bench_close = {bar.session_date: float(bar.close) for bar in benchmark}
     report.regime_ok = bool(regime_by_day(benchmark, rules.regime_sma).get(day))
-    if report.regime_ok and already is None:
+    if new_entries and report.regime_ok and already is None:
         plans, refused = choose_plans(
             find_setups(series, position_of, bench_close, day, chosen),
             [trade_of(row) for row in still_open],

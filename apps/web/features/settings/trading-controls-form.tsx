@@ -404,7 +404,7 @@ function DesksCard({
               </div>
               <p className="mt-2 text-xs leading-5 text-slate-400">{spec.help}</p>
               {desk === "swing" && (
-                <p className="mt-2 text-xs font-medium text-sky-300">Not live yet — no swing order reaches the broker.</p>
+                <p className="mt-2 text-xs font-medium text-sky-300">Paper only — no swing order reaches the broker.</p>
               )}
               {isAdmin && !asking && (
                 <button onClick={() => setConfirming(spec.key)} className="secondary-button mt-4">

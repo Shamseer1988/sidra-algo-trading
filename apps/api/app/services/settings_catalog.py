@@ -159,10 +159,10 @@ TRADING_CONTROL_SPECS: tuple[SettingSpec, ...] = (
         group=DESKS,
         label="Swing trading",
         help=(
-            "Hold delivery positions for several days, protected overnight by a stop at the broker. "
-            "Not ready for real money yet: until the swing desk has its own limits, every live swing "
-            "order is refused, whatever this switch says. Turning it off later stops new swing trades "
-            "and leaves open holdings protected until they are sold."
+            "Hold delivery positions for several days. Paper only for now: switched on, the swing desk "
+            "plans trades every evening after the close and simulates them with Rs 1,00,000 of paper "
+            "money, and no swing order reaches the broker. Switched off, it makes no new plans; paper "
+            "positions already open are still managed until they close."
         ),
         unit=BOOLEAN,
         effect=NEXT_SIGNAL,

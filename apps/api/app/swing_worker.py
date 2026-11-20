@@ -3,7 +3,9 @@
 Runs as its own service (``swing-worker``), apart from the intraday scanner, so
 nothing it does can slow or stop the scanner. It does nothing at all while:
 
-* the swing desk is switched off in Settings (it is off by default);
+* the swing desk is switched off in Settings (it is off by default) and no paper
+  position is left to manage -- switched off, it still manages open positions
+  to their exits, but cancels waiting plans and makes no new ones;
 * the market is open (09:00-15:40 IST on a weekday) -- it never competes with
   the intraday desk for the database or the broker's rate limit.
 
@@ -29,7 +31,7 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.db.models import ApplicationSetting, CorporateEvent
+from app.db.models import ApplicationSetting, CorporateEvent, SwingPaperPosition
 from app.db.session import SessionLocal
 from app.services.desks import SWING_DESK, desk_enabled
 from app.services.market_calculations import MARKET_TIMEZONE
@@ -67,6 +69,15 @@ async def swing_enabled() -> bool:
     return desk_enabled(row.value if row and isinstance(row.value, dict) else {}, SWING_DESK)
 
 
+async def positions_held() -> bool:
+    """Whether a paper position is still open, or a plan is still waiting to be bought or cancelled."""
+    async with SessionLocal() as session:
+        found = await session.scalar(
+            select(SwingPaperPosition.id).where(SwingPaperPosition.status.in_(("OPEN", "PLANNED"))).limit(1)
+        )
+    return found is not None
+
+
 async def refresh(settings, logger, now: datetime) -> None:  # noqa: ANN001
     from app.services.upstox_oauth import load_access_token
 
@@ -80,7 +91,7 @@ async def refresh(settings, logger, now: datetime) -> None:  # noqa: ANN001
     logger.info("swing.refreshed", stored=report.total_stored, failures=len(report.failures))
 
 
-async def process(settings, now: datetime) -> list[EveningReport]:  # noqa: ANN001
+async def process(settings, now: datetime, *, new_entries: bool = True) -> list[EveningReport]:  # noqa: ANN001
     members = nifty200()
     sectors = {member.instrument_token: member.industry for member in members}
     symbols = {member.instrument_token: member.symbol for member in members}
@@ -113,7 +124,14 @@ async def process(settings, now: datetime) -> list[EveningReport]:  # noqa: ANN0
         index = [bar for bar in benchmark if bar.session_date <= day]
         async with SessionLocal() as session:
             report = await run_evening(
-                session, day, universe=seen, benchmark=index, sectors=sectors, symbols=symbols, events=events
+                session,
+                day,
+                universe=seen,
+                benchmark=index,
+                sectors=sectors,
+                symbols=symbols,
+                events=events,
+                new_entries=new_entries,
             )
             await mark_processed(session, day)
             await session.commit()
@@ -142,11 +160,14 @@ async def run() -> None:
     while True:
         try:
             now = datetime.now(MARKET_TIMEZONE)
-            if not market_quiet(now) and await swing_enabled():
+            enabled = await swing_enabled()
+            # Off stops new plans, never the positions already held: those are
+            # still managed to their exits, and waiting plans are cancelled.
+            if not market_quiet(now) and (enabled or await positions_held()):
                 if loop.time() - last_fetch >= FETCH_EVERY_SECONDS:
                     await refresh(settings, logger, now)
                     last_fetch = loop.time()
-                for report in await process(settings, now):
+                for report in await process(settings, now, new_entries=enabled):
                     logger.info(
                         "swing.evening_processed",
                         day=report.day.isoformat(),

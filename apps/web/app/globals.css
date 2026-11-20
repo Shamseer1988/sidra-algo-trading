@@ -227,6 +227,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
    to ignore warnings. */
 :root[data-theme="light"] .bg-slate-800\/60 { background-color: var(--glass-muted); }
 :root[data-theme="light"] .bg-rose-950\/20 { background-color: rgba(244, 63, 94, .10); }
+/* Notices: the desk banner and the swing desk's paper-only strip. */
+:root[data-theme="light"] .text-sky-100 { color: #0c4a6e; }
+:root[data-theme="light"] .bg-sky-950\/20 { background-color: rgba(56, 189, 248, .14); }
+:root[data-theme="light"] .text-rose-100 { color: #881337; }
+:root[data-theme="light"] .bg-rose-950\/25 { background-color: rgba(244, 63, 94, .12); }
 :root[data-theme="light"] .bg-emerald-500\/10 { background-color: rgba(16, 185, 129, .12); }
 :root[data-theme="light"] .shadow-black\/20, :root[data-theme="light"] .shadow-black\/40, :root[data-theme="light"] .shadow-black\/60 { --tw-shadow-color: var(--shadow); }
 

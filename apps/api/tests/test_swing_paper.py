@@ -94,9 +94,9 @@ async def clean():
     await wipe()
 
 
-async def paper_run(universe, strategy, *, days: int, events=(), costs=None):
+async def paper_run(universe, strategy, *, days: int, events=(), costs=None, start: int = 0, new_entries: bool = True):
     """The desk, one evening at a time, each seeing only candles up to that evening."""
-    for n in range(days):
+    for n in range(start, days):
         seen = {token: [bar for bar in bars if bar.session_date <= day(n)] for token, bars in universe.items()}
         index = [bar for bar in INDEX if bar.session_date <= day(n)]
         async with SessionLocal() as session:
@@ -111,6 +111,7 @@ async def paper_run(universe, strategy, *, days: int, events=(), costs=None):
                 rules=RULES,
                 costs=costs or CostModel(),
                 strategies={"stub": strategy},
+                new_entries=new_entries,
             )
             await session.commit()
     async with SessionLocal() as session:
@@ -320,3 +321,19 @@ async def test_the_summary_shows_open_and_planned_positions_with_their_numbers()
     assert result.open_risk == pytest.approx((101 - 96) * held.quantity)
     assert [plan.symbol for plan in result.planned] == ["B"]
     assert result.planned[0].next_action == "Buy-stop at 101.0000 next session"
+
+
+async def test_switched_off_the_desk_still_closes_what_it_holds_and_buys_nothing_new():
+    """A switch never abandons a position: off cancels waiting plans, and manages the rest to its exit."""
+    universe = {
+        "A": series_for("A", 30, {6: (100, 102, 99.5, 101.5), 12: (90, 91, 89, 90)}),
+        "B": series_for("B", 30, {}),
+    }
+    strategy = stub({"A": [5], "B": [8, 15]})
+    await paper_run(universe, strategy, days=9)  # A bought on day 6; B planned on evening 8
+    rows = await paper_run(universe, strategy, start=9, days=20, new_entries=False)
+    by_symbol = {row.symbol: row for row in rows}
+    assert by_symbol["A"].status == CLOSED and by_symbol["A"].exit_reason == "stop"
+    assert by_symbol["A"].exit_date == day(12)
+    assert by_symbol["B"].status == CANCELLED and by_symbol["B"].exit_reason == "desk switched off"
+    assert len(rows) == 2  # B's setup on evening 15 made no new plan

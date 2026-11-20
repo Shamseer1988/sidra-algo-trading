@@ -309,7 +309,51 @@ export type BrokerFetchResult = {
 export type HistoryRange = { from_date?: string; to_date?: string; mode?: "PAPER" | "LIVE"; broker?: string };
 export type RiskPreset = { key: string; label: string; description: string; controls: Record<string, number>; effective: EffectiveLimits };
 export type SettingRevision = { created_at: string; changed_keys: string[]; risk_increased: string[]; changed_by_user_id: string | null };
-export type TradingControls = { intraday_desk_enabled?: boolean; swing_desk_enabled?: boolean; account_capital: number; risk_per_trade_percent: number; maximum_daily_risk_percent: number; maximum_open_positions: number; maximum_open_exposure_percent: number; maximum_daily_trades: number; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number; stop_atr_multiple: number; min_stop_distance_percent: number; trade_start_time: string; trade_cutoff_time: string; intraday_leverage_enabled?: boolean; intraday_leverage_multiplier?: number; execution_approval_mode?: ExecutionApprovalMode; live_broker?: LiveBroker; live_entry_order_type?: "MARKET" | "LIMIT"; entry_slippage_cap_percent?: number; entry_slippage_cap_r?: number; universe_max_share_price?: number; universe_min_share_price?: number; session_square_off_time?: string };
+export type SwingPosition = {
+  id: string;
+  symbol: string;
+  sector: string | null;
+  strategy: string;
+  status: "PLANNED" | "OPEN" | "CLOSED" | "CANCELLED";
+  plan_date: string;
+  entry_trigger: number;
+  quantity: number;
+  initial_stop: number;
+  stop: number;
+  target: number | null;
+  risk: number;
+  entry_price: number | null;
+  entry_date: string | null;
+  last_close: number | null;
+  last_close_date: string | null;
+  unrealised: number | null;
+  r_now: number | null;
+  holding_days: number;
+  max_holding_days: number;
+  partial_done: boolean;
+  next_action: string | null;
+  exit_date: string | null;
+  exit_reason: string | null;
+  net_pnl: number | null;
+  charges: number | null;
+  reasons: Record<string, number | string>;
+};
+export type SwingSummary = {
+  enabled: boolean;
+  paper_only: boolean;
+  last_processed: string | null;
+  capital: number;
+  risk_per_trade: number;
+  heat_cap: number;
+  max_open_positions: number;
+  invested: number;
+  open_risk: number;
+  unrealised: number;
+  realised: number;
+  closed_trades: number;
+  open_positions: SwingPosition[];
+  planned: SwingPosition[];
+};export type TradingControls = { intraday_desk_enabled?: boolean; swing_desk_enabled?: boolean; account_capital: number; risk_per_trade_percent: number; maximum_daily_risk_percent: number; maximum_open_positions: number; maximum_open_exposure_percent: number; maximum_daily_trades: number; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number; stop_atr_multiple: number; min_stop_distance_percent: number; trade_start_time: string; trade_cutoff_time: string; intraday_leverage_enabled?: boolean; intraday_leverage_multiplier?: number; execution_approval_mode?: ExecutionApprovalMode; live_broker?: LiveBroker; live_entry_order_type?: "MARKET" | "LIMIT"; entry_slippage_cap_percent?: number; entry_slippage_cap_r?: number; universe_max_share_price?: number; universe_min_share_price?: number; session_square_off_time?: string };
 export type ExitRules = {
   stop_rule: "WIDEST_OF_STRUCTURE_ATR_PERCENT";
   stop_atr_multiple: number | null;
@@ -497,6 +541,8 @@ function brokerBookQuery({ broker, force }: { broker?: string; force?: boolean }
 export const api = {
   me: () => request<User>("/auth/me"), login: (email: string, password: string) => request<{ email: string; role: string }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }), refresh: () => request<{ email: string; role: string }>("/auth/refresh", { method: "POST" }), logout: () => request<void>("/auth/logout", { method: "POST" }), sessions: () => request<UserSession[]>("/auth/sessions"), revokeSession: (id: string) => request<void>(`/auth/sessions/${id}`, { method: "DELETE" }), auditLogs: () => request<AuditLog[]>("/auth/audit-logs"), overview: () => request<Overview>("/system/overview"), marketSession: () => request<MarketSession>("/system/market-session"), scanner: () => request<ScannerStatus>("/scanner/status"), dataQuality: () => request<DataQuality[]>("/scanner/data-quality"), evaluations: (limit = 100) => request<ScannerEvaluation[]>(`/scanner/evaluations?limit=${limit}`), signals: () => request<PaperSignal[]>("/scanner/signals"), paperSummary: () => request<PaperExecutionSummary>("/paper/summary"), paperOrders: () => request<PaperOrder[]>("/paper/orders"), paperPositions: () => request<PaperPosition[]>("/paper/positions"), paperRiskSummary: () => request<PaperRiskSummary>("/risk/summary"), shadowOrders: () => request<ShadowOrder[]>("/shadow/orders"), shadowSummary: () => request<ShadowSummary>("/shadow/summary"), omsOrders: () => request<OmsOrder[]>("/oms/orders"), omsReconciliations: () => request<OmsReconciliation[]>("/oms/reconciliations"), runOmsReconciliation: () => request<OmsReconciliation>("/oms/reconciliations/run", { method: "POST" }), backtests: () => request<BacktestRun[]>("/backtests"), runBacktest: (input: { start_date: string; end_date: string; instrument_tokens: string[]; strategy_ids: string[]; timeframe_seconds: number }) => request<BacktestRunDetail>("/backtests/run", { method: "POST", body: JSON.stringify(input) }), sweeps: () => request<BacktestSweep[]>("/backtests/sweeps"), createSweep: (input: { strategy_id: string; start_date: string; end_date: string; instrument_tokens: string[]; validation_fraction: number; parameter_grid: Record<string, number[]> }) => request<BacktestSweep>("/backtests/sweeps", { method: "POST", body: JSON.stringify(input) }), promoteSweepCombination: (id: string, index: number) => request<PaperStrategy[]>(`/backtests/sweeps/${id}/promote?combination_index=${index}`, { method: "POST" }), candles: (instrument: string, sessionDate: string) => request<MarketCandle[]>(`/market-data/candles/${encodeURIComponent(instrument)}?session_date=${encodeURIComponent(sessionDate)}`), strategies: () => request<PaperStrategy[]>("/settings/strategies"), strategyMetrics: () => request<StrategyMetric[]>("/settings/strategies/metrics"), strategyDefinitions: () => request<StrategyDefinition[]>("/settings/strategies/definitions"), strategyDetail: (id: string) => request<StrategyDetail>(`/settings/strategies/${encodeURIComponent(id)}/detail`), updateStrategies: (items: PaperStrategy[]) => request<PaperStrategy[]>("/settings/strategies", { method: "PUT", body: JSON.stringify(items) }), startScanner: () => request<ScannerStatus>("/scanner/start", { method: "POST" }), stopScanner: () => request<ScannerStatus>("/scanner/stop", { method: "POST" }), universe: () => request<UniverseEntry[]>("/universe"), universeSummary: () => request<UniverseSummary>("/universe/summary"), refreshUniverse: () => request<UniverseSummary>("/universe/refresh", { method: "POST" }), marketRegime: () => request<MarketRegime>("/market-data/regime"), scoreAnalysis: () => request<ScoreAnalysis>("/journal/score-analysis"), controls: () => request<TradingControls>("/settings/trading"), updateControls: (controls: TradingControls) => request<TradingControls>("/settings/trading", { method: "PUT", body: JSON.stringify(controls) }), settingsCatalog: () => request<SettingsCatalog>("/settings/trading/catalog"), indicatorCatalog: () => request<IndicatorCatalog>("/settings/indicators/catalog"), updateIndicators: (indicators: IndicatorSettings) => request<IndicatorSettings>("/settings/indicators", { method: "PUT", body: JSON.stringify(indicators) }), brokerSnapshot: (options: { broker?: string; force?: boolean } = {}) => request<BrokerSnapshot>(`/broker-books/snapshot${brokerBookQuery(options)}`), brokerChoices: () => request<BrokerChoices>("/broker-books/brokers"), tradingStatus: () => request<TradingStatus>("/safety/trading-status"), notificationCatalog: () => request<NotificationCatalog>("/settings/notifications"), updateNotifications: (values: Record<string, boolean>) => request<Record<string, boolean>>("/settings/notifications", { method: "PUT", body: JSON.stringify(values) }), settingsHistory: () => request<SettingRevision[]>("/settings/trading/history"), riskPresets: () => request<RiskPreset[]>("/settings/trading/presets"), applyRiskPreset: (preset: string, confirmRiskIncrease: boolean) => request<TradingControls>(`/settings/trading/presets/${encodeURIComponent(preset)}`, { method: "POST", body: JSON.stringify({ preset, confirm_risk_increase: confirmRiskIncrease }) }),
 
+  swingSummary: () => request<SwingSummary>("/swing/summary"),
+  swingHistory: () => request<SwingPosition[]>("/swing/history"),
   historyOverview: (range: HistoryRange) => request<HistoryOverview>(`/history/overview${historyQuery(range)}`),
   historyDaily: (range: HistoryRange) => request<HistoryDay[]>(`/history/daily${historyQuery(range)}`),
   historyQuality: (range: HistoryRange) => request<ExecutionQuality>(`/history/quality${historyQuery(range)}`),
