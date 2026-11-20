@@ -835,3 +835,35 @@ async def test_the_signals_planned_risk_goes_with_the_order(wiring) -> None:
     wiring.controls = controls(approval="AUTOMATIC")
     await run(wiring, sig=signal(risk="86.08"))
     assert wiring.submitted.candidate_risk == Decimal("86.08")
+
+
+# --- the desk decides the product (swing desk, step 0.2 change 1) -----------
+#
+# The intraday cases pin the product to exactly what it was before the desk
+# existed: the leverage switch, nothing else. The swing cases are the reason for
+# the change -- a swing entry must be DELIVERY even with leverage on, or the
+# position it opens is squared off by the broker the same afternoon.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("order_type", ["MARKET", "LIMIT"])
+@pytest.mark.parametrize(("leverage", "expected"), [(True, "INTRADAY"), (False, "DELIVERY")])
+async def test_an_intraday_entry_keeps_the_product_the_leverage_switch_gave_it(
+    wiring, order_type: str, leverage: bool, expected: str
+) -> None:
+    wiring.controls = controls(order_type=order_type, leverage=leverage)
+    await run(wiring, sig=signal(side="LONG", entry="985.85", stop="977.9632", quantity=12, risk="100"))
+    assert wiring.requested.request.product == expected
+    assert wiring.requested.request.desk == "INTRADAY"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("order_type", ["MARKET", "LIMIT"])
+@pytest.mark.parametrize("leverage", [True, False])
+async def test_a_swing_entry_is_delivery_even_with_leverage_on(wiring, order_type: str, leverage: bool) -> None:
+    wiring.controls = controls(order_type=order_type, leverage=leverage)
+    swing = signal(side="LONG", entry="985.85", stop="977.9632", quantity=12, risk="100")
+    swing.desk = "SWING"
+    await run(wiring, sig=swing)
+    assert wiring.requested.request.product == "DELIVERY"
+    assert wiring.requested.request.desk == "SWING"

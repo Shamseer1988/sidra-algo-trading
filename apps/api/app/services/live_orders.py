@@ -62,6 +62,7 @@ from app.services.broker_adapter import (
     BrokerOrder,
     BrokerOrderDescription,
 )
+from app.services.desks import normalise_desk
 from app.services.price_ticks import TICK, round_to_tick
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,10 @@ class LiveOrderRequest:
     # rounded on the same grid. Defaults to the fallback for a caller that
     # cannot resolve it, which fails closed -- a refused order, never a bad fill.
     tick: Decimal = TICK
+    # Which book the order belongs to (app.services.desks). Defaults to the
+    # intraday desk because every caller that predates the desk is intraday;
+    # recorded on the write-ahead row so exits and stops can read it back.
+    desk: str = "INTRADAY"
 
     def __post_init__(self) -> None:
         """Put both prices on the exchange's tick grid, at birth.
@@ -227,6 +232,7 @@ async def prepare_submission(
         price=request.price,
         trigger_price=request.trigger_price,
         planned_risk=planned_risk,
+        desk=normalise_desk(request.desk),
         status=PREPARED,
         request_snapshot={
             "broker": broker,

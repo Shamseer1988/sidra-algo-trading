@@ -54,6 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import ApplicationSetting, LiveOrderApproval, LiveOrderSubmission, PaperSignal
+from app.services.desks import normalise_desk, product_for_desk
 from app.services.entry_pricing import DEFAULT_CAP_PERCENT, DEFAULT_CAP_R, plan_entry
 from app.services.live_approval import BLOCKED, request_live_approval
 from app.services.live_execution import submit_live_order
@@ -61,7 +62,7 @@ from app.services.live_execution_gateway import BrokerNotSelectedError, live_ord
 from app.services.live_orders import LiveOrderRequest
 from app.services.live_protection import protect_after_fill
 from app.services.live_readiness import inspect_live_readiness
-from app.services.live_shadow import product_for, transaction_type_for
+from app.services.live_shadow import transaction_type_for
 from app.services.price_ticks import TICK
 from app.services.trading_symbols import instrument_tick_size
 
@@ -184,7 +185,12 @@ def _order_request(signal: PaperSignal, controls: Any, tick: Decimal) -> LiveOrd
     Under MARKET nothing is capped, because there is no price on a market order
     to cap. That is the setting that put ₹209 behind a ₹100 budget on 5 October,
     and the catalogue entry says so.
+
+    The product follows the signal's desk. For the intraday desk that is the
+    leverage switch, exactly as before; a swing entry is DELIVERY whatever the
+    switch says, so the switch can never turn an overnight position intraday.
     """
+    desk = normalise_desk(signal.desk)
     side = transaction_type_for(signal.side)
     if str(getattr(controls, "live_entry_order_type", "")).upper() != "LIMIT":
         return LiveOrderRequest(
@@ -192,9 +198,10 @@ def _order_request(signal: PaperSignal, controls: Any, tick: Decimal) -> LiveOrd
             side=side,
             quantity=int(signal.quantity),
             order_type=controls.live_entry_order_type,
-            product=product_for(bool(controls.intraday_leverage_enabled)),
+            product=product_for_desk(desk, intraday_leverage_enabled=bool(controls.intraday_leverage_enabled)),
             price=Decimal(str(signal.entry_price)),
             tick=tick,
+            desk=desk,
         )
 
     plan = plan_entry(
@@ -218,9 +225,10 @@ def _order_request(signal: PaperSignal, controls: Any, tick: Decimal) -> LiveOrd
         side=side,
         quantity=plan.quantity,
         order_type="LIMIT",
-        product=product_for(bool(controls.intraday_leverage_enabled)),
+        product=product_for_desk(desk, intraday_leverage_enabled=bool(controls.intraday_leverage_enabled)),
         price=plan.limit_price,
         tick=tick,
+        desk=desk,
     )
 
 

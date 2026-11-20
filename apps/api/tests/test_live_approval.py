@@ -544,3 +544,28 @@ async def test_an_approved_order_inside_the_days_allocation_still_sends(
         assert result.status == SUBMITTED
         assert len(client.placements) == 1
         await clean(session)
+
+
+async def test_an_approved_swing_entry_is_recorded_on_the_swing_desk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The approval row carries no desk; the order must take it from the signal.
+
+    Recorded as intraday, an approved swing entry would be closed by the
+    intraday exits at the square-off.
+    """
+    patch_green(monkeypatch)
+    client = FakeClient()
+    async with SessionLocal() as session:
+        await clean(session)
+        await arm(session)
+        signal = await signal_row(session, "86.08")
+        signal.desk = "SWING"
+        approval = await pending_approval(session)
+        approval.paper_signal_id = signal.id
+        await session.commit()
+        result = await decide(session, client, approval.reference_id, "approve")
+        assert result.status == SUBMITTED
+        stored = await session.scalar(
+            select(LiveOrderSubmission).where(LiveOrderSubmission.approval_reference == approval.reference_id)
+        )
+        assert stored.desk == "SWING"
+        await clean(session)
