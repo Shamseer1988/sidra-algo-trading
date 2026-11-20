@@ -18,6 +18,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import type { Desk } from "./desks";
+
 /**
  * Seven places to work, and a drawer for the instruments.
  *
@@ -60,7 +62,13 @@ export type WorkspaceId =
   | "system"
   | "audit";
 
-export type NavigationItem = { id: WorkspaceId; label: string; icon: LucideIcon };
+/**
+ * ``desk`` marks a screen that belongs to one trading desk; it is hidden while
+ * that desk is switched off (lib/desks.ts). Untagged screens serve both desks
+ * and always show. Only the scanner is intraday-only today: the rest read the
+ * whole account, and the swing desk has no screens of its own yet.
+ */
+export type NavigationItem = { id: WorkspaceId; label: string; icon: LucideIcon; desk?: Desk };
 export type NavigationSection = { label: string; items: NavigationItem[]; collapsible?: boolean };
 
 export const navigationSections: NavigationSection[] = [
@@ -69,7 +77,7 @@ export const navigationSections: NavigationSection[] = [
     items: [
       { id: "dashboard", label: "Dashboard", icon: Activity },
       { id: "strategies", label: "Strategies", icon: SlidersHorizontal },
-      { id: "scanner", label: "Scanner & Universe", icon: RadioTower },
+      { id: "scanner", label: "Scanner & Universe", icon: RadioTower, desk: "intraday" },
       { id: "orders", label: "Orders & Positions", icon: BriefcaseBusiness },
       { id: "history", label: "History", icon: CalendarRange },
       { id: "reports", label: "Reports", icon: FileBarChart },

@@ -2278,3 +2278,137 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText(/Recorded beside the local figures/)).toBeVisible();
   });
 });
+
+// --- Trading desks (swing desk step 0.4b) --------------------------------------
+//
+// The switches live on the server and are enforced there; these check what the
+// screen does with them: the menu, the banner above every page, and a switch
+// that asks first and then saves exactly one change.
+
+function deskSpec(key: "intraday_desk_enabled" | "swing_desk_enabled", value: boolean) {
+  const intraday = key === "intraday_desk_enabled";
+  return {
+    key,
+    group: "TRADING_DESKS",
+    group_label: "Trading desks",
+    label: intraday ? "Intraday trading" : "Swing trading",
+    help: intraday
+      ? "Buy and sell within the day; every position is closed by the square-off time. Turning this off stops new intraday trades from the next candle. Positions already open are not abandoned: their stops, targets and square-off keep working until they are closed."
+      : "Hold delivery positions for several days, protected overnight by a stop at the broker. Not ready for real money yet: until the swing desk has its own limits, every live swing order is refused, whatever this switch says.",
+    unit: "BOOLEAN",
+    kind: "boolean",
+    choices: [],
+    is_ceiling: false,
+    effect: "NEXT_SIGNAL",
+    effect_label: "Applies to the next signal evaluated; signals already taken keep the old value.",
+    value,
+    minimum: null,
+    maximum: null,
+    exclusive_minimum: null,
+    exclusive_maximum: null,
+    last_changed_at: null,
+  };
+}
+
+async function mockDesks(page: Page, desks: { intraday: boolean; swing: boolean }) {
+  const state = { ...desks };
+  const puts: Record<string, unknown>[] = [];
+  const catalog = () => ({
+    ...MOCK_CATALOG,
+    group_order: ["TRADING_DESKS", ...MOCK_CATALOG.group_order],
+    group_labels: { TRADING_DESKS: "Trading desks", ...MOCK_CATALOG.group_labels },
+    settings: [
+      deskSpec("intraday_desk_enabled", state.intraday),
+      deskSpec("swing_desk_enabled", state.swing),
+      ...MOCK_CATALOG.settings,
+    ],
+  });
+  const controls = () => ({ ...MOCK_CONTROLS, intraday_desk_enabled: state.intraday, swing_desk_enabled: state.swing });
+  await page.route("**/api/v1/settings/trading/catalog", async (route: Route) => {
+    await route.fulfill({ json: catalog() });
+  });
+  await page.route("**/api/v1/settings/trading", async (route: Route) => {
+    if (route.request().method() === "PUT") {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      puts.push(body);
+      state.intraday = body.intraday_desk_enabled as boolean;
+      state.swing = body.swing_desk_enabled as boolean;
+      await route.fulfill({ json: body });
+    } else {
+      await route.fulfill({ json: controls() });
+    }
+  });
+  return puts;
+}
+
+async function shot(page: Page, name: string) {
+  const dir = process.env.SCREENSHOT_DIR;
+  if (dir) await page.screenshot({ path: `${dir}/${name}.png`, fullPage: false });
+}
+
+test.describe("Trading desks", () => {
+  test("the usual state shows no banner and the whole menu", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockDesks(page, { intraday: true, swing: false });
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: "Scanner & Universe", exact: true })).toBeVisible();
+    await expect(page.getByTestId("scanner-card")).toBeVisible();
+    await expect(page.getByTestId("desk-banner")).toHaveCount(0);
+  });
+
+  test("intraday off hides the intraday screens and says what still runs", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockDesks(page, { intraday: false, swing: true });
+    await page.goto("/");
+    const banner = page.getByTestId("desk-banner");
+    await expect(banner).toContainText("Intraday trading is off");
+    await expect(banner).toContainText("keep their stops");
+    await expect(page.getByRole("button", { name: "Scanner & Universe", exact: true })).toHaveCount(0);
+    await expect(page.getByTestId("scanner-card")).toHaveCount(0);
+    await shot(page, "desk-intraday-off");
+  });
+
+  test("both desks off is said in red on every page", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockDesks(page, { intraday: false, swing: false });
+    await page.goto("/");
+    await expect(page.getByTestId("desk-banner")).toContainText("Both trading desks are off");
+    await go(page, "Settings");
+    await expect(page.getByTestId("desk-banner")).toContainText("Both trading desks are off");
+  });
+
+  test("a switch asks first, then saves that one change and nothing else", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const puts = await mockDesks(page, { intraday: true, swing: false });
+    await page.goto("/");
+    await go(page, "Settings");
+    const card = page.getByTestId("desk-intraday");
+    await expect(card).toContainText("ON");
+    await shot(page, "desk-settings");
+
+    await card.getByRole("button", { name: "Turn off" }).click();
+    await expect(card).toContainText("Positions already open are not abandoned");
+    await shot(page, "desk-confirm");
+    expect(puts).toHaveLength(0);
+
+    await card.getByRole("button", { name: "Yes, turn it off" }).click();
+    await expect(card).toContainText("OFF");
+    expect(puts).toHaveLength(1);
+    const saved = Object.fromEntries(MOCK_CATALOG.settings.map((item) => [item.key, item.value]));
+    expect(puts[0]).toEqual({ ...saved, intraday_desk_enabled: false, swing_desk_enabled: false });
+    await expect(page.getByTestId("desk-banner")).toContainText("Both trading desks are off");
+  });
+
+  test("a switch is not saved alongside another unsaved edit", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const puts = await mockDesks(page, { intraday: true, swing: false });
+    await page.goto("/");
+    await go(page, "Settings");
+    await page.getByLabel("Use intraday leverage").click();
+    const card = page.getByTestId("desk-intraday");
+    await card.getByRole("button", { name: "Turn off" }).click();
+    await card.getByRole("button", { name: "Yes, turn it off" }).click();
+    await expect(page.getByText("Save or discard your other changes first")).toBeVisible();
+    expect(puts).toHaveLength(0);
+  });
+});

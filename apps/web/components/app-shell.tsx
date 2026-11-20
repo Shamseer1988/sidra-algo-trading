@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Activity, BellRing, Database, Radio, RefreshCw, Wifi } from "lucide-react";
 
 import { api, ApiError, type DataQuality, type MarketRegime, type MarketSession, type Overview, type PaperSignal, type SafetyStatus, type ScannerStatus, type TelegramStatus, type TradingControls, type User } from "./api";
+import { DeskBanner } from "./layout/desk-banner";
 import { TerminalHeader } from "./layout/terminal-header";
 import { TerminalSidebar } from "./layout/terminal-sidebar";
 import { Dashboard } from "../features/dashboard/dashboard";
@@ -30,7 +31,8 @@ import { SignalsPanel } from "../features/signals/signals-panel";
 import { StrategiesPanel } from "../features/strategies/strategies-panel";
 import { SystemHealthPanel } from "../features/system/system-health-panel";
 import { WorkspaceTabs } from "./layout/workspace-tabs";
-import { defaultTab, workspaceTabs, type WorkspaceId } from "../lib/navigation";
+import { deskState, deskVisible } from "../lib/desks";
+import { defaultTab, navigationSections, workspaceTabs, type WorkspaceId } from "../lib/navigation";
 import { CheckCircle2, XCircle, Info, X } from "lucide-react";
 
 type ToastKind = "success" | "error" | "info";
@@ -104,6 +106,15 @@ export function AppShell() {
   }, []);
 
   useEffect(() => { void load(); const interval = window.setInterval(() => void load(), 15000); return () => window.clearInterval(interval); }, [load]);
+  // A desk switch saved in Settings reloads the shell at once rather than at the
+  // next 15-second poll, so the menu and the banner never contradict the switch.
+  useEffect(() => { const reload = () => void load(); window.addEventListener("sidra:controls-saved", reload); return () => window.removeEventListener("sidra:controls-saved", reload); }, [load]);
+  const desks = useMemo(() => deskState(controls), [controls]);
+  // A screen whose desk was just switched off is not left on display.
+  useEffect(() => {
+    const item = navigationSections.flatMap((section) => section.items).find((entry) => entry.id === active);
+    if (item && !deskVisible(item.desk, desks)) { setActive("dashboard"); setTab(defaultTab("dashboard")); }
+  }, [active, desks]);
   useEffect(() => { if (user) void loadMarketState(); }, [loadMarketState, user]);
   useEffect(() => {
     if (!user) return;
@@ -146,7 +157,7 @@ export function AppShell() {
   let content: ReactNode;
   switch (active) {
     case "dashboard":
-      content = <Dashboard services={services} scanner={scanner} safety={safety} signals={signals} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} />;
+      content = <Dashboard services={services} scanner={scanner} safety={safety} signals={signals} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} intraday={desks.intraday} />;
       break;
     case "strategies":
       content = <StrategiesPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
@@ -202,7 +213,7 @@ export function AppShell() {
       break;
   }
 
-  return <main className="min-h-screen bg-terminal-950 text-slate-200"><TerminalSidebar active={active} collapsed={collapsed} menuOpen={menuOpen} user={user} onSelect={selectWorkspace} onToggle={() => setCollapsed((value) => !value)} onSignOut={() => void signOut()} /><div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}><TerminalHeader active={active} overview={overview} scanner={scanner} safety={safety} user={user} onOpenNavigation={() => setMenuOpen((value) => !value)} onOpenControls={() => selectWorkspace("risk")} /><div className="mx-auto max-w-[1600px] p-4 sm:p-6">{tabs && showing && <WorkspaceTabs tabs={tabs} active={showing} onSelect={setTab} actions={active === "orders" ? <SourceToggle source={orderSource.source} setSource={orderSource.setSource} /> : active === "reports" ? <SourceToggle source={reportSource.source} setSource={reportSource.setSource} /> : null} />}{content}</div></div><Toaster toasts={toasts} onDismiss={dismissToast} /></main>;
+  return <main className="min-h-screen bg-terminal-950 text-slate-200"><TerminalSidebar active={active} collapsed={collapsed} menuOpen={menuOpen} user={user} desks={desks} onSelect={selectWorkspace} onToggle={() => setCollapsed((value) => !value)} onSignOut={() => void signOut()} /><div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}><TerminalHeader active={active} overview={overview} scanner={scanner} safety={safety} user={user} onOpenNavigation={() => setMenuOpen((value) => !value)} onOpenControls={() => selectWorkspace("risk")} /><div className="mx-auto max-w-[1600px] p-4 sm:p-6"><DeskBanner state={desks} onOpenSettings={() => { setActive("settings"); setTab("trading"); setMenuOpen(false); }} />{tabs && showing && <WorkspaceTabs tabs={tabs} active={showing} onSelect={setTab} actions={active === "orders" ? <SourceToggle source={orderSource.source} setSource={orderSource.setSource} /> : active === "reports" ? <SourceToggle source={reportSource.source} setSource={reportSource.setSource} /> : null} />}{content}</div></div><Toaster toasts={toasts} onDismiss={dismissToast} /></main>;
 }
 
 function Toaster({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {

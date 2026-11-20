@@ -1,10 +1,15 @@
 "use client";
 
-import { AlertTriangle, RotateCcw, Save, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Power, RotateCcw, Save, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api, type EffectiveLimits, type RiskPreset, type SettingSpec, type SettingsCatalog } from "../../components/api";
+import { switchConsequence, type Desk } from "../../lib/desks";
 import { ControlField, dirtyKeys } from "./control-field";
+
+/** The group the desk switches live in; drawn as its own card, not as two checkboxes. */
+const DESKS_GROUP = "TRADING_DESKS";
+const DESK_KEYS: Record<string, Desk> = { intraday_desk_enabled: "intraday", swing_desk_enabled: "swing" };
 
 /**
  * The trading controls, rendered from the server's description of them.
@@ -37,7 +42,7 @@ function derivedValue(spec: SettingSpec, draft: Record<string, unknown>, effecti
   return null;
 }
 
-export function TradingControlsForm({ isAdmin, onMessage }: { isAdmin: boolean; onMessage: (message: string) => void }) {
+export function TradingControlsForm({ isAdmin, onMessage }: { isAdmin: boolean; onMessage: (message: string, kind?: "success" | "error" | "info") => void }) {
   const [catalog, setCatalog] = useState<SettingsCatalog | null>(null);
   const [presets, setPresets] = useState<RiskPreset[]>([]);
   const [draft, setDraft] = useState<Record<string, unknown>>({});
@@ -105,10 +110,42 @@ export function TradingControlsForm({ isAdmin, onMessage }: { isAdmin: boolean; 
     }
   }
 
+  /**
+   * Flip one desk switch and save it on its own.
+   *
+   * Built from the saved values, not the draft, so nothing else rides along:
+   * one change per decision. Other unsaved edits on the page are refused rather
+   * than silently included or silently dropped.
+   */
+  async function saveDesk(key: string, turningOn: boolean): Promise<boolean> {
+    if (!catalog || !isAdmin) return false;
+    const others = dirty.filter((item) => item !== key);
+    if (others.length) {
+      onMessage("Save or discard your other changes first, so this switch is saved on its own.");
+      return false;
+    }
+    const saved = Object.fromEntries(catalog.settings.map((item) => [item.key, item.value]));
+    try {
+      await api.updateControls({ ...saved, [key]: turningOn } as never);
+      const label = catalog.settings.find((item) => item.key === key)?.label ?? key;
+      onMessage(`${label} is now ${turningOn ? "on" : "off"}.`, "success");
+      window.dispatchEvent(new Event("sidra:controls-saved"));
+      await load();
+      return true;
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "Could not save the switch");
+      return false;
+    }
+  }
+
   if (!catalog) return <p className="mt-6 text-sm text-slate-500">Loading trading controls…</p>;
+
+  const deskSpecs = catalog.settings.filter((item) => item.group === DESKS_GROUP && item.key in DESK_KEYS);
 
   return (
     <section className="mt-6 max-w-5xl space-y-6">
+      {deskSpecs.length > 0 && <DesksCard specs={deskSpecs} isAdmin={isAdmin} onSave={saveDesk} />}
+
       <EffectiveSummary effective={catalog.effective} />
 
       <CapitalRescaleNotice
@@ -148,6 +185,7 @@ export function TradingControlsForm({ isAdmin, onMessage }: { isAdmin: boolean; 
       )}
 
       {catalog.group_order.map((group) => {
+        if (group === DESKS_GROUP) return null;
         const items = catalog.settings.filter((item) => item.group === group);
         if (!items.length) return null;
         return (
@@ -326,5 +364,83 @@ function Metric({ label, value, note, tone }: { label: string; value: string; no
       <p className={`mt-2 numeric text-xl font-semibold ${tone === "warn" ? "text-amber-300" : "text-white"}`}>{value}</p>
       <p className="mt-1 text-xs text-slate-500">{note}</p>
     </div>
+  );
+}
+
+
+/**
+ * One card per desk: what it does, whether it is on, and a switch that asks
+ * first. The words come from the server's catalogue; the consequence of
+ * flipping it is spelled out before anything is saved.
+ */
+function DesksCard({
+  specs,
+  isAdmin,
+  onSave,
+}: {
+  specs: SettingSpec[];
+  isAdmin: boolean;
+  onSave: (key: string, turningOn: boolean) => Promise<boolean>;
+}) {
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  return (
+    <article className="panel p-5 sm:p-7" data-testid="desks-card">
+      <p className="eyebrow">What this account trades</p>
+      <h3 className="mt-1 text-base font-semibold text-white">Trading desks</h3>
+      <p className="mt-1 text-xs leading-5 text-slate-400">
+        Switching a desk off stops new trades on it. It never abandons a position that is already open.
+      </p>
+      <div className="mt-5 grid gap-4 lg:grid-cols-2">
+        {specs.map((spec) => {
+          const desk = DESK_KEYS[spec.key];
+          const on = spec.value === true;
+          const asking = confirming === spec.key;
+          return (
+            <div key={spec.key} className="glass-inset rounded-md p-4" data-testid={`desk-${desk}`}>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold text-white">{spec.label}</p>
+                <span className={`status-pill ${on ? "status-good" : "status-watch"}`}>{on ? "ON" : "OFF"}</span>
+              </div>
+              <p className="mt-2 text-xs leading-5 text-slate-400">{spec.help}</p>
+              {desk === "swing" && (
+                <p className="mt-2 text-xs font-medium text-sky-300">Not live yet — no swing order reaches the broker.</p>
+              )}
+              {isAdmin && !asking && (
+                <button onClick={() => setConfirming(spec.key)} className="secondary-button mt-4">
+                  <Power className="h-4 w-4" />
+                  {on ? "Turn off" : "Turn on"}
+                </button>
+              )}
+              {isAdmin && asking && (
+                <div className="mt-4 rounded-md border border-amber-500/30 bg-amber-950/20 p-3" role="alertdialog">
+                  <p className="text-sm font-semibold text-amber-100">
+                    Turn {spec.label.toLowerCase()} {on ? "off" : "on"}?
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-slate-300">{switchConsequence(desk, !on)}</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      disabled={busy}
+                      onClick={async () => {
+                        setBusy(true);
+                        const done = await onSave(spec.key, !on);
+                        setBusy(false);
+                        if (done) setConfirming(null);
+                      }}
+                      className={on ? "danger-button" : "primary-button"}
+                    >
+                      Yes, turn it {on ? "off" : "on"}
+                    </button>
+                    <button disabled={busy} onClick={() => setConfirming(null)} className="secondary-button">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </article>
   );
 }
