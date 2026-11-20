@@ -6,6 +6,8 @@ import { api, type AuditLog, type BrokerControls, type TelegramStatus, type User
 import { AlertsPanel } from "../controls/control-panel";
 import type { WorkspaceId } from "../../lib/navigation";
 import { formatIstTimestamp } from "../../lib/formatting";
+import type { DeskState } from "../../lib/desks";
+import { ChargesForm } from "./charges-form";
 import { IndicatorSettingsForm } from "./indicator-settings-form";
 import { TradingControlsForm } from "./trading-controls-form";
 
@@ -30,6 +32,10 @@ const TAB_COPY: Record<string, { title: string; copy: string }> = {
     title: "Indicator periods",
     copy: "The ruler every strategy, the universe builder and the backtester measure with. Changing one changes what a signal means, so they take effect from the next session.",
   },
+  charges: {
+    title: "Charges",
+    copy: "What a trade costs: brokerage, taxes and fees, one rate card per desk. Paper fills, backtests and reports charge these figures; orders and live limits never read them. Check them against a contract note.",
+  },
   alerts: {
     title: "Alerts",
     copy: "Where this system tells you what it did. Alerts are outbound only; the inbound controls are what let you answer an approval request from your phone.",
@@ -52,6 +58,7 @@ export function SettingsPanel({
   telegram,
   onTelegram,
   onRegisterWebhook,
+  desks = { intraday: true, swing: false },
 }: {
   tab: string;
   isAdmin: boolean;
@@ -60,6 +67,7 @@ export function SettingsPanel({
   telegram: TelegramStatus;
   onTelegram: () => void;
   onRegisterWebhook: () => void;
+  desks?: DeskState;
 }) {
   const meta = TAB_COPY[tab] ?? TAB_COPY.trading;
   return (
@@ -74,6 +82,8 @@ export function SettingsPanel({
 
       {tab === "indicators" ? (
         <IndicatorSettingsForm isAdmin={isAdmin} onMessage={onMessage} />
+      ) : tab === "charges" ? (
+        <ChargesForm isAdmin={isAdmin} desks={desks} onMessage={onMessage} />
       ) : tab === "alerts" ? (
         <AlertsPanel telegram={telegram} isAdmin={isAdmin} onTelegram={onTelegram} onRegisterWebhook={onRegisterWebhook} />
       ) : tab === "data" ? (

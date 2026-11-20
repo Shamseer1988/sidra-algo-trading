@@ -58,6 +58,7 @@ async def main() -> int:
 
     from app.core.config import get_settings
     from app.db.session import SessionLocal
+    from app.services.charges import swing_charges
     from app.services.swing_backtest import SwingRules, metrics, run_backtest, split
     from app.services.swing_data import load_adjusted_daily
     from app.services.swing_strategies import STRATEGIES
@@ -70,6 +71,8 @@ async def main() -> int:
     rules = SwingRules(strategies=tuple(args.strategies or STRATEGIES))
 
     async with SessionLocal() as session:
+        # Settings > Charges, the same card the swing paper desk uses.
+        card = await swing_charges(session)
         benchmark = await load_adjusted_daily(session, settings.upstox_nifty_benchmark_key, from_date=from_date)
         universe = {
             member.instrument_token: await load_adjusted_daily(session, member.instrument_token, from_date=from_date)
@@ -83,7 +86,7 @@ async def main() -> int:
     sectors = {member.instrument_token: member.industry for member in members}
     symbols = {member.instrument_token: member.symbol for member in members}
 
-    result = run_backtest(universe, sectors, benchmark, rules=rules)
+    result = run_backtest(universe, sectors, benchmark, rules=rules, costs=card.cost_model())
     cut, inside, outside = split(result, 0.7)
 
     print(RULE + f"\nSWING BACKTEST {benchmark[0].session_date} -> {benchmark[-1].session_date}\n" + RULE)
@@ -95,6 +98,10 @@ async def main() -> int:
         f"  limits           : {rules.max_open_positions} open, {rules.max_per_sector} per sector, heat {rules.heat_cap_percent}%"
     )
     print(f"  strategies       : {', '.join(rules.strategies)}")
+    print(
+        f"  charges          : brokerage Rs {card.brokerage_per_order:g}/order, DP Rs {card.dp_charge_per_sale:g}/sale,"
+        f" STT {card.stt_percent:g}% each side (Settings > Charges)"
+    )
     print(f"  out-of-sample    : entries from {cut} on")
     print()
     print(
