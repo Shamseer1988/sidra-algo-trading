@@ -53,6 +53,7 @@ export function Dashboard({
   onStart,
   onStop,
   onRefresh,
+  intraday = true,
 }: {
   services: readonly Service[];
   scanner: ScannerStatus;
@@ -62,6 +63,8 @@ export function Dashboard({
   onStart: () => void;
   onStop: () => void;
   onRefresh: () => void;
+  /** False while the intraday desk is switched off: its scanner and signals are not shown. */
+  intraday?: boolean;
 }) {
   // Read from the backend rather than asserted. These were Release-1 constants,
   // which meant the panel kept reporting a locked paper system after the lock
@@ -101,15 +104,16 @@ export function Dashboard({
         </div>
       )}
 
-      <section className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Metric label="Qualified signals" value={String(signals.length)} note={`${longSignals} long · ${shortSignals} short`} />
+      <section className={`mt-5 grid gap-3 sm:grid-cols-2 ${intraday ? "xl:grid-cols-4" : "xl:grid-cols-3"}`}>
+        {intraday && <Metric label="Qualified signals" value={String(signals.length)} note={`${longSignals} long · ${shortSignals} short`} />}
         <Metric label="Telegram delivery" value={String(alerted)} note="Paper alerts confirmed" />
         <Metric label="Paper tracking" value={safety.paper_tracking_enabled ? "ACTIVE" : "PAUSED"} note="Journal and notifications" />
         <Metric label="Live execution" value={liveValue} note={liveNote} />
       </section>
 
-      <section className="mt-4 grid gap-4 xl:grid-cols-[1.25fr_.75fr]">
-        <article className="panel overflow-hidden">
+      <section className={`mt-4 grid gap-4 ${intraday ? "xl:grid-cols-[1.25fr_.75fr]" : ""}`}>
+        {intraday && (
+        <article className="panel overflow-hidden" data-testid="scanner-card">
           <div className="flex items-center justify-between border-b border-slate-800 px-5 py-4">
             <div>
               <p className="eyebrow">Scanner engine</p>
@@ -131,6 +135,7 @@ export function Dashboard({
             )}
           </div>
         </article>
+        )}
 
         <article className="panel p-5">
           <div className="flex items-start justify-between">

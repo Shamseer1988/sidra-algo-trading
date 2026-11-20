@@ -15,6 +15,7 @@ from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, Tradi
 from app.core.config import Settings
 from app.db.models import ApplicationSetting, PaperSignal, ScannerEvaluation, ScanUniverseEntry, TelegramAlert
 from app.db.session import SessionLocal
+from app.services.desks import INTRADAY_DESK, desk_enabled
 from app.services.entry_gate import entry_gate
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_execution import PaperOrderManager
@@ -635,6 +636,11 @@ class PaperScannerOrchestrator:
             return
         # Loaded before the universe gate, which now reads its switch from it.
         controls = await self._controls()
+        # Every strategy this scanner evaluates trades on the intraday desk. With
+        # that desk switched off nothing new is opened; positions already open
+        # are closed by the exit sweep, which does not run through here.
+        if not desk_enabled(controls, INTRADAY_DESK):
+            return
         if not await self._in_active_universe(candle, controls):
             return
         if not await self._tracking_active():

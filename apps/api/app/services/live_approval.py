@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings
 from app.db.models import LiveOrderApproval, LiveOrderSubmission, PaperSignal
 from app.services.broker_adapter import BrokerAdapter, BrokerOrderDescription
+from app.services.desks import normalise_desk
 from app.services.live_execution import submit_live_order
 from app.services.live_orders import LiveOrderRequest
 from app.services.live_protection import protect_after_fill
@@ -187,12 +188,16 @@ async def request_live_approval(
     return approval
 
 
-def _request_from(approval: LiveOrderApproval) -> LiveOrderRequest:
+def _request_from(approval: LiveOrderApproval, desk: str | None = None) -> LiveOrderRequest:
     """Rebuild the order from the approval, in the terms it was recorded in.
 
     Rebuilt rather than carried in memory because the operator's answer may
     arrive in a different process, minutes later. The row is the only thing both
     sides of that gap agree on.
+
+    The desk is not on the approval row; the caller reads it from the signal.
+    Without it an approved swing entry would be recorded as intraday, and the
+    intraday exits would then treat a delivery holding as theirs to close.
     """
     return LiveOrderRequest(
         instrument_token=approval.instrument_token,
@@ -201,6 +206,7 @@ def _request_from(approval: LiveOrderApproval) -> LiveOrderRequest:
         order_type=approval.price_type,
         product=approval.product,
         price=approval.price,
+        desk=normalise_desk(desk),
     )
 
 
@@ -277,10 +283,15 @@ async def decide_live_approval(
     # the allocation check then bounds it by what is already spent, which is the
     # only honest reading when the order's own risk is unknown.
     candidate_risk: Decimal | None = None
+    desk: str | None = None
     if approval.paper_signal_id is not None:
-        candidate_risk = await session.scalar(
-            select(PaperSignal.risk_amount).where(PaperSignal.id == approval.paper_signal_id)
-        )
+        row = (
+            await session.execute(
+                select(PaperSignal.risk_amount, PaperSignal.desk).where(PaperSignal.id == approval.paper_signal_id)
+            )
+        ).first()
+        if row is not None:
+            candidate_risk, desk = row
         if candidate_risk is not None:
             candidate_risk = Decimal(str(candidate_risk))
 
@@ -290,7 +301,7 @@ async def decide_live_approval(
         adapter,
         redis,
         approval_mode=approval_mode,
-        request=_request_from(approval),
+        request=_request_from(approval, desk),
         operator_approved=True,
         paper_signal_id=approval.paper_signal_id,
         approval_reference=approval.reference_id,

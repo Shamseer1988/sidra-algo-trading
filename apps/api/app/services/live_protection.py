@@ -44,7 +44,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings
 from app.db.models import LiveOrderSubmission, PaperSignal
-from app.services.broker_adapter import BUY, INTRADAY, OPEN_STATUSES, SELL, BrokerAdapter
+from app.services.broker_adapter import BUY, OPEN_STATUSES, SELL, BrokerAdapter
+from app.services.desks import ExitProductUnknownError, exit_product, normalise_desk
 from app.services.live_orders import (
     ACCEPTED,
     UNKNOWN,
@@ -204,6 +205,7 @@ async def _place_exit(
     trigger_price: Decimal,
     paper_signal_id: Any,
     tick: Decimal = TICK,
+    desk: str | None = None,
 ) -> tuple[str, list[str], str]:
     """Write the exit down, commit, then send it. Returns (status, ids, detail).
 
@@ -222,6 +224,7 @@ async def _place_exit(
         price=Decimal("0"),
         trigger_price=trigger_price,
         tick=tick,
+        desk=normalise_desk(desk),
     )
     client_order_id = new_client_order_id()
     description = await adapter.describe(request.to_broker_order(client_order_id))
@@ -464,12 +467,20 @@ async def _protect(
     # 'I'" and refused both the stop AND the close that would have covered for
     # it. INTRADAY is the fallback only for rows written before the snapshot
     # carried this, and it is what every order this system places uses.
+    #
+    # On the intraday desk only. A swing entry with no readable product gets no
+    # guessed stop: an INTRADAY sell-stop behind delivery shares opens a short
+    # when it triggers. The operator is told instead (app.services.desks).
+    try:
+        product = exit_product(submission.desk, submission.canonical_product).product
+    except ExitProductUnknownError as exc:
+        return ProtectionOutcome(False, "product_unknown", str(exc), int(abs(net)))
     return await protect_position(
         session,
         adapter,
         signal=signal,
         net=net,
-        product=submission.canonical_product or INTRADAY,
+        product=product,
         symbol=symbol,
     )
 
@@ -529,6 +540,7 @@ async def protect_position(
             trigger_price=stop_price,
             paper_signal_id=signal.id,
             tick=tick,
+            desk=signal.desk,
         )
         if status == ACCEPTED:
             logger.info(
@@ -567,6 +579,7 @@ async def protect_position(
         trigger_price=Decimal("0"),
         paper_signal_id=signal.id,
         tick=tick,
+        desk=signal.desk,
     )
     if close_status == ACCEPTED:
         return ProtectionOutcome(

@@ -282,6 +282,11 @@ class PaperSignal(TimestampMixin, Base):
     strategy_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     indicator_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
     alert_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Which book this signal belongs to: INTRADAY or SWING (app.services.desks).
+    # Written when the signal is, never inferred later -- the product cannot
+    # tell the desks apart, because intraday without leverage is DELIVERY too.
+    # Every row older than the column is intraday, hence the server default.
+    desk: Mapped[str] = mapped_column(String(16), default="INTRADAY", server_default="INTRADAY")
 
 
 class ScannerEvaluation(TimestampMixin, Base):
@@ -829,6 +834,11 @@ class LiveOrderSubmission(Base):
     oms_order_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("oms_orders.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # The book this order belongs to (app.services.desks). On the order itself,
+    # not only on its signal, because exits and stops must know it even when the
+    # signal link is null -- an exit sent with the wrong product either fails or
+    # opens a position in the other direction.
+    desk: Mapped[str] = mapped_column(String(16), default="INTRADAY", server_default="INTRADAY")
     approval_reference: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
 
     # Which broker this went to. Recorded rather than inferred: once an operator

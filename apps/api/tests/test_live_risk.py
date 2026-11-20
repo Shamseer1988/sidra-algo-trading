@@ -174,6 +174,7 @@ async def authorize(
     allocated=None,
     candidate_risk=None,
     in_flight=None,
+    desk=None,
     **overrides,
 ):
     monkeypatch.setattr("app.services.live_risk.inspect_live_readiness", readiness(ready))
@@ -196,6 +197,7 @@ async def authorize(
         description=description,
         record_halt=record_halt,
         candidate_risk=candidate_risk,
+        desk=desk,
     )
 
 
@@ -574,7 +576,7 @@ async def test_room_under_the_live_position_limit_authorises(monkeypatch: pytest
 
 def flight(token: str) -> SimpleNamespace:
     """A live submission row as live_entries_in_flight reads it."""
-    return SimpleNamespace(instrument_token=token)
+    return SimpleNamespace(instrument_token=token, desk="INTRADAY")
 
 
 async def test_an_entry_in_flight_fills_the_last_slot(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -898,3 +900,64 @@ async def test_the_live_band_is_the_same_function_paper_uses(monkeypatch: pytest
     from app.services.risk_engine import outside_price_band as paper_side
 
     assert paper_side is outside_price_band
+
+
+# --- the desk (step 0.3) ------------------------------------------------------
+#
+# Every limit in this engine is the intraday desk's. The swing desk has none of
+# its own yet, so a swing order is refused outright; and a position the swing
+# desk opened today must not use up the intraday desk's slots.
+
+
+async def test_an_order_with_no_desk_is_judged_as_intraday(monkeypatch: pytest.MonkeyPatch) -> None:
+    decision = await authorize(monkeypatch)
+    assert decision.authorized is True
+    assert {"live_allocation", "live_positions"} <= {item.key for item in decision.checks}
+
+
+async def test_a_swing_order_is_refused_until_the_swing_desk_has_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    decision = await authorize(monkeypatch, desk="SWING")
+    assert decision.authorized is False
+    assert "swing desk has no live risk limits" in check(decision, "desk").detail
+    # Not judged against the intraday desk's numbers either.
+    assert not {"live_allocation", "live_positions"} & {item.key for item in decision.checks}
+
+
+async def test_a_misspelt_desk_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    decision = await authorize(monkeypatch, desk="SWNG")
+    assert decision.authorized is False
+    assert check(decision, "desk").passed is False
+
+
+async def test_a_position_the_swing_desk_opened_does_not_fill_an_intraday_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def swing_owned(_session, _day, desk="INTRADAY"):  # noqa: ANN001
+        return {"NSE_EQ|INE245A01021"}
+
+    monkeypatch.setattr("app.services.live_risk.other_desk_tokens", swing_owned)
+    decision = await authorize(
+        monkeypatch,
+        client=FakeClient(positions=[position("TATAPOWER-EQ", token="NSE_EQ|INE245A01021")]),
+        controls=limits(maximum_open_positions=1),
+    )
+    positions = check(decision, "live_positions")
+    assert positions.passed is True
+    assert positions.data["open_positions"] == 0
+
+
+async def test_without_a_swing_owner_the_same_position_still_fills_the_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control for the test above: the exclusion is the desk, nothing else."""
+    decision = await authorize(
+        monkeypatch,
+        client=FakeClient(positions=[position("TATAPOWER-EQ", token="NSE_EQ|INE245A01021")]),
+        controls=limits(maximum_open_positions=1),
+    )
+    assert check(decision, "live_positions").passed is False
+
+
+async def test_an_intraday_order_is_refused_while_the_intraday_desk_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second lock: an approval answered after the switch went off."""
+    decision = await authorize(monkeypatch, controls=limits(intraday_desk_enabled=False))
+    assert decision.authorized is False
+    assert "Intraday trading is switched off" in check(decision, "desk").detail

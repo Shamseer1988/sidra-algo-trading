@@ -140,6 +140,7 @@ def signal(
         target_price=Decimal(target),
         created_at=datetime.now(UTC) - timedelta(minutes=minutes_ago),
         strategy_snapshot={"effective_controls": {"exit_rules": rules} if rules else {}},
+        desk="INTRADAY",
     )
 
 
@@ -1406,3 +1407,94 @@ async def test_a_top_up_leaves_out_what_another_trade_already_covers(wiring, mon
     await sweep(wiring)
     assert len(calls) == 1
     assert calls[0]["net"] == Decimal("43")
+
+
+# --- the desk decides what an unreadable product means (step 0.2, change 2) ---
+#
+# The product is decided before anything is cancelled. Intraday falls back to
+# INTRADAY as it always did; a swing position with no recorded product is left
+# exactly as it is -- stop and all -- and reported, because cancelling first and
+# then finding no product would leave it with nothing behind it.
+
+
+def _swing(target: str = "2850"):
+    sig = signal(target=target)
+    sig.desk = "SWING"
+    return sig
+
+
+@pytest.mark.asyncio
+async def test_an_intraday_position_with_no_recorded_product_is_still_protected_as_intraday(
+    wiring, monkeypatch
+) -> None:
+    calls = []
+
+    async def spy(_session, _adapter, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(protected=True, flattened=False, detail="Stop at 2850.00.")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.signal = signal(target="2900")
+    wiring.close = Decimal("2880")
+    wiring.stops = []
+    wiring.adapter = FakeAdapter([position(Decimal("50"))], orders=[])
+    await sweep(wiring)
+    assert calls[0]["product"] == "INTRADAY"
+
+
+@pytest.mark.asyncio
+async def test_a_swing_position_with_no_recorded_product_is_not_guessed_at(wiring, monkeypatch) -> None:
+    calls = []
+
+    async def spy(_session, _adapter, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(protected=True, flattened=False, detail="")
+
+    monkeypatch.setattr(module, "protect_position", spy)
+    wiring.signal = _swing(target="2900")
+    wiring.close = Decimal("2880")
+    wiring.stops = []
+    wiring.adapter = FakeAdapter([position(Decimal("50"))], orders=[])
+    result = await sweep(wiring)
+    assert calls == []
+    assert result.exits[0].step == "product_unknown"
+    assert wiring.adapter.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_a_swing_target_with_no_recorded_product_cancels_nothing_and_sends_nothing(wiring) -> None:
+    wiring.signal = _swing(target="2850")
+    wiring.close = Decimal("2840")
+    wiring.stops = []
+    wiring.adapter = FakeAdapter([position(Decimal("-143"))])
+    result = await sweep(wiring)
+    assert result.exits[0].step == "product_unknown"
+    assert wiring.adapter.cancelled == []
+    assert wiring.adapter.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_a_swing_exit_uses_the_recorded_delivery_product_and_the_swing_desk(wiring, monkeypatch) -> None:
+    desks = []
+
+    async def prepare(_session, request, _description, **kwargs):
+        desks.append(request.desk)
+        return SimpleNamespace(client_order_id=kwargs["client_order_id"], status="PREPARED")
+
+    monkeypatch.setattr(module, "prepare_submission", prepare)
+    wiring.signal = _swing(target="2850")
+    wiring.close = Decimal("2840")
+    wiring.stops = [stop_row(product="DELIVERY")]
+    wiring.adapter = FakeAdapter([position(Decimal("-143"))])
+    await sweep(wiring)
+    assert wiring.adapter.cancelled == ["stop-1"]
+    assert wiring.adapter.submitted[0].product == "DELIVERY"
+    assert desks == ["SWING"]
+
+
+def test_a_position_left_alone_for_an_unknown_product_is_reported() -> None:
+    """Refusing to guess is only safe if someone is told the position is untouched."""
+    outcome = module.ExitSweepOutcome(
+        ran=True, step="swept", detail="", exits=[module.PositionExit("RVNL", False, "product_unknown", "x")]
+    )
+    assert [item.step for item in outcome.noteworthy] == ["product_unknown"]

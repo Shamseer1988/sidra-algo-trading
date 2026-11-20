@@ -544,3 +544,30 @@ async def test_an_approved_order_inside_the_days_allocation_still_sends(
         assert result.status == SUBMITTED
         assert len(client.placements) == 1
         await clean(session)
+
+
+async def test_an_approved_swing_entry_reaches_the_risk_engine_as_swing_and_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The approval row carries no desk; the order must take it from the signal.
+
+    Treated as intraday, an approved swing entry would be judged by the intraday
+    limits and then closed by the intraday exits at the square-off. The swing
+    desk has no live limits yet, so the risk engine refuses it -- and that
+    refusal is only reachable if the desk made it through from the signal.
+    """
+    patch_green(monkeypatch)
+    client = FakeClient()
+    async with SessionLocal() as session:
+        await clean(session)
+        await arm(session)
+        signal = await signal_row(session, "86.08")
+        signal.desk = "SWING"
+        approval = await pending_approval(session)
+        approval.paper_signal_id = signal.id
+        await session.commit()
+        result = await decide(session, client, approval.reference_id, "approve")
+        assert result.status == BLOCKED
+        assert "swing desk has no live risk limits" in result.detail
+        assert client.placements == []
+        await clean(session)

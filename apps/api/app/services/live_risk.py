@@ -55,6 +55,7 @@ from app.core.config import Settings
 from app.db.models import ApplicationSetting, ExecutionReconciliation, LiveOrderSubmission
 from app.services import daily_limits
 from app.services.broker_adapter import BrokerAdapter, BrokerOrder, BrokerOrderDescription
+from app.services.desks import INTRADAY_DESK, SWING_DESK, desk_enabled, normalise_desk
 from app.services.live_readiness import inspect_live_readiness
 from app.services.trade_counter import (
     LIVE_COMMITTED_STATUSES,
@@ -293,7 +294,7 @@ IN_FLIGHT_WINDOW_SECONDS = 120
 
 
 async def live_entries_in_flight(
-    session: AsyncSession, session_date: date, *, now: datetime | None = None
+    session: AsyncSession, session_date: date, *, now: datetime | None = None, desk: str | None = INTRADAY_DESK
 ) -> tuple[str, ...]:
     """Instruments the account has committed to opening and the broker has not
     yet reported.
@@ -333,6 +334,9 @@ async def live_entries_in_flight(
             LiveOrderSubmission.status.in_(LIVE_COMMITTED_STATUSES),
             LiveOrderSubmission.planned_risk.is_not(None),
             LiveOrderSubmission.fill_seen_at.is_(None),
+            # One desk's entries; the intraday desk by default, so the intraday
+            # position limit is not filled by swing entries. None reads both.
+            *(() if desk is None else (LiveOrderSubmission.desk == desk,)),
         )
     )
     tokens: list[str] = []
@@ -343,7 +347,9 @@ async def live_entries_in_flight(
     return tuple(tokens)
 
 
-async def live_risk_allocated_today(session: AsyncSession, session_date: date) -> tuple[Decimal, int]:
+async def live_risk_allocated_today(
+    session: AsyncSession, session_date: date, *, desk: str | None = INTRADAY_DESK
+) -> tuple[Decimal, int]:
     """Risk committed to the live account today, and how many trades carry it.
 
     Read from ``live_order_submissions`` and nothing else. No paper position,
@@ -359,6 +365,10 @@ async def live_risk_allocated_today(session: AsyncSession, session_date: date) -
     third of it. Rows sharing a signal are therefore one trade, at the largest
     risk any of them declared; a row with no signal behind it is its own trade,
     because nothing links it to another.
+
+    One desk's trades, the intraday desk's by default: the daily risk budget is
+    the intraday desk's budget, and a swing entry spending it would stop the
+    intraday desk for a reason that has nothing to do with it. None reads both.
     """
     start, end = session_bounds_utc(session_date)
     rows = (
@@ -378,6 +388,7 @@ async def live_risk_allocated_today(session: AsyncSession, session_date: date) -
                 # each read the budget as untouched.
                 LiveOrderSubmission.status.in_(LIVE_COMMITTED_STATUSES),
                 LiveOrderSubmission.planned_risk.is_not(None),
+                *(() if desk is None else (LiveOrderSubmission.desk == desk,)),
             )
         )
     ).all()
@@ -387,6 +398,36 @@ async def live_risk_allocated_today(session: AsyncSession, session_date: date) -
         declared = Decimal(str(risk))
         per_trade[key] = max(per_trade.get(key, declared), declared)
     return sum(per_trade.values(), start=Decimal("0")), len(per_trade)
+
+
+async def other_desk_tokens(session: AsyncSession, session_date: date, desk: str = INTRADAY_DESK) -> set[str]:
+    """Instruments entered today by another desk and not by this one.
+
+    The position book has no desk: a swing entry filled this morning is a row
+    beside the intraday trades. Counting it against the intraday position limit
+    and exposure ceiling would let the swing desk stop the intraday desk.
+
+    A share entered by both desks is left out of this set, so it stays in this
+    desk's count. The broker nets the two into one position, and counting it is
+    the side that refuses rather than the side that lets one more order through.
+    """
+    start, end = session_bounds_utc(session_date)
+    rows = await session.scalars(
+        select(LiveOrderSubmission).where(
+            LiveOrderSubmission.created_at >= start,
+            LiveOrderSubmission.created_at < end,
+            LiveOrderSubmission.status.in_(LIVE_COMMITTED_STATUSES),
+            LiveOrderSubmission.planned_risk.is_not(None),
+        )
+    )
+    mine: set[str] = set()
+    theirs: set[str] = set()
+    for row in rows.all():
+        token = row.instrument_token
+        if not token:
+            continue
+        (mine if normalise_desk(row.desk) == desk else theirs).add(token)
+    return theirs - mine
 
 
 async def _price_band_check(controls: Any, order: BrokerOrder) -> LiveRiskCheck:
@@ -538,7 +579,12 @@ async def _live_position_check(
             "the open position count cannot be established.",
         )
 
-    open_rows = open_positions(positions)
+    # The intraday desk's positions only. A position on a share only the swing
+    # desk entered today is the swing desk's, and is bounded by its own limits.
+    elsewhere = await other_desk_tokens(session, current_session_date())
+    open_rows = [
+        item for item in open_positions(positions) if not any(item.identifies(token, None) for token in elsewhere)
+    ]
     # Entries we have committed to that the book cannot show yet, minus any
     # that have since reached it. Matched on the token through the position
     # row's own identifies(), which is the one comparison that knows how each
@@ -627,6 +673,7 @@ async def authorize_live_order(
     description: BrokerOrderDescription,
     record_halt: bool = False,
     candidate_risk: Decimal | None = None,
+    desk: str | None = None,
 ) -> LiveRiskDecision:
     """Decide whether one specific order may be submitted right now.
 
@@ -640,9 +687,28 @@ async def authorize_live_order(
     spent. Omitted, the budget is still enforced against what is already
     allocated -- a caller that cannot say what the order risks does not get to
     skip the limit, it only loses the reservation for its own order.
+
+    ``desk`` is the book the order belongs to; missing means intraday. Every
+    limit below is the intraday desk's. The swing desk has no live limits of its
+    own yet, so a swing order is refused outright rather than judged against
+    numbers that were set for a different kind of trading. When the swing desk
+    gets its limits, they are checked here in place of that refusal.
     """
     checked_at = datetime.now(UTC)
     checks: list[LiveRiskCheck] = []
+    try:
+        desk = normalise_desk(desk)
+    except ValueError as exc:
+        desk = None
+        checks.append(LiveRiskCheck("desk", False, str(exc)))
+    if desk == SWING_DESK:
+        checks.append(
+            LiveRiskCheck(
+                "desk",
+                False,
+                "The swing desk has no live risk limits yet, so no swing order can be sent live.",
+            )
+        )
 
     readiness = await inspect_live_readiness(session, settings)
     checks.append(
@@ -692,8 +758,15 @@ async def authorize_live_order(
         # enforced only by the paper risk engine, so the real money was bounded
         # by a simulation: the two agree while nothing diverges and are
         # unrelated the moment anything does.
-        checks.append(await _live_allocation_check(session, controls, candidate_risk))
-        checks.append(await _live_position_check(session, adapter, controls, order, description))
+        if desk == INTRADAY_DESK and not desk_enabled(controls, INTRADAY_DESK):
+            # The scanner already stops offering intraday entries; this is the
+            # second lock, for an approval answered after the switch went off.
+            checks.append(
+                LiveRiskCheck("desk", False, "Intraday trading is switched off in Settings; no new intraday entries.")
+            )
+        if desk == INTRADAY_DESK:
+            checks.append(await _live_allocation_check(session, controls, candidate_risk))
+            checks.append(await _live_position_check(session, adapter, controls, order, description))
 
     failures = [check for check in checks if not check.passed]
     return LiveRiskDecision(

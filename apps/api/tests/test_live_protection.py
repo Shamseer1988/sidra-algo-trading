@@ -167,7 +167,7 @@ class FakeSession:
 
 
 def signal(stop: str = "2850.00", token: str = "NSE_EQ|INE415G01027"):
-    return SimpleNamespace(id=uuid4(), instrument_token=token, stop_price=Decimal(stop), side="SHORT")
+    return SimpleNamespace(id=uuid4(), instrument_token=token, stop_price=Decimal(stop), side="SHORT", desk="INTRADAY")
 
 
 def submission(
@@ -897,3 +897,63 @@ async def test_an_unreadable_book_counts_recorded_stops_as_working() -> None:
     adapter.orders = RuntimeError("book down")
     await protect(adapter, stops=[resting_stop()])
     assert adapter.submitted[0].quantity == 198
+
+
+# --- the desk decides what an unreadable product means (step 0.2, change 2) ---
+#
+# An intraday entry whose product cannot be read is protected as INTRADAY,
+# exactly as before. A swing entry is not: an INTRADAY sell-stop behind delivery
+# shares opens a short when it triggers, so nothing is placed and the operator
+# is told.
+
+
+def _swing_long(product: str | None):
+    sig = signal(stop="2700.00")
+    sig.side = "LONG"
+    sig.desk = "SWING"
+    sub = submission()
+    sub.transaction_type = "BUY"
+    sub.desk = "SWING"
+    canonical = {"instrumentToken": "NSE_EQ|INE415G01027"}
+    if product is not None:
+        canonical["product"] = product
+    sub.request_snapshot = {"canonical": canonical}
+    return sig, sub
+
+
+@pytest.mark.asyncio
+async def test_an_intraday_entry_with_no_readable_product_is_still_stopped_as_intraday() -> None:
+    sub = submission()
+    sub.request_snapshot = {"canonical": {"instrumentToken": "NSE_EQ|INE415G01027"}}
+    adapter = FakeAdapter([position(Decimal("-143"))], [accepted()])
+    outcome = await protect(adapter, sub=sub)
+    assert outcome.step == "stopped"
+    assert adapter.submitted[0].product == "INTRADAY"
+
+
+@pytest.mark.asyncio
+async def test_a_swing_entry_with_no_readable_product_gets_no_guessed_stop() -> None:
+    sig, sub = _swing_long(None)
+    adapter = FakeAdapter([position(Decimal("10"))], [accepted()])
+    outcome = await protect(adapter, sig=sig, sub=sub)
+    assert outcome.protected is False
+    assert outcome.step == "product_unknown"
+    assert "short" in outcome.detail
+    assert adapter.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_a_swing_stop_is_delivery_and_recorded_on_the_swing_desk(monkeypatch: pytest.MonkeyPatch) -> None:
+    desks = []
+
+    async def prepare(_session, request, _description, **kwargs):
+        desks.append(request.desk)
+        return SimpleNamespace(client_order_id=kwargs["client_order_id"], status="PREPARED")
+
+    monkeypatch.setattr(module, "prepare_submission", prepare)
+    sig, sub = _swing_long("DELIVERY")
+    adapter = FakeAdapter([position(Decimal("10"))], [accepted()])
+    outcome = await protect(adapter, sig=sig, sub=sub)
+    assert outcome.step == "stopped"
+    assert adapter.submitted[0].product == "DELIVERY"
+    assert desks == ["SWING"]

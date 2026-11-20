@@ -398,3 +398,27 @@ def test_live_trading_is_off_by_default_but_no_longer_refused() -> None:
 def test_invalid_calendar_overrides_fail_during_configuration() -> None:
     with pytest.raises(ValidationError, match="Invalid NSE holiday"):
         settings(nse_special_sessions="2026-11-08@19:00-18:00")
+
+
+async def test_the_scanner_opens_nothing_while_the_intraday_desk_is_off(monkeypatch) -> None:  # noqa: ANN001
+    """Off stops the scanner before it looks at a single strategy. Exits are not
+    scanned here, so open positions keep being closed by the exit sweep."""
+    reached: list[str] = []
+
+    async def gate(_candle, _controls):  # noqa: ANN001
+        reached.append("universe")
+        return False
+
+    for switch, expected in ((False, []), (True, ["universe"])):
+        reached.clear()
+        orchestrator = PaperScannerOrchestrator(settings(), MemoryRedis())  # type: ignore[arg-type]
+
+        async def controls(switch=switch):  # noqa: ANN001
+            return {"intraday_desk_enabled": switch}
+
+        monkeypatch.setattr(orchestrator, "_controls", controls)
+        monkeypatch.setattr(orchestrator, "_in_active_universe", gate)
+        await orchestrator.on_completed_candle(
+            candle(datetime(2026, 8, 31, 4, 0, tzinfo=UTC)), {"data_quality": {"state": "GOOD"}}
+        )
+        assert reached == expected

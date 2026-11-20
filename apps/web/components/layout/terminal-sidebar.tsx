@@ -4,6 +4,7 @@ import { Activity, ChevronDown, ChevronRight, CircleUserRound, LogOut, PanelLeft
 import { useState } from "react";
 
 import type { User } from "../api";
+import { visibleSections, type DeskState } from "../../lib/desks";
 import { navigationSections, type WorkspaceId } from "../../lib/navigation";
 
 export function TerminalSidebar({
@@ -11,6 +12,7 @@ export function TerminalSidebar({
   collapsed,
   menuOpen,
   user,
+  desks,
   onSelect,
   onToggle,
   onSignOut,
@@ -19,6 +21,7 @@ export function TerminalSidebar({
   collapsed: boolean;
   menuOpen: boolean;
   user: User;
+  desks: DeskState;
   onSelect: (workspace: WorkspaceId) => void;
   onToggle: () => void;
   onSignOut: () => void;
@@ -35,7 +38,7 @@ export function TerminalSidebar({
       </div>
 
       <nav className="terminal-nav flex-1 overflow-y-auto px-3 pb-4">
-        {navigationSections.map((section) => {
+        {visibleSections(navigationSections, desks).map((section) => {
           // A collapsible section opens itself when the active screen is inside
           // it, so arriving there from the header or a cross-link never leaves
           // the menu contradicting the page.
