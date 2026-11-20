@@ -162,6 +162,7 @@ export const workspaceTabs: Partial<Record<WorkspaceId, WorkspaceTab[]>> = {
     { id: "calendar", label: "P&L calendar" },
     { id: "pnl", label: "P&L summary" },
     { id: "quality", label: "Execution quality" },
+    { id: "diagnostics", label: "Diagnostics" },
   ],
   swing: [
     { id: "portfolio", label: "Portfolio" },

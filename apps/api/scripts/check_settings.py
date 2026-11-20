@@ -178,6 +178,21 @@ async def main() -> int:
         strategies_row = await session.get(ApplicationSetting, STRATEGIES_KEY)
         stored = strategies_row.value if strategies_row else DEFAULT_STRATEGIES
 
+        # The desk switches and each strategy's mode, first: they decide whether
+        # anything below is in play at all. Changed in Settings > Trading desks
+        # and in Strategies > Strategy control center.
+        heading("0. Trading desks and strategy modes")
+        print(f"  intraday desk              : {'ON' if controls.intraday_desk_enabled else 'OFF'}")
+        print(f"  swing desk (paper only)    : {'ON' if controls.swing_desk_enabled else 'OFF'}")
+        for item in stored:
+            configuration = StrategyConfiguration.model_validate(item)
+            mode = "OFF" if not configuration.enabled else ("LIVE" if configuration.live_orders else "PAPER")
+            print(f"  intraday  {configuration.name[:30]:30} : {mode}")
+        from app.services.swing_paper import SWING_NAMES, swing_modes
+
+        for swing_id, swing_mode in (await swing_modes(session)).items():
+            print(f"  swing     {SWING_NAMES.get(swing_id, swing_id)[:30]:30} : {swing_mode}")
+
         heading("1. What one trade risks")
         per_trade = capital * Decimal(str(controls.risk_per_trade_percent)) / 100
         print(f"  account_capital            : {capital:,.2f}")
