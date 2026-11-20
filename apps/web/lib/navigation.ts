@@ -7,6 +7,7 @@ import {
   FileBarChart,
   Ghost,
   Landmark,
+  Layers,
   LineChart,
   RadioTower,
   ScrollText,
@@ -51,6 +52,7 @@ export type WorkspaceId =
   | "reports"
   | "risk"
   | "settings"
+  | "swing"
   // Admin & diagnostics
   | "backtesting"
   | "oms"
@@ -65,8 +67,8 @@ export type WorkspaceId =
 /**
  * ``desk`` marks a screen that belongs to one trading desk; it is hidden while
  * that desk is switched off (lib/desks.ts). Untagged screens serve both desks
- * and always show. Only the scanner is intraday-only today: the rest read the
- * whole account, and the swing desk has no screens of its own yet.
+ * and always show. The scanner is intraday-only; the swing desk's paper
+ * screens are swing-only; the rest read the whole account.
  */
 export type NavigationItem = { id: WorkspaceId; label: string; icon: LucideIcon; desk?: Desk };
 export type NavigationSection = { label: string; items: NavigationItem[]; collapsible?: boolean };
@@ -84,6 +86,10 @@ export const navigationSections: NavigationSection[] = [
       { id: "risk", label: "Risk", icon: ShieldAlert },
       { id: "settings", label: "Settings", icon: Settings2 },
     ],
+  },
+  {
+    label: "Swing desk",
+    items: [{ id: "swing", label: "Swing (paper)", icon: Layers, desk: "swing" }],
   },
   {
     label: "Admin & diagnostics",
@@ -111,6 +117,7 @@ export const workspaceMeta: Record<WorkspaceId, { eyebrow: string; title: string
   reports: { eyebrow: "What the record adds up to", title: "Reports" },
   risk: { eyebrow: "Safety controls", title: "Risk" },
   settings: { eyebrow: "Configuration", title: "Settings" },
+  swing: { eyebrow: "Paper only — no real orders", title: "Swing desk" },
   backtesting: { eyebrow: "Research", title: "Backtesting" },
   oms: { eyebrow: "Execution lifecycle", title: "OMS operations" },
   shadow: { eyebrow: "Zero-submission comparison", title: "Shadow comparison" },
@@ -155,6 +162,11 @@ export const workspaceTabs: Partial<Record<WorkspaceId, WorkspaceTab[]>> = {
     { id: "calendar", label: "P&L calendar" },
     { id: "pnl", label: "P&L summary" },
     { id: "quality", label: "Execution quality" },
+  ],
+  swing: [
+    { id: "portfolio", label: "Portfolio" },
+    { id: "plan", label: "Tomorrow's plan" },
+    { id: "history", label: "History" },
   ],
   settings: [
     { id: "trading", label: "Trading controls" },

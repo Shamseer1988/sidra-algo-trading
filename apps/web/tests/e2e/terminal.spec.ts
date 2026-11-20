@@ -2294,7 +2294,7 @@ function deskSpec(key: "intraday_desk_enabled" | "swing_desk_enabled", value: bo
     label: intraday ? "Intraday trading" : "Swing trading",
     help: intraday
       ? "Buy and sell within the day; every position is closed by the square-off time. Turning this off stops new intraday trades from the next candle. Positions already open are not abandoned: their stops, targets and square-off keep working until they are closed."
-      : "Hold delivery positions for several days, protected overnight by a stop at the broker. Not ready for real money yet: until the swing desk has its own limits, every live swing order is refused, whatever this switch says.",
+      : "Hold delivery positions for several days. Paper only for now: switched on, the swing desk plans trades every evening after the close and simulates them with Rs 1,00,000 of paper money, and no swing order reaches the broker.",
     unit: "BOOLEAN",
     kind: "boolean",
     choices: [],
@@ -2410,5 +2410,143 @@ test.describe("Trading desks", () => {
     await card.getByRole("button", { name: "Yes, turn it off" }).click();
     await expect(page.getByText("Save or discard your other changes first")).toBeVisible();
     expect(puts).toHaveLength(0);
+  });
+});
+
+// --- Swing desk (paper) screens ----------------------------------------------------
+
+const SWING_POSITION = {
+  id: "p1",
+  symbol: "CGPOWER",
+  sector: "Capital Goods",
+  strategy: "swing-trend-pullback-v1",
+  status: "OPEN",
+  plan_date: "2026-11-18",
+  entry_trigger: 681.2,
+  quantity: 52,
+  initial_stop: 668.0,
+  stop: 668.0,
+  target: 707.6,
+  risk: 686.4,
+  entry_price: 681.2,
+  entry_date: "2026-11-19",
+  last_close: 702.35,
+  last_close_date: "2026-11-20",
+  unrealised: 1099.8,
+  r_now: 1.6,
+  holding_days: 1,
+  max_holding_days: 12,
+  partial_done: false,
+  next_action: "Hold",
+  exit_date: null,
+  exit_reason: null,
+  net_pnl: null,
+  charges: null,
+  reasons: { rs_vs_nifty_pct: 6.4 },
+};
+
+const SWING_SUMMARY = {
+  enabled: true,
+  paper_only: true,
+  strategies: ["swing-trend-pullback-v1"],
+  status_note: "Forward test on paper. Did not pass the backtest gate after charges.",
+  last_processed: "2026-11-20",
+  capital: 100000,
+  risk_per_trade: 750,
+  heat_cap: 4000,
+  max_open_positions: 5,
+  invested: 35422.4,
+  open_risk: 686.4,
+  unrealised: 1099.8,
+  realised: -312.5,
+  closed_trades: 2,
+  open_positions: [SWING_POSITION],
+  planned: [
+    {
+      ...SWING_POSITION,
+      id: "p2",
+      symbol: "BEL",
+      sector: "Capital Goods",
+      status: "PLANNED",
+      entry_trigger: 412.4,
+      initial_stop: 401.1,
+      target: 435.0,
+      quantity: 66,
+      risk: 745.8,
+      entry_price: null,
+      entry_date: null,
+      next_action: "Buy-stop at 412.4 next session",
+      reasons: { rs_vs_nifty_pct: 3.1, atr14: 7.5 },
+    },
+  ],
+};
+
+const SWING_HISTORY = [
+  {
+    ...SWING_POSITION,
+    id: "p3",
+    symbol: "DIXON",
+    status: "CLOSED",
+    exit_date: "2026-11-17",
+    exit_reason: "trail",
+    net_pnl: 1250.25,
+    charges: 96.4,
+  },
+  {
+    ...SWING_POSITION,
+    id: "p4",
+    symbol: "TRENT",
+    status: "CANCELLED",
+    entry_price: null,
+    exit_reason: "gapped above trigger",
+    net_pnl: null,
+    charges: null,
+  },
+];
+
+async function mockSwing(page: Page) {
+  await page.route("**/api/v1/swing/summary", async (route: Route) => {
+    await route.fulfill({ json: SWING_SUMMARY });
+  });
+  await page.route("**/api/v1/swing/history", async (route: Route) => {
+    await route.fulfill({ json: SWING_HISTORY });
+  });
+}
+
+test.describe("Swing desk (paper)", () => {
+  test("is not in the menu while the swing desk is off", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockDesks(page, { intraday: true, swing: false });
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: "Swing (paper)", exact: true })).toHaveCount(0);
+  });
+
+  test("shows the paper portfolio, plan and history, marked paper only", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockDesks(page, { intraday: true, swing: true });
+    await mockSwing(page);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Swing (paper)", exact: true }).click();
+
+    const screen = page.getByTestId("swing-workspace");
+    await expect(screen).toContainText("Paper only.");
+    await expect(screen).toContainText("No order from this desk reaches the broker");
+    await expect(page.getByTestId("swing-strategies")).toContainText("Running: Trend Pullback. Forward test on paper.");
+    const portfolio = page.getByTestId("swing-portfolio");
+    await expect(portfolio).toContainText("CGPOWER");
+    await expect(portfolio).toContainText("1.6R");
+    await shot(page, "swing-portfolio");
+
+    await page.getByRole("tab", { name: "Tomorrow's plan", exact: true }).click();
+    const plan = page.getByTestId("swing-plan");
+    await expect(plan).toContainText("BEL");
+    await expect(plan).toContainText("412.4");
+    await shot(page, "swing-plan");
+
+    await page.getByRole("tab", { name: "History", exact: true }).click();
+    const history = page.getByTestId("swing-history");
+    await expect(history).toContainText("Trailing exit");
+    await expect(history).toContainText("Not bought: Opened too far above the buy level");
+    await shot(page, "swing-history");
   });
 });

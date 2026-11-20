@@ -26,6 +26,7 @@ from app.api.routes import (
     safety,
     scanner,
     shadow,
+    swing,
     system,
     telegram,
     universe,
@@ -159,3 +160,4 @@ app.include_router(broker_books.router, prefix="/api/v1")
 app.include_router(live.router, prefix="/api/v1")
 app.include_router(live_shadow.router, prefix="/api/v1")
 app.include_router(universe.router, prefix="/api/v1")
+app.include_router(swing.router, prefix="/api/v1")

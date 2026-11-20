@@ -29,6 +29,7 @@ import { FirstockConsole } from "../features/brokers/firstock-console";
 import { SchedulerPanel } from "../features/automation/scheduler-panel";
 import { SignalsPanel } from "../features/signals/signals-panel";
 import { StrategiesPanel } from "../features/strategies/strategies-panel";
+import { SwingWorkspace } from "../features/swing/swing-workspace";
 import { SystemHealthPanel } from "../features/system/system-health-panel";
 import { WorkspaceTabs } from "./layout/workspace-tabs";
 import { deskState, deskVisible } from "../lib/desks";
@@ -183,6 +184,9 @@ export function AppShell() {
       break;
     case "settings":
       content = <SettingsPanel tab={showing ?? "trading"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} onNavigate={selectWorkspace} telegram={telegram} onTelegram={() => void telegramAction()} onRegisterWebhook={() => void registerTelegramWebhook()} />;
+      break;
+    case "swing":
+      content = <SwingWorkspace tab={showing ?? "portfolio"} onMessage={setMessage} />;
       break;
     case "backtesting":
       content = <BacktestingWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
