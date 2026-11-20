@@ -1,23 +1,38 @@
-"""Read-only views of the swing desk's paper ledger, for the Swing screens.
+"""The swing desk's paper ledger for the Swing screens, and which strategies it runs.
 
-Nothing here writes, and nothing here places, plans or cancels a trade: the
-swing worker owns the ledger. Prices for open positions are the last stored
+The ledger views write nothing, and nothing here places, plans or cancels a
+trade: the swing worker owns the ledger. The one write is a strategy's mode,
+Off or Paper, chosen in the Strategies screen and recorded like any setting. Prices for open positions are the last stored
 daily close, said as such -- the swing desk is not on the live tick feed.
 """
 
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.api.deps import CurrentUser, DbSession
-from app.db.models import ApplicationSetting, MarketCandle, SwingPaperPosition
+from app.api.deps import CurrentUser, DbSession, require_roles
+from app.db.models import ApplicationSetting, AuditLog, MarketCandle, SwingPaperPosition, User, UserRole
 from app.services.desks import SWING_DESK, desk_enabled
+from app.services.settings_history import record_revision, summarise
 from app.services.swing_backtest import SwingRules
 from app.services.swing_data import DAILY_TIMEFRAME_SECONDS
-from app.services.swing_paper import CANCELLED, CLOSED, OPEN, PAPER_STATUS, PAPER_STRATEGIES, PLANNED, last_processed
+from app.services.swing_paper import (
+    CANCELLED,
+    CLOSED,
+    OPEN,
+    PAPER_STATUS,
+    PLANNED,
+    SWING_EVIDENCE,
+    SWING_MODES,
+    SWING_MODES_KEY,
+    SWING_NAMES,
+    last_processed,
+    paper_strategies,
+    swing_modes,
+)
 
 router = APIRouter(prefix="/swing", tags=["Swing desk (paper)"])
 
@@ -55,7 +70,7 @@ class SwingPositionView(BaseModel):
 class SwingSummary(BaseModel):
     enabled: bool
     paper_only: bool = True
-    strategies: list[str] = list(PAPER_STRATEGIES)
+    strategies: list[str]
     status_note: str = PAPER_STATUS
     last_processed: date | None
     capital: float
@@ -139,7 +154,8 @@ def view(row: SwingPaperPosition, last: tuple[Decimal, date] | None = None) -> S
 @router.get("/summary", response_model=SwingSummary)
 async def summary(_: CurrentUser, session: DbSession) -> SwingSummary:
     controls = await session.get(ApplicationSetting, "trading_controls")
-    rules = SwingRules(strategies=PAPER_STRATEGIES)
+    running = await paper_strategies(session)
+    rules = SwingRules(strategies=running)
     rows = list(
         (await session.scalars(select(SwingPaperPosition).where(SwingPaperPosition.status.in_((OPEN, PLANNED))))).all()
     )
@@ -149,6 +165,7 @@ async def summary(_: CurrentUser, session: DbSession) -> SwingSummary:
     closed = list((await session.scalars(select(SwingPaperPosition).where(SwingPaperPosition.status == CLOSED))).all())
     return SwingSummary(
         enabled=desk_enabled(controls.value if controls and isinstance(controls.value, dict) else {}, SWING_DESK),
+        strategies=list(running),
         last_processed=await last_processed(session),
         capital=float(rules.capital),
         risk_per_trade=float(rules.risk_per_trade),
@@ -192,3 +209,68 @@ async def history(
         )
     ).all()
     return [view(row) for row in rows]
+
+
+class SwingStrategyView(BaseModel):
+    id: str
+    name: str
+    mode: str
+    live_available: bool = False
+    live_blocked_reason: str = "Swing live trading is not available yet: the swing desk has no live risk limits."
+    evidence: str
+
+
+class SwingModeRequest(BaseModel):
+    mode: str
+    reason: str | None = Field(default=None, max_length=300)
+
+
+@router.get("/strategies", response_model=list[SwingStrategyView])
+async def swing_strategies(_: CurrentUser, session: DbSession) -> list[SwingStrategyView]:
+    modes = await swing_modes(session)
+    return [
+        SwingStrategyView(id=name, name=SWING_NAMES.get(name, name), mode=mode, evidence=SWING_EVIDENCE.get(name, ""))
+        for name, mode in modes.items()
+    ]
+
+
+@router.put("/strategies/{strategy_id}/mode", response_model=list[SwingStrategyView])
+async def set_swing_strategy_mode(
+    strategy_id: str,
+    request: SwingModeRequest,
+    session: DbSession,
+    user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> list[SwingStrategyView]:
+    """Switch one swing strategy Off or to Paper. Live is refused, with the reason."""
+    mode = (request.mode or "").strip().upper()
+    if mode == "LIVE":
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Swing live trading is not available yet: the swing desk has no live risk limits.",
+        )
+    if mode not in SWING_MODES:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Mode must be one of {', '.join(SWING_MODES)}.")
+    before = await swing_modes(session)
+    if strategy_id not in before:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No swing strategy with that id.")
+    after = {**before, strategy_id: mode}
+    row = await session.get(ApplicationSetting, SWING_MODES_KEY)
+    if row is None:
+        session.add(ApplicationSetting(key=SWING_MODES_KEY, value=after, updated_by_user_id=user.id))
+    else:
+        row.value, row.updated_by_user_id = after, user.id
+    await record_revision(session, SWING_MODES_KEY, after, summarise(before, after), changed_by_user_id=user.id)
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            event_type="settings.swing_strategy_mode_changed",
+            metadata_json={
+                "strategy_id": strategy_id,
+                "from": before[strategy_id],
+                "to": mode,
+                "reason": request.reason,
+            },
+        )
+    )
+    await session.commit()
+    return await swing_strategies(None, session)

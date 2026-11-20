@@ -808,13 +808,42 @@ async def update_strategies(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Unsupported strategy type: {', '.join(unsupported)}",
         )
+    previous = await _stored_strategies(session)
+    # Whether a strategy runs, and whether it sends real orders, is changed by
+    # one path only: PUT /strategies/{id}/mode, which asks before going live.
+    # This save keeps both as they were for every strategy that exists, so an
+    # edit to a score or an exit rule can never turn a strategy live as a side
+    # effect. A new strategy always starts switched off and on paper -- the
+    # screen's Add button used to copy the first strategy, live flag and all.
+    guarded: list[StrategyConfiguration] = []
+    for item in strategies:
+        old = previous.get(item.id)
+        if old is None:
+            guarded.append(item.model_copy(update={"enabled": False, "live_orders": False}))
+        else:
+            guarded.append(item.model_copy(update={"enabled": old.enabled, "live_orders": old.live_orders}))
+    return await _persist_strategies(session, guarded, previous, user, "settings.strategies_updated", {})
+
+
+async def _stored_strategies(session: DbSession) -> dict[str, StrategyConfiguration]:
     setting = await session.get(ApplicationSetting, STRATEGIES_KEY)
-    previous = {
+    return {
         item.id: item
         for item in [
             StrategyConfiguration.model_validate(value) for value in (setting.value if setting else DEFAULT_STRATEGIES)
         ]
     }
+
+
+async def _persist_strategies(
+    session: DbSession,
+    strategies: list[StrategyConfiguration],
+    previous: dict[str, StrategyConfiguration],
+    user: User,
+    event_type: str,
+    extra: dict,
+) -> list[StrategyConfiguration]:
+    """Version, save, revision and audit a strategy list. The one write path for strategies."""
     normalized: list[StrategyConfiguration] = []
     for item in strategies:
         old = previous.get(item.id)
@@ -827,6 +856,7 @@ async def update_strategies(
     # record of a strategy change was the version counter going up, which says
     # that something moved and never what.
     summary = summarise_strategies([item.model_dump() for item in previous.values()], value)
+    setting = await session.get(ApplicationSetting, STRATEGIES_KEY)
     if setting is None:
         session.add(ApplicationSetting(key=STRATEGIES_KEY, value=value, updated_by_user_id=user.id))
     else:
@@ -835,16 +865,77 @@ async def update_strategies(
     session.add(
         AuditLog(
             user_id=user.id,
-            event_type="settings.strategies_updated",
+            event_type=event_type,
             metadata_json={
                 "count": len(strategies),
                 "changed_keys": summary.changed_keys,
                 "risk_increased": summary.risk_increased,
+                **extra,
             },
         )
     )
     await session.commit()
     return normalized
+
+
+STRATEGY_MODES = ("OFF", "PAPER", "LIVE")
+
+
+class StrategyModeRequest(BaseModel):
+    mode: str
+    # Required, and true, to make a strategy live. The screen sets it only after
+    # its own confirmation step; a request without it is refused, so a stray
+    # call cannot start sending real orders.
+    confirm_live: bool = False
+    reason: str | None = Field(default=None, max_length=300)
+
+
+def strategy_mode(item: StrategyConfiguration) -> str:
+    """OFF, PAPER or LIVE, from the two stored flags."""
+    if not item.enabled:
+        return "OFF"
+    return "LIVE" if item.live_orders else "PAPER"
+
+
+@router.put("/strategies/{strategy_id}/mode", response_model=list[StrategyConfiguration])
+async def set_strategy_mode(
+    strategy_id: str,
+    request: StrategyModeRequest,
+    session: DbSession,
+    user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> list[StrategyConfiguration]:
+    """Switch one intraday strategy Off, to Paper, or Live -- and nothing else.
+
+    Off: evaluates nothing. Paper: signals and paper fills only; its fills are
+    kept out of the live daily ceilings. Live: real orders, through every live
+    gate as before. Going live needs ``confirm_live``. One strategy, one change,
+    recorded with the reason given.
+    """
+    from fastapi import HTTPException, status
+
+    mode = (request.mode or "").strip().upper()
+    if mode not in STRATEGY_MODES:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Mode must be one of {', '.join(STRATEGY_MODES)}.")
+    if mode == "LIVE" and not request.confirm_live:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Going live sends real orders with real money. Confirm to continue.",
+        )
+    previous = await _stored_strategies(session)
+    current = previous.get(strategy_id)
+    if current is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No strategy with that id.")
+    before = strategy_mode(current)
+    updated = current.model_copy(update={"enabled": mode != "OFF", "live_orders": mode == "LIVE"})
+    strategies = [updated if item.id == strategy_id else item for item in previous.values()]
+    return await _persist_strategies(
+        session,
+        strategies,
+        previous,
+        user,
+        "settings.strategy_mode_changed",
+        {"strategy_id": strategy_id, "from": before, "to": mode, "reason": request.reason},
+    )
 
 
 # The feed-quality block writes its own evaluation row so that a candle nobody

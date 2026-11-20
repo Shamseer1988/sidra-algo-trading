@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 import { api, type PaperStrategy, type StrategyDefinition, type StrategyMetric } from "../../components/api";
 import { randomId } from "../../lib/formatting";
+import { StrategyControlCenter, modeOf } from "./control-center";
 import { ExitRulesFields } from "./exit-rules-fields";
 import { StrategyDetailView } from "./strategy-detail";
 
@@ -71,7 +72,9 @@ export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMe
       if (!current.length) return current;
       const type = definitions[0]?.identifier ?? current[0].strategy_type;
       const label = definitions[0]?.name ?? "Strategy";
-      return [...current, { ...current[0], id: randomId(), name: `${label} ${current.length + 1}`, strategy_type: type, enabled: false, version: 1 }];
+      // Off and on paper, always: copying the first strategy used to copy its
+      // live flag too. The server enforces the same for any new strategy.
+      return [...current, { ...current[0], id: randomId(), name: `${label} ${current.length + 1}`, strategy_type: type, enabled: false, live_orders: false, version: 1 }];
     });
   };
   const save = async () => {
@@ -89,12 +92,14 @@ export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMe
     <section>
       <div className="page-toolbar">
         <div>
-          <p className="eyebrow">Paper scanner configuration</p>
+          <p className="eyebrow">Intraday and swing</p>
           <h2 className="page-title">Strategies</h2>
-          <p className="page-copy">Versioned definitions govern deterministic paper-only evaluation. Saving a material change increments that strategy’s configuration version.</p>
+          <p className="page-copy">Choose what each strategy does in the control center: off, on paper, or live with real money. Below, tune an intraday strategy’s rules; saving a material change increments its version. Saving never changes a strategy’s mode.</p>
         </div>
         {isAdmin && <div className="flex gap-2"><button className="secondary-button" onClick={add} disabled={!items.length}><Plus className="h-4 w-4" />Add</button><button className="primary-button" onClick={() => void save()} disabled={loading}><Save className="h-4 w-4" />Save strategies</button></div>}
       </div>
+
+      {!loading && <div className="mt-5"><StrategyControlCenter strategies={items} isAdmin={isAdmin} onIntradayChanged={setItems} onMessage={onMessage} /></div>}
 
       {metrics.length > 0 && <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{metrics.map((metric) => <StrategyMetricCard key={`${metric.strategy_id}-${metric.strategy_version}`} metric={metric} />)}</div>}
 
@@ -112,7 +117,7 @@ export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMe
             </div>
             <div className="flex items-center gap-3">
               <button className="secondary-button" onClick={() => setOpened(item.id)}><FileText className="h-4 w-4" />Details</button>
-              <label className="toggle-row"><input disabled={!isAdmin} type="checkbox" checked={item.enabled} onChange={(event) => change(item.id, "enabled", event.target.checked)} /><span>{item.enabled ? "Enabled" : "Paused"}</span></label>
+              <ModeBadge mode={modeOf(item)} />
             </div>
           </div>
           <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{editable.map((key) => <label key={key} className="field-label">{key.replaceAll("_", " ")}<input disabled={!isAdmin} className="field-input mt-2" type="number" step="any" value={item[key]} onChange={(event) => change(item.id, key, event.target.value)} /></label>)}</div>
@@ -136,6 +141,13 @@ export function StrategiesPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMe
       </div>
     </section>
   );
+}
+
+/** The mode, read-only here: it is changed in the control center above, one strategy at a time. */
+function ModeBadge({ mode }: { mode: "OFF" | "PAPER" | "LIVE" }) {
+  const styles = { OFF: "status-watch", PAPER: "status-good", LIVE: "status-bad" } as const;
+  const words = { OFF: "Off", PAPER: "Paper", LIVE: "Live — real money" } as const;
+  return <span className={`status-pill ${styles[mode]}`} title="Change it in the Strategy control center">{words[mode]}</span>;
 }
 
 function StrategySkeleton() {

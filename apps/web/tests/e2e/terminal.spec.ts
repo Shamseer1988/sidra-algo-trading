@@ -302,6 +302,7 @@ const MOCK_STRATEGIES = [{
   id: "orb-default",
   name: "ORB Retest — Default",
   enabled: true,
+  live_orders: false,
   strategy_type: "orb-retest-v1",
   version: 1,
   universe: ["NSE:RELIANCE", "NSE:INFY"],
@@ -2548,5 +2549,100 @@ test.describe("Swing desk (paper)", () => {
     await expect(history).toContainText("Trailing exit");
     await expect(history).toContainText("Not bought: Opened too far above the buy level");
     await shot(page, "swing-history");
+  });
+});
+
+// --- Strategy control center (U1) ---------------------------------------------------
+
+const SWING_STRATEGIES = [
+  {
+    id: "swing-trend-pullback-v1",
+    name: "Trend Pullback",
+    mode: "PAPER",
+    live_available: false,
+    live_blocked_reason: "Swing live trading is not available yet: the swing desk has no live risk limits.",
+    evidence: "Backtest 2024-26, out-of-sample: 40 trades, -Rs 33 a trade after charges (in-sample +Rs 67).",
+  },
+  {
+    id: "swing-base-breakout-v1",
+    name: "Base Breakout",
+    mode: "OFF",
+    live_available: false,
+    live_blocked_reason: "Swing live trading is not available yet: the swing desk has no live risk limits.",
+    evidence: "Backtest 2024-26, out-of-sample: 3 trades, -Rs 354 a trade; negative in-sample too.",
+  },
+];
+
+async function mockModes(page: Page) {
+  const calls: { url: string; body: Record<string, unknown> }[] = [];
+  await page.route("**/api/v1/swing/strategies", async (route: Route) => {
+    await route.fulfill({ json: SWING_STRATEGIES });
+  });
+  await page.route("**/api/v1/swing/strategies/*/mode", async (route: Route) => {
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    calls.push({ url: route.request().url(), body });
+    await route.fulfill({ json: SWING_STRATEGIES.map((s) => (route.request().url().includes(s.id) ? { ...s, mode: body.mode } : s)) });
+  });
+  await page.route("**/api/v1/settings/strategies/*/mode", async (route: Route) => {
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    calls.push({ url: route.request().url(), body });
+    const live = body.mode === "LIVE";
+    await route.fulfill({ json: MOCK_STRATEGIES.map((s) => ({ ...s, enabled: body.mode !== "OFF", live_orders: live })) });
+  });
+  return calls;
+}
+
+test.describe("Strategy control center", () => {
+  test("lists intraday and swing strategies with what each mode means", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockModes(page);
+    await page.goto("/");
+    await go(page, "Strategies");
+    const center = page.getByTestId("strategy-control-center");
+    await expect(center).toContainText("ORB Retest — Default");
+    await expect(center).toContainText("Trend Pullback");
+    await expect(page.getByTestId("mode-row-intraday-orb-default")).toContainText("No order reaches the broker");
+    await shot(page, "u1-control-center");
+  });
+
+  test("going live asks first, says real money, and sends the confirmation", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const calls = await mockModes(page);
+    await page.goto("/");
+    await go(page, "Strategies");
+    const row = page.getByTestId("mode-row-intraday-orb-default");
+    await row.getByRole("button", { name: "Live", exact: true }).click();
+    const confirm = page.getByTestId("mode-confirm");
+    await expect(confirm).toContainText("Real money");
+    expect(calls).toHaveLength(0);
+    await shot(page, "u1-live-confirm");
+    await confirm.getByLabel("Why (kept in the change history)").fill("RS Pullback is the live one");
+    await confirm.getByRole("button", { name: "Yes, trade this live" }).click();
+    await expect(confirm).toHaveCount(0);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain("/settings/strategies/orb-default/mode");
+    expect(calls[0].body).toEqual({ mode: "LIVE", confirm_live: true, reason: "RS Pullback is the live one" });
+    await expect(row.getByRole("button", { name: "Live", exact: true })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("swing live is not offered, and paper or off is one confirmed change", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const calls = await mockModes(page);
+    await page.goto("/");
+    await go(page, "Strategies");
+    const row = page.getByTestId("mode-row-swing-swing-base-breakout-v1");
+    await expect(row.getByRole("button", { name: "Live", exact: true })).toBeDisabled();
+    await row.getByRole("button", { name: "Paper", exact: true }).click();
+    await page.getByTestId("mode-confirm").getByRole("button", { name: "Yes, set to paper" }).click();
+    expect(calls[0].url).toContain("/swing/strategies/swing-base-breakout-v1/mode");
+    expect(calls[0].body).toEqual({ mode: "PAPER", reason: null });
+  });
+
+  test("a viewer sees the modes but cannot change them", async ({ page }) => {
+    await setupMockRoutes(page, "VIEWER");
+    await mockModes(page);
+    await page.goto("/");
+    await go(page, "Strategies");
+    await expect(page.getByTestId("mode-row-intraday-orb-default").getByRole("button", { name: "Live", exact: true })).toBeDisabled();
   });
 });

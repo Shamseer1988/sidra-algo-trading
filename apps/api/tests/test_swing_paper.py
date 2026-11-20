@@ -348,4 +348,6 @@ def test_the_paper_desk_runs_trend_pullback_only_and_the_worker_says_so():
 
     assert PAPER_STRATEGIES == (TREND_PULLBACK,)
     source = (Path(__file__).resolve().parents[1] / "app" / "swing_worker.py").read_text(encoding="utf-8")
-    assert "rules=SwingRules(strategies=PAPER_STRATEGIES)" in source
+    # The worker runs what the UI chose, read once per run; the default is PAPER_STRATEGIES.
+    assert "strategies = await paper_strategies(session)" in source
+    assert "rules=SwingRules(strategies=strategies)" in source

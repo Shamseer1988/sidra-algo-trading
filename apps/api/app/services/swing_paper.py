@@ -44,7 +44,7 @@ from app.services.swing_backtest import (
     find_setups,
     regime_by_day,
 )
-from app.services.swing_strategies import STRATEGIES, TREND_PULLBACK, Series, SwingSetup
+from app.services.swing_strategies import BASE_BREAKOUT, STRATEGIES, TREND_PULLBACK, Series, SwingSetup
 
 PROGRESS_KEY = "swing_paper_progress"
 
@@ -60,6 +60,40 @@ PROGRESS_KEY = "swing_paper_progress"
 # Chosen by Shamseer on 20 Nov 2026. Not validated; paper only.
 PAPER_STRATEGIES = (TREND_PULLBACK,)
 PAPER_STATUS = "Forward test on paper. Did not pass the backtest gate after charges."
+
+# Which swing strategies run, chosen in the UI (Strategies > control center)
+# and stored under this key as {strategy id: "OFF" | "PAPER"}. The default is
+# PAPER_STRATEGIES above. "LIVE" is refused: the swing desk has no live limits.
+SWING_MODES_KEY = "swing_strategy_modes"
+SWING_MODES = ("OFF", "PAPER")
+
+# What the backtest said about each, shown beside the switch so the choice is
+# made with the evidence in view. From the NAS run on 20 Nov 2026, after charges.
+SWING_EVIDENCE = {
+    TREND_PULLBACK: "Backtest 2024-26, out-of-sample: 40 trades, -Rs 33 a trade after charges (in-sample +Rs 67).",
+    BASE_BREAKOUT: "Backtest 2024-26, out-of-sample: 3 trades, -Rs 354 a trade; negative in-sample too.",
+}
+SWING_NAMES = {TREND_PULLBACK: "Trend Pullback", BASE_BREAKOUT: "Base Breakout"}
+
+
+def default_swing_modes() -> dict[str, str]:
+    return {name: ("PAPER" if name in PAPER_STRATEGIES else "OFF") for name in STRATEGIES}
+
+
+async def swing_modes(session: AsyncSession) -> dict[str, str]:
+    """Every swing strategy's mode, the stored choice over the default."""
+    row = await session.get(ApplicationSetting, SWING_MODES_KEY)
+    stored = row.value if row and isinstance(row.value, dict) else {}
+    modes = default_swing_modes()
+    modes.update({name: mode for name, mode in stored.items() if name in modes and mode in SWING_MODES})
+    return modes
+
+
+async def paper_strategies(session: AsyncSession) -> tuple[str, ...]:
+    """The swing strategies the paper desk runs tonight."""
+    return tuple(name for name, mode in (await swing_modes(session)).items() if mode == "PAPER")
+
+
 RESULTS_AVOID_DAYS = 5  # no new plan when results are due within this many calendar days
 RESULTS_EXIT_DAYS = 3  # sell at the next open when results are due within this many
 
