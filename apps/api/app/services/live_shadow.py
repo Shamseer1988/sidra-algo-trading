@@ -54,6 +54,7 @@ from app.services.broker_adapter import (
     BrokerOrder,
     BrokerOrderDescription,
 )
+from app.services.desks import product_for_desk
 from app.services.live_risk import authorize_live_order
 from app.services.live_symbols import SymbolTranslation, translate_for_order
 
@@ -106,7 +107,7 @@ async def build_shadow_payload(
         side=side,
         quantity=int(signal.quantity),
         order_type=SHADOW_PRICE_TYPE,
-        product=product_for(intraday_leverage_enabled),
+        product=product_for_desk(signal.desk, intraday_leverage_enabled=intraday_leverage_enabled),
         price=signal.entry_price,
         # The shadow submits nothing, so the identifier only has to be a
         # plausible one for the margin question to carry.
@@ -193,6 +194,7 @@ async def evaluate_live_shadow(
         approval_mode=approval_mode,
         order=order,
         description=description,
+        desk=signal.desk,
     )
     snapshot = decision.snapshot()
     return await _persist(

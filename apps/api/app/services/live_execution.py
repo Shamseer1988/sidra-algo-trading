@@ -231,6 +231,9 @@ async def authorize_live_submission(
         # here rather than re-decided on the next order. The shadow evaluator
         # calls the same engine and deliberately does not pass this.
         record_halt=True,
+        # The desk's limits, not the other desk's; a swing order is refused
+        # until the swing desk has limits of its own.
+        desk=request.desk,
         # What this order plans to risk, so the day's live allocation is
         # checked with it included rather than only once it is spent.
         candidate_risk=candidate_risk,
