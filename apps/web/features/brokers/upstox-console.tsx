@@ -286,7 +286,7 @@ export function UpstoxConsole({
       <div className="mt-6 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 p-4 text-xs text-slate-600 dark:text-slate-400 flex items-start gap-3">
         <ShieldCheck className="h-5 w-5 text-emerald-500 shrink-0 mt-0.5" />
         <div>
-          <strong className="text-slate-900 dark:text-slate-200">Server-Side Credentials Security:</strong> Upstox API keys, secret, TOTP key, mobile number, and PIN are securely stored in the server environment (.env) and never exposed to client browsers.
+          <strong className="text-slate-900 dark:text-slate-200">Server-Side Credentials Security:</strong> Upstox API key, secret, TOTP secret, mobile number and PIN are entered in Settings › Connections (or the server&apos;s .env), stored encrypted, and never sent to a browser.
         </div>
       </div>
     </section>

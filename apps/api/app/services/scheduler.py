@@ -190,7 +190,16 @@ def _make_job_func(settings: Settings, calendar: TradingCalendar):
     """Return the coroutine that APScheduler will call on each trigger."""
 
     async def _job() -> None:
-        result = await run_upstox_auto_renewal(settings, calendar)
+        # Read at run time, so credentials entered in Settings > Connections
+        # apply from the next morning without a restart. Nothing saved there
+        # means the .env values, exactly as before.
+        from app.services.credential_store import effective_settings
+
+        effective = await effective_settings(settings)
+        if not effective.upstox_auto_auth_is_configured:
+            logger.info("scheduler.auto_renewal_not_configured")
+            return
+        result = await run_upstox_auto_renewal(effective, calendar)
         status_data = {
             "last_run_at": datetime.now(UTC).isoformat(),
             "success": result is not None,
@@ -716,18 +725,17 @@ def init_upstox_scheduler(settings: Settings) -> AsyncIOScheduler | None:
     calendar = TradingCalendar.from_settings(settings)
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
 
-    if settings.upstox_auto_auth_is_configured:
-        # Primary job: 08:30 AM IST, Monday–Friday
-        scheduler.add_job(
-            _make_job_func(settings, calendar),
-            trigger=CronTrigger(day_of_week="mon-fri", hour=8, minute=30, timezone="Asia/Kolkata"),
-            id="upstox_morning_renewal",
-            name="Upstox Morning Token Renewal (08:30 IST)",
-            replace_existing=True,
-            misfire_grace_time=3600,  # allow up to 1 hour late if container was down
-        )
-    else:
-        logger.info("scheduler.auto_auth_disabled", reason="Not all UPSTOX_AUTO_AUTH fields are configured")
+    # Primary job: 08:30 AM IST, Monday–Friday. Always scheduled: whether the
+    # credentials are complete is decided when it runs, because they can now be
+    # entered from the Connections screen after the server has started.
+    scheduler.add_job(
+        _make_job_func(settings, calendar),
+        trigger=CronTrigger(day_of_week="mon-fri", hour=8, minute=30, timezone="Asia/Kolkata"),
+        id="upstox_morning_renewal",
+        name="Upstox Morning Token Renewal (08:30 IST)",
+        replace_existing=True,
+        misfire_grace_time=3600,  # allow up to 1 hour late if container was down
+    )
 
     # After the close and after settlement has had time to happen. The job skips
     # itself on a day with no live orders, so it costs a paper deployment one
@@ -822,6 +830,9 @@ async def check_and_renew_on_startup(settings: Settings) -> None:
     Called during FastAPI lifespan startup so a server restart after 08:30
     still gets a fresh token.
     """
+    from app.services.credential_store import effective_settings
+
+    settings = await effective_settings(settings)
     if not settings.upstox_auto_auth_is_configured:
         return
 

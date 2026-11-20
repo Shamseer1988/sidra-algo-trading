@@ -14,6 +14,7 @@ from app.api.routes import (
     broker,
     broker_books,
     charges,
+    connections,
     events,
     health,
     history,
@@ -163,3 +164,4 @@ app.include_router(live_shadow.router, prefix="/api/v1")
 app.include_router(universe.router, prefix="/api/v1")
 app.include_router(swing.router, prefix="/api/v1")
 app.include_router(charges.router, prefix="/api/v1")
+app.include_router(connections.router, prefix="/api/v1")
