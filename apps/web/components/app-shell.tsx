@@ -183,7 +183,7 @@ export function AppShell() {
       content = <RiskCenter safety={safety} isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
       break;
     case "settings":
-      content = <SettingsPanel tab={showing ?? "trading"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} onNavigate={selectWorkspace} telegram={telegram} onTelegram={() => void telegramAction()} onRegisterWebhook={() => void registerTelegramWebhook()} />;
+      content = <SettingsPanel tab={showing ?? "trading"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} onNavigate={selectWorkspace} telegram={telegram} onTelegram={() => void telegramAction()} onRegisterWebhook={() => void registerTelegramWebhook()} desks={desks} />;
       break;
     case "swing":
       content = <SwingWorkspace tab={showing ?? "portfolio"} onMessage={setMessage} />;

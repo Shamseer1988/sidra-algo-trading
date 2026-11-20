@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app.api.deps import CurrentUser, DbSession, require_roles
-from app.db.models import ApplicationSetting, AuditLog, PaperFill, PaperOrder, PaperPosition, User, UserRole
+from app.db.models import ApplicationSetting, PaperFill, PaperOrder, PaperPosition, User, UserRole
 from app.services.paper_execution import (
     DEFAULT_PAPER_EXECUTION_CONTROLS,
     PAPER_EXECUTION_KEY,
@@ -199,15 +199,15 @@ async def update_controls(
     session: DbSession,
     user: User = Depends(require_roles(UserRole.ADMIN)),
 ) -> PaperExecutionControls:
+    # The same card as Settings > Charges, saved the same way: one recorded change.
+    from app.api.routes.charges import save_card
+
     setting = await session.get(ApplicationSetting, PAPER_EXECUTION_KEY)
-    if setting is None:
-        session.add(
-            ApplicationSetting(key=PAPER_EXECUTION_KEY, value=controls.model_dump(), updated_by_user_id=user.id)
-        )
-    else:
-        setting.value, setting.updated_by_user_id = controls.model_dump(), user.id
-    session.add(
-        AuditLog(user_id=user.id, event_type="paper.execution_controls_updated", metadata_json={"paper_only": True})
+    before = PaperExecutionControls.model_validate(
+        setting.value if setting else DEFAULT_PAPER_EXECUTION_CONTROLS
+    ).model_dump()
+    await save_card(
+        session, PAPER_EXECUTION_KEY, before, controls.model_dump(), user, "paper.execution_controls_updated", None
     )
     await session.commit()
     return controls

@@ -422,6 +422,10 @@ export type StrategyDetail = {
 };
 export type StrategyMode = "OFF" | "PAPER" | "LIVE";
 export type SwingStrategy = { id: string; name: string; mode: StrategyMode; live_available: boolean; live_blocked_reason: string; evidence: string };
+export type IntradayCharges = { slippage_bps: number; participation_percent: number; brokerage_percent: number; brokerage_cap: number; stt_sell_percent: number; exchange_transaction_percent: number; gst_percent: number; sebi_percent: number; stamp_duty_buy_percent: number };
+export type SwingCharges = { brokerage_per_order: number; stt_percent: number; exchange_transaction_percent: number; sebi_percent: number; stamp_duty_buy_percent: number; gst_percent: number; dp_charge_per_sale: number };
+export type RoundTrip = { trade_value: number; buy: number; sell: number; total: number; lines: Record<string, number> };
+export type ChargesView = { intraday: IntradayCharges; swing: SwingCharges; intraday_example: RoundTrip; swing_example: RoundTrip };
 export type PaperStrategy = { id: string; name: string; enabled: boolean; live_orders: boolean; strategy_type: string; version: number; universe: string[]; allowed_sides: string[]; allowed_sessions: string[]; max_trades_per_day: number; max_trades_per_side: number | null; cooldown_minutes: number; risk_per_trade_percent: number | null; minimum_score: number; minimum_rr: number; volume_multiplier: number; retest_tolerance_percent: number; minimum_ema_spread_percent: number; rs_threshold_percent: number | null; exit_rules: ExitRules };
 export type UniverseEntry = { instrument_token: string; script_name: string; session_date: string; rank: number; score: number; selected: boolean; eligible: boolean; rejection_reason: string | null; liquidity_score: number; volatility_score: number; gap_score: number; trend_score: number; metrics: Record<string, number> };
 export type UniverseSummary = { session_date: string; enabled: boolean; universe_size: number; total_candidates: number; eligible: number; selected: number; last_built_at: string | null };
@@ -549,6 +553,13 @@ export const api = {
   swingStrategies: () => request<SwingStrategy[]>("/swing/strategies"),
   setSwingStrategyMode: (id: string, mode: StrategyMode, reason: string | null) =>
     request<SwingStrategy[]>(`/swing/strategies/${encodeURIComponent(id)}/mode`, { method: "PUT", body: JSON.stringify({ mode, reason }) }),
+  charges: () => request<ChargesView>("/charges"),
+  saveIntradayCharges: (charges: IntradayCharges, reason: string | null) =>
+    request<ChargesView>("/charges/intraday", { method: "PUT", body: JSON.stringify({ charges, reason }) }),
+  saveSwingCharges: (charges: SwingCharges, reason: string | null) =>
+    request<ChargesView>("/charges/swing", { method: "PUT", body: JSON.stringify({ charges, reason }) }),
+  previewCharges: (body: { intraday?: IntradayCharges; swing?: SwingCharges }) =>
+    request<{ intraday: RoundTrip | null; swing: RoundTrip | null }>("/charges/preview", { method: "POST", body: JSON.stringify(body) }),
   setStrategyMode: (id: string, mode: StrategyMode, confirmLive: boolean, reason: string | null) =>
     request<PaperStrategy[]>(`/settings/strategies/${encodeURIComponent(id)}/mode`, { method: "PUT", body: JSON.stringify({ mode, confirm_live: confirmLive, reason }) }),
   swingHistory: () => request<SwingPosition[]>("/swing/history"),

@@ -2646,3 +2646,71 @@ test.describe("Strategy control center", () => {
     await expect(page.getByTestId("mode-row-intraday-orb-default").getByRole("button", { name: "Live", exact: true })).toBeDisabled();
   });
 });
+
+// --- Charges (U2) -------------------------------------------------------------------
+
+const INTRADAY_CARD = { slippage_bps: 2, participation_percent: 10, brokerage_percent: 0.03, brokerage_cap: 20, stt_sell_percent: 0.025, exchange_transaction_percent: 0.00297, gst_percent: 18, sebi_percent: 0.0001, stamp_duty_buy_percent: 0.003 };
+const SWING_CARD = { brokerage_per_order: 20, stt_percent: 0.1, exchange_transaction_percent: 0.00297, sebi_percent: 0.0001, stamp_duty_buy_percent: 0.015, gst_percent: 18, dp_charge_per_sale: 20 };
+const trip = (total: number, brokerage: number, dp = 0) => ({ trade_value: 50000, buy: total / 2, sell: total / 2, total, lines: { brokerage, stt: 12.5, exchange: 2.97, gst: 3.33, sebi: 0.1, stamp_duty: 1.5, dp } });
+
+async function mockCharges(page: Page) {
+  const calls: { url: string; method: string; body: Record<string, unknown> | null }[] = [];
+  const view = { intraday: INTRADAY_CARD, swing: SWING_CARD, intraday_example: trip(50.4, 30), swing_example: trip(184.2, 40, 20) };
+  await page.route("**/api/v1/charges", async (route: Route) => {
+    await route.fulfill({ json: view });
+  });
+  await page.route("**/api/v1/charges/preview", async (route: Route) => {
+    const body = route.request().postDataJSON() as Record<string, Record<string, number>>;
+    calls.push({ url: route.request().url(), method: "POST", body });
+    await route.fulfill({ json: { intraday: null, swing: body.swing ? trip(144.2, body.swing.brokerage_per_order * 2, 20) : null } });
+  });
+  await page.route("**/api/v1/charges/swing", async (route: Route) => {
+    const body = route.request().postDataJSON() as { charges: typeof SWING_CARD };
+    calls.push({ url: route.request().url(), method: "PUT", body });
+    await route.fulfill({ json: { ...view, swing: body.charges, swing_example: trip(144.2, 0, 20) } });
+  });
+  return calls;
+}
+
+test.describe("Charges", () => {
+  test("shows each desk's rate card with a worked example; swing only when its desk is on", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockDesks(page, { intraday: true, swing: false });
+    await mockCharges(page);
+    await page.goto("/");
+    await go(page, "Settings", "Charges");
+    await expect(page.getByTestId("charges-intraday")).toContainText("Brokerage cap");
+    await expect(page.getByTestId("charges-intraday-total")).toHaveText("₹50.40");
+    await expect(page.getByTestId("charges-swing")).toHaveCount(0);
+  });
+
+  test("a changed figure updates the example, then saves once with the reason", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockDesks(page, { intraday: true, swing: true });
+    const calls = await mockCharges(page);
+    await page.goto("/");
+    await go(page, "Settings", "Charges");
+    const card = page.getByTestId("charges-swing");
+    await expect(card.getByRole("button", { name: "Save swing charges" })).toBeDisabled();
+    await card.getByLabel("Brokerage per order").fill("0");
+    await expect(page.getByTestId("charges-swing-total")).toHaveText("₹144.20");
+    expect(calls.filter((c) => c.method === "PUT")).toHaveLength(0);
+    await page.getByTestId("charges-swing-example").scrollIntoViewIfNeeded();
+    await shot(page, "u2-charges");
+    await card.getByLabel("Why (kept in the change history)").fill("zero-brokerage delivery plan");
+    await card.getByRole("button", { name: "Save swing charges" }).click();
+    await expect(card.getByRole("button", { name: "Save swing charges" })).toBeDisabled();
+    const puts = calls.filter((c) => c.method === "PUT");
+    expect(puts).toHaveLength(1);
+    expect(puts[0].body).toEqual({ charges: { ...SWING_CARD, brokerage_per_order: 0 }, reason: "zero-brokerage delivery plan" });
+  });
+
+  test("a viewer sees the charges but cannot change them", async ({ page }) => {
+    await setupMockRoutes(page, "VIEWER");
+    await mockCharges(page);
+    await page.goto("/");
+    await go(page, "Settings", "Charges");
+    await expect(page.getByTestId("charges-intraday").getByLabel("Brokerage cap")).toBeDisabled();
+    await expect(page.getByRole("button", { name: /Save .* charges/ })).toHaveCount(0);
+  });
+});

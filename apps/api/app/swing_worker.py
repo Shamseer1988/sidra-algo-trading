@@ -33,6 +33,7 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.models import ApplicationSetting, CorporateEvent, SwingPaperPosition
 from app.db.session import SessionLocal
+from app.services.charges import swing_cost_model
 from app.services.desks import SWING_DESK, desk_enabled
 from app.services.market_calculations import MARKET_TIMEZONE
 from app.services.swing_backtest import SwingRules
@@ -108,6 +109,8 @@ async def process(settings, now: datetime, *, new_entries: bool = True) -> list[
         days = days_to_process([bar.session_date for bar in benchmark], await last_processed(session))
         # Chosen in the UI; read once per run so an evening uses one consistent set.
         strategies = await paper_strategies(session)
+        # Settings > Charges, also read once per run.
+        costs = await swing_cost_model(session)
         if not days:
             return []
         universe = {
@@ -137,6 +140,7 @@ async def process(settings, now: datetime, *, new_entries: bool = True) -> list[
                 events=events,
                 new_entries=new_entries,
                 rules=SwingRules(strategies=strategies),
+                costs=costs,
             )
             await mark_processed(session, day)
             await session.commit()
