@@ -132,7 +132,18 @@ class ExitSweepOutcome:
             item
             for item in self.exits
             if item.acted
-            or item.step in {"cancel_failed", "orphaned", "no_signal", "stale_price", "trail_blocked", "trail_failed"}
+            or item.step
+            in {
+                "cancel_failed",
+                "orphaned",
+                "no_signal",
+                "stale_price",
+                "trail_blocked",
+                "trail_failed",
+                # Nothing was sent because the product could not be named; a
+                # person has to close or protect it, so a person has to hear.
+                "product_unknown",
+            }
         ]
 
 

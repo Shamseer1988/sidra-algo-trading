@@ -1490,3 +1490,11 @@ async def test_a_swing_exit_uses_the_recorded_delivery_product_and_the_swing_des
     assert wiring.adapter.cancelled == ["stop-1"]
     assert wiring.adapter.submitted[0].product == "DELIVERY"
     assert desks == ["SWING"]
+
+
+def test_a_position_left_alone_for_an_unknown_product_is_reported() -> None:
+    """Refusing to guess is only safe if someone is told the position is untouched."""
+    outcome = module.ExitSweepOutcome(
+        ran=True, step="swept", detail="", exits=[module.PositionExit("RVNL", False, "product_unknown", "x")]
+    )
+    assert [item.step for item in outcome.noteworthy] == ["product_unknown"]
