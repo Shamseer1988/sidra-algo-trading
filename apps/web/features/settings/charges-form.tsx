@@ -1,10 +1,13 @@
 "use client";
 
-import { Info, ReceiptIndianRupee, Save } from "lucide-react";
+import { ReceiptIndianRupee, Save } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api, type ChargesView, type IntradayCharges, type RoundTrip, type SwingCharges } from "../../components/api";
+import { Hint } from "../../components/hint";
+import { Modal } from "../../components/modal";
 import type { DeskState } from "../../lib/desks";
+import { ProviderCard, SectionNav, SettingsSection } from "./settings-ui";
 
 /**
  * Settings > Charges: what a trade costs, one rate card per desk.
@@ -62,6 +65,8 @@ export function ChargesForm({
   onMessage: (message: string) => void;
 }) {
   const [saved, setSaved] = useState<ChargesView | null>(null);
+  const [open, setOpen] = useState(false);
+  const [card, setCard] = useState<"intraday" | "swing">(desks.intraday || !desks.swing ? "intraday" : "swing");
 
   useEffect(() => {
     void api
@@ -70,40 +75,82 @@ export function ChargesForm({
       .catch((error: unknown) => onMessage(error instanceof Error ? error.message : "Could not load charges"));
   }, [onMessage]);
 
-  if (!saved) return <div className="panel mt-6 max-w-5xl p-5"><div className="skeleton h-40" /></div>;
+  if (!saved) return <div className="panel mt-6 max-w-6xl p-5"><div className="skeleton h-40" /></div>;
+
+  const cards = [
+    ...(desks.intraday ? [{ id: "intraday", label: "Intraday" }] : []),
+    ...(desks.swing ? [{ id: "swing", label: "Swing (delivery)" }] : []),
+  ];
+  const showing = cards.some((item) => item.id === card) ? card : (cards[0]?.id as "intraday" | "swing" | undefined);
 
   return (
-    <div className="mt-6 grid max-w-5xl gap-6">
-      {desks.intraday && (
-        <RateCard
-          testId="charges-intraday"
-          title="Intraday"
-          usedBy="Intraday paper fills, intraday backtests and sweeps, and the estimated charges on live trades in History."
-          fields={INTRADAY_FIELDS}
-          saved={saved.intraday}
-          example={saved.intraday_example}
-          isAdmin={isAdmin}
-          preview={async (draft) => (await api.previewCharges({ intraday: draft })).intraday}
-          save={async (draft, reason) => setSaved(await api.saveIntradayCharges(draft, reason))}
-          onMessage={onMessage}
-        />
-      )}
-      {desks.swing && (
-        <RateCard
-          testId="charges-swing"
-          title="Swing (delivery)"
-          usedBy="The swing paper desk and the swing backtest."
-          fields={SWING_FIELDS}
-          saved={saved.swing}
-          example={saved.swing_example}
-          isAdmin={isAdmin}
-          preview={async (draft) => (await api.previewCharges({ swing: draft })).swing}
-          save={async (draft, reason) => setSaved(await api.saveSwingCharges(draft, reason))}
-          onMessage={onMessage}
-        />
-      )}
-      {!desks.intraday && !desks.swing && (
-        <p className="empty-inset text-sm text-slate-400">Both desks are off. Turn one on in Trading controls to see its charges.</p>
+    <div className="mt-6 grid max-w-6xl gap-5">
+      <SettingsSection
+        eyebrow="Rate cards"
+        title="Charges by broker"
+        hint="What a trade costs: brokerage, taxes and fees, one rate card per desk. Paper fills, backtests and reports charge these figures; orders and live limits never read them. Check them against a contract note."
+      >
+        <div className="grid gap-3 md:grid-cols-3">
+          <ProviderCard
+            testId="charges-broker-upstox"
+            name="Upstox"
+            monogram="UP"
+            tagline="Rate cards in use"
+            actionLabel="Open rate cards"
+            onOpen={() => setOpen(true)}
+            status={
+              <>
+                {desks.intraday && (
+                  <span className="status-pill status-good">Intraday {rupees(saved.intraday_example.total)} / ₹50k</span>
+                )}
+                {desks.swing && <span className="status-pill status-good">Swing {rupees(saved.swing_example.total)} / ₹50k</span>}
+              </>
+            }
+          />
+          <ProviderCard testId="charges-broker-fyers" name="Fyers" monogram="FY" tone="violet" tagline="Not connected yet" comingSoon />
+          <ProviderCard testId="charges-broker-firstock" name="Firstock" monogram="FS" tone="amber" tagline="Not connected yet" comingSoon />
+        </div>
+      </SettingsSection>
+
+      {open && (
+        <Modal wide title="Upstox charges" eyebrow="Rate cards" testId="charges-modal" onClose={() => setOpen(false)}>
+          {cards.length > 1 && (
+            <div className="mb-4">
+              <SectionNav sections={cards} active={showing ?? "intraday"} onSelect={(id) => setCard(id as "intraday" | "swing")} />
+            </div>
+          )}
+          {showing === "intraday" && (
+            <RateCard
+              testId="charges-intraday"
+              title="Intraday"
+              usedBy="Intraday paper fills, intraday backtests and sweeps, and the estimated charges on live trades in History."
+              fields={INTRADAY_FIELDS}
+              saved={saved.intraday}
+              example={saved.intraday_example}
+              isAdmin={isAdmin}
+              preview={async (draft) => (await api.previewCharges({ intraday: draft })).intraday}
+              save={async (draft, reason) => setSaved(await api.saveIntradayCharges(draft, reason))}
+              onMessage={onMessage}
+            />
+          )}
+          {showing === "swing" && (
+            <RateCard
+              testId="charges-swing"
+              title="Swing (delivery)"
+              usedBy="The swing paper desk and the swing backtest."
+              fields={SWING_FIELDS}
+              saved={saved.swing}
+              example={saved.swing_example}
+              isAdmin={isAdmin}
+              preview={async (draft) => (await api.previewCharges({ swing: draft })).swing}
+              save={async (draft, reason) => setSaved(await api.saveSwingCharges(draft, reason))}
+              onMessage={onMessage}
+            />
+          )}
+          {!showing && (
+            <p className="empty-inset text-sm text-slate-400">Both desks are off. Turn one on in Settings › General to see its charges.</p>
+          )}
+        </Modal>
       )}
     </div>
   );
@@ -181,24 +228,26 @@ function RateCard<T extends object>({
   }
 
   return (
-    <article className="panel p-5 sm:p-7" data-testid={testId}>
-      <div className="flex items-center gap-3 border-b border-slate-800 pb-4">
+    <div data-testid={testId}>
+      <div className="flex items-center gap-3 border-b border-slate-800 pb-3">
         <ReceiptIndianRupee className="h-5 w-5 text-emerald-400" />
         <div>
-          <p className="eyebrow">Rate card</p>
           <h3 className="font-semibold text-white">{title}</h3>
-          <p className="mt-1 text-xs text-slate-400">Used by: {usedBy}</p>
+          <p className="mt-0.5 text-xs text-slate-400">Used by: {usedBy}</p>
         </div>
       </div>
 
       <div className="mt-5 grid gap-6 lg:grid-cols-[1fr_18rem]">
         <div className="grid gap-3 sm:grid-cols-2">
           {fields.map((field) => (
-            <label
+            <div
               key={field.key}
               className={`rounded-md border p-3 text-sm font-semibold text-white ${changed.includes(field.key) ? "border-sky-500/40 bg-sky-950/20" : "border-slate-800"}`}
             >
-              {field.label}
+              <span className="flex items-center gap-1.5">
+                {field.label}
+                <Hint>{field.help}</Hint>
+              </span>
               <span className="mt-2 flex items-center gap-2">
                 <input
                   aria-label={field.label}
@@ -214,11 +263,7 @@ function RateCard<T extends object>({
                 />
                 <span className="w-8 text-xs text-slate-500">{field.unit}</span>
               </span>
-              <span className="mt-2 flex gap-1.5 text-xs font-normal leading-5 text-slate-400">
-                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-500" />
-                {field.help}
-              </span>
-            </label>
+            </div>
           ))}
         </div>
 
@@ -273,6 +318,6 @@ function RateCard<T extends object>({
           </div>
         </div>
       )}
-    </article>
+    </div>
   );
 }

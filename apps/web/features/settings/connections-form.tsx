@@ -1,10 +1,13 @@
 "use client";
 
-import { CheckCircle2, KeyRound, LogIn, MessageCircle, PlugZap, Save, ShieldCheck, XCircle } from "lucide-react";
+import { CheckCircle2, KeyRound, LogIn, Save, ShieldCheck, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api, type ConnectionCheck, type ConnectionsView, type CredentialField } from "../../components/api";
+import { Hint } from "../../components/hint";
+import { Modal } from "../../components/modal";
 import { formatIstTimestamp } from "../../lib/formatting";
+import { ProviderCard, SettingsSection } from "./settings-ui";
 
 /**
  * Settings > Connections: the broker account and the Telegram bot, set up from the screen.
@@ -17,6 +20,7 @@ import { formatIstTimestamp } from "../../lib/formatting";
 
 export function ConnectionsForm({ isAdmin, onMessage }: { isAdmin: boolean; onMessage: (message: string) => void }) {
   const [view, setView] = useState<ConnectionsView | null>(null);
+  const [open, setOpen] = useState<"upstox" | "telegram" | null>(null);
 
   useEffect(() => {
     void api
@@ -25,18 +29,68 @@ export function ConnectionsForm({ isAdmin, onMessage }: { isAdmin: boolean; onMe
       .catch((error: unknown) => onMessage(error instanceof Error ? error.message : "Could not load connections"));
   }, [onMessage]);
 
-  if (!view) return <div className="panel mt-6 max-w-5xl p-5"><div className="skeleton h-40" /></div>;
+  if (!view) return <div className="panel mt-6 max-w-6xl p-5"><div className="skeleton h-40" /></div>;
 
+  const upstox = view.upstox;
   return (
-    <div className="mt-6 grid max-w-5xl gap-6">
+    <div className="mt-6 grid max-w-6xl gap-5">
       {!view.encryption_ready && (
         <p className="rounded-md border border-amber-500/30 bg-amber-950/20 p-4 text-sm text-amber-100" data-testid="no-server-key">
           The server has no encryption key yet, so credentials cannot be saved from this screen. This is a one-time server
           setup step (UPSTOX_TOKEN_ENCRYPTION_KEY); until then the values in the server&apos;s file are used.
         </p>
       )}
-      <UpstoxCard view={view} isAdmin={isAdmin} onSaved={setView} onMessage={onMessage} />
-      <TelegramCard view={view} isAdmin={isAdmin} onSaved={setView} onMessage={onMessage} />
+      <SettingsSection
+        eyebrow="Brokers"
+        title="Broker accounts"
+        hint="The broker that places live orders and supplies market data. Secrets are stored encrypted and never shown again once saved; leaving a box empty keeps what is there."
+      >
+        <div className="grid gap-3 md:grid-cols-3">
+          <ProviderCard
+            testId="broker-upstox"
+            name="Upstox"
+            monogram="UP"
+            tagline="Live orders and market data"
+            onOpen={() => setOpen("upstox")}
+            actionLabel="Configure Upstox"
+            status={
+              <>
+                <StatusChip ok={upstox.login_ready} yes="App keys set" no="App keys missing" />
+                <StatusChip ok={Boolean(upstox.token_valid_until)} yes="Logged in today" no="Not logged in" />
+                <StatusChip ok={upstox.auto_login_ready} yes="Auto-login on" no="Auto-login off" />
+              </>
+            }
+          />
+          <ProviderCard testId="broker-fyers" name="Fyers" monogram="FY" tone="violet" tagline="Not connected yet" comingSoon />
+          <ProviderCard testId="broker-firstock" name="Firstock" monogram="FS" tone="amber" tagline="Not connected yet" comingSoon />
+        </div>
+      </SettingsSection>
+
+      <SettingsSection eyebrow="Alerts" title="Notifications" hint="Where this system tells you what it did.">
+        <div className="grid gap-3 md:grid-cols-3">
+          <ProviderCard
+            testId="alerts-telegram"
+            name="Telegram"
+            monogram="TG"
+            tone="sky"
+            tagline="Trade alerts and approvals"
+            onOpen={() => setOpen("telegram")}
+            actionLabel="Configure Telegram"
+            status={<StatusChip ok={view.telegram.ready} yes="Configured" no="Not configured" />}
+          />
+        </div>
+      </SettingsSection>
+
+      {open === "upstox" && (
+        <Modal wide title="Upstox" eyebrow="Broker · live orders and market data" testId="upstox-modal" onClose={() => setOpen(null)}>
+          <UpstoxCard view={view} isAdmin={isAdmin} onSaved={setView} onMessage={onMessage} />
+        </Modal>
+      )}
+      {open === "telegram" && (
+        <Modal wide title="Telegram" eyebrow="Alerts" testId="telegram-modal" onClose={() => setOpen(null)}>
+          <TelegramCard view={view} isAdmin={isAdmin} onSaved={setView} onMessage={onMessage} />
+        </Modal>
+      )}
     </div>
   );
 }
@@ -62,10 +116,13 @@ function FieldRow({
   onChange: (value: string | boolean) => void;
 }) {
   return (
-    <label className={`rounded-md border p-3 text-sm font-semibold text-white ${draft !== undefined && draft !== "" ? "border-sky-500/40 bg-sky-950/20" : "border-slate-800"}`}>
-      <span className="flex items-center justify-between gap-2">
+    <div className={`rounded-md border p-3 text-sm font-semibold text-white ${draft !== undefined && draft !== "" ? "border-sky-500/40 bg-sky-950/20" : "border-slate-800"}`}>
+      <span className="flex items-center gap-1.5">
         {field.label}
-        <SourceTag field={field} />
+        <Hint>{field.help}</Hint>
+        <span className="ml-auto">
+          <SourceTag field={field} />
+        </span>
       </span>
       {field.kind === "boolean" ? (
         <span className="mt-2 flex items-center gap-3 text-sm font-normal text-slate-300">
@@ -90,8 +147,7 @@ function FieldRow({
           onChange={(event) => onChange(event.target.value)}
         />
       )}
-      <span className="mt-2 block text-xs font-normal leading-5 text-slate-400">{field.help}</span>
-    </label>
+    </div>
   );
 }
 
@@ -154,15 +210,8 @@ function UpstoxCard({
   }
 
   return (
-    <article className="panel p-5 sm:p-7" data-testid="connection-upstox">
+    <div data-testid="connection-upstox">
       <div className="flex flex-col gap-3 border-b border-slate-800 pb-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
-          <PlugZap className="h-5 w-5 text-emerald-400" />
-          <div>
-            <p className="eyebrow">Broker · live orders and market data</p>
-            <h3 className="font-semibold text-white">Upstox</h3>
-          </div>
-        </div>
         <div className="flex flex-wrap gap-2 text-xs">
           <StatusChip ok={upstox.login_ready} yes="App details complete" no="App details incomplete" />
           <StatusChip ok={upstox.auto_login_ready} yes="Morning auto-login ready" no="Morning auto-login not set" />
@@ -224,7 +273,7 @@ function UpstoxCard({
           </div>
         </div>
       )}
-    </article>
+    </div>
   );
 }
 
@@ -279,15 +328,8 @@ function TelegramCard({
   }
 
   return (
-    <article className="panel p-5 sm:p-7" data-testid="connection-telegram">
+    <div data-testid="connection-telegram">
       <div className="flex flex-col gap-3 border-b border-slate-800 pb-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
-          <MessageCircle className="h-5 w-5 text-sky-400" />
-          <div>
-            <p className="eyebrow">Alerts</p>
-            <h3 className="font-semibold text-white">Telegram</h3>
-          </div>
-        </div>
         <StatusChip ok={telegram.ready} yes="Alerts configured" no="Alerts not configured" />
       </div>
       <ol className="mt-4 list-decimal space-y-1 pl-5 text-xs leading-5 text-slate-400">
@@ -327,7 +369,7 @@ function TelegramCard({
           </div>
         </div>
       )}
-    </article>
+    </div>
   );
 }
 

@@ -1,29 +1,58 @@
 "use client";
 
-import { AlertTriangle, Power, RotateCcw, Save, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowRight, Power, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { api, type EffectiveLimits, type RiskPreset, type SettingSpec, type SettingsCatalog } from "../../components/api";
+import {
+  api,
+  type EffectiveLimits,
+  type RiskPreset,
+  type SettingSpec,
+  type SettingsCatalog,
+  type SwingSettingsView,
+} from "../../components/api";
+import { Modal } from "../../components/modal";
 import { switchConsequence, type Desk } from "../../lib/desks";
 import { ControlField, dirtyKeys } from "./control-field";
+import { IndicatorSettingsForm } from "./indicator-settings-form";
+import {
+  type Change,
+  ChangesModal,
+  FieldGrid,
+  SaveBar,
+  SectionNav,
+  SettingsSection,
+  Tile,
+  shown,
+} from "./settings-ui";
 
 /** The group the desk switches live in; drawn as its own card, not as two checkboxes. */
 const DESKS_GROUP = "TRADING_DESKS";
 const DESK_KEYS: Record<string, Desk> = { intraday_desk_enabled: "intraday", swing_desk_enabled: "swing" };
 
+/** Account-wide: which broker live orders go to, and whether a person approves each one. */
+const COMMON_KEYS = ["live_broker", "execution_approval_mode"];
+/** How an intraday live entry is sent. */
+const ORDER_KEYS = ["live_entry_order_type", "entry_slippage_cap_percent", "entry_slippage_cap_r"];
+
 /**
- * The trading controls, rendered from the server's description of them.
- *
- * The previous screen mapped over `Object.entries(controls)` and drew a text
- * box per key, labelled by the key itself. Nothing told an operator that
- * "maximum open exposure percent" is multiplied by leverage before it becomes
- * rupees, or that a daily loss stop applies to the session already running.
- *
- * Every label, unit, bound, help string and effect note below comes from
- * `/settings/trading/catalog`. Nothing about a control is written here, which
- * is deliberate: a control described in two places is a control that will
- * eventually be described differently in each.
+ * Where each intraday control is shown. Groups come from the server's
+ * catalogue; the two key lists above pull the account-wide and order-entry
+ * controls out of the "Account and broker" group they are stored in.
  */
+type Section = { id: string; label: string; pick: (spec: SettingSpec) => boolean };
+const INTRADAY_SECTIONS: Section[] = [
+  {
+    id: "risk",
+    label: "Capital & risk",
+    pick: (spec) => spec.group === "ACCOUNT_AND_BROKER" && !COMMON_KEYS.includes(spec.key) && !ORDER_KEYS.includes(spec.key),
+  },
+  { id: "limits", label: "Daily limits", pick: (spec) => spec.group === "DAILY_RISK" },
+  { id: "session", label: "Trading window", pick: (spec) => spec.group === "TRADING_SESSION" },
+  { id: "orders", label: "Order entry", pick: (spec) => ORDER_KEYS.includes(spec.key) },
+  { id: "signals", label: "Signals & universe", pick: (spec) => spec.group === "SIGNAL_QUALITY" || spec.group === "EXECUTION" },
+];
+const INDICATORS = "indicators";
 
 /** The rupee figure behind a percent, so the multiplication is not homework. */
 function derivedValue(spec: SettingSpec, draft: Record<string, unknown>, effective: EffectiveLimits): string | null {
@@ -42,17 +71,17 @@ function derivedValue(spec: SettingSpec, draft: Record<string, unknown>, effecti
   return null;
 }
 
-export function TradingControlsForm({ isAdmin, onMessage }: { isAdmin: boolean; onMessage: (message: string, kind?: "success" | "error" | "info") => void }) {
+type Notify = (message: string, kind?: "success" | "error" | "info") => void;
+
+/** Load the catalogue and keep a draft of it; shared by the General and Intraday tabs. */
+function useTradingCatalog(onMessage: Notify) {
   const [catalog, setCatalog] = useState<SettingsCatalog | null>(null);
-  const [presets, setPresets] = useState<RiskPreset[]>([]);
   const [draft, setDraft] = useState<Record<string, unknown>>({});
-  const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [next, available] = await Promise.all([api.settingsCatalog(), api.riskPresets()]);
+      const next = await api.settingsCatalog();
       setCatalog(next);
-      setPresets(available);
       setDraft(Object.fromEntries(next.settings.map((item) => [item.key, item.value])));
     } catch (error) {
       onMessage(error instanceof Error ? error.message : "Could not load trading controls");
@@ -63,64 +92,80 @@ export function TradingControlsForm({ isAdmin, onMessage }: { isAdmin: boolean; 
     void load();
   }, [load]);
 
-  const dirty = useMemo(() => {
-    if (!catalog) return [] as string[];
-    return dirtyKeys(catalog.settings, draft);
-  }, [catalog, draft]);
+  const dirty = useMemo(() => (catalog ? dirtyKeys(catalog.settings, draft) : []), [catalog, draft]);
 
-  async function save() {
-    if (!catalog || !isAdmin) return;
-    setSaving(true);
+  const changes: Change[] = useMemo(
+    () =>
+      (catalog?.settings ?? [])
+        .filter((spec) => dirty.includes(spec.key))
+        .map((spec) => ({ key: spec.key, label: spec.label, from: shown(spec.value, spec.unit), to: shown(draft[spec.key], spec.unit) })),
+    [catalog, dirty, draft],
+  );
+
+  async function save(): Promise<boolean> {
     try {
       await api.updateControls(draft as never);
-      onMessage(`Saved ${dirty.length} change${dirty.length === 1 ? "" : "s"}.`);
+      onMessage(`Saved ${dirty.length} change${dirty.length === 1 ? "" : "s"}.`, "success");
+      window.dispatchEvent(new Event("sidra:controls-saved"));
       await load();
+      return true;
     } catch (error) {
-      onMessage(error instanceof Error ? error.message : "Could not save trading controls");
-    } finally {
-      setSaving(false);
+      onMessage(error instanceof Error ? error.message : "Could not save trading controls", "error");
+      return false;
     }
   }
 
-  async function applyPreset(preset: RiskPreset) {
-    if (!isAdmin) return;
-    try {
-      await api.applyRiskPreset(preset.key, false);
-      onMessage(`Applied ${preset.label}.`);
-      await load();
-      return;
-    } catch (error) {
-      // The server refuses a preset that loosens a limit until it is
-      // acknowledged. That refusal is the confirmation step, so it is shown
-      // rather than swallowed, and the operator confirms against the server's
-      // own words rather than a message this file invented.
-      const detail = error instanceof Error ? error.message : "Could not apply preset";
-      if (!detail.includes("raises a risk limit")) {
-        onMessage(detail);
-        return;
-      }
-      if (!window.confirm(`${detail}\n\nApply it?`)) return;
-      try {
-        await api.applyRiskPreset(preset.key, true);
-        onMessage(`Applied ${preset.label}.`);
-        await load();
-      } catch (retry) {
-        onMessage(retry instanceof Error ? retry.message : "Could not apply preset");
-      }
-    }
-  }
+  return { catalog, draft, setDraft, dirty, changes, load, save };
+}
 
-  /**
-   * Flip one desk switch and save it on its own.
-   *
-   * Built from the saved values, not the draft, so nothing else rides along:
-   * one change per decision. Other unsaved edits on the page are refused rather
-   * than silently included or silently dropped.
-   */
+function Field({
+  spec,
+  state,
+  isAdmin,
+}: {
+  spec: SettingSpec;
+  state: ReturnType<typeof useTradingCatalog>;
+  isAdmin: boolean;
+}) {
+  const { catalog, draft, setDraft, dirty } = state;
+  return (
+    <ControlField
+      spec={spec}
+      value={draft[spec.key]}
+      derived={catalog ? derivedValue(spec, draft, catalog.effective) : null}
+      changed={dirty.includes(spec.key)}
+      disabled={!isAdmin}
+      onChange={(next) => setDraft((current) => ({ ...current, [spec.key]: next }))}
+    />
+  );
+}
+
+/**
+ * Settings > General: what both desks share. The desk switches, where live
+ * orders go and whether each one needs approval, and a short read of each
+ * desk's own settings with a way into them.
+ */
+export function GeneralSettingsForm({
+  isAdmin,
+  onMessage,
+  onOpenTab,
+}: {
+  isAdmin: boolean;
+  onMessage: Notify;
+  onOpenTab?: (tab: string) => void;
+}) {
+  const state = useTradingCatalog(onMessage);
+  const { catalog, dirty, changes, load, save } = state;
+  const [reviewing, setReviewing] = useState(false);
+  const [swing, setSwing] = useState<SwingSettingsView | null>(null);
+
+  useEffect(() => {
+    void api.swingSettings().then(setSwing).catch(() => undefined);
+  }, []);
+
   async function saveDesk(key: string, turningOn: boolean): Promise<boolean> {
     if (!catalog || !isAdmin) return false;
-    const others = dirty.filter((item) => item !== key);
-    if (others.length) {
+    if (dirty.length) {
       onMessage("Save or discard your other changes first, so this switch is saved on its own.");
       return false;
     }
@@ -138,98 +183,308 @@ export function TradingControlsForm({ isAdmin, onMessage }: { isAdmin: boolean; 
     }
   }
 
-  if (!catalog) return <p className="mt-6 text-sm text-slate-500">Loading trading controls…</p>;
+  if (!catalog) return <div className="panel mt-6 max-w-6xl p-5"><div className="skeleton h-40" /></div>;
 
   const deskSpecs = catalog.settings.filter((item) => item.group === DESKS_GROUP && item.key in DESK_KEYS);
+  const common = catalog.settings.filter((item) => COMMON_KEYS.includes(item.key));
+  const on = (desk: Desk) => deskSpecs.find((spec) => DESK_KEYS[spec.key] === desk)?.value === true;
+  const effective = catalog.effective;
 
   return (
-    <section className="mt-6 max-w-5xl space-y-6">
+    <section className="mt-6 max-w-6xl space-y-5" data-testid="settings-general">
       {deskSpecs.length > 0 && <DesksCard specs={deskSpecs} isAdmin={isAdmin} onSave={saveDesk} />}
 
-      <EffectiveSummary effective={catalog.effective} />
+      <SettingsSection
+        eyebrow="Both desks"
+        title="Live orders"
+        hint="Account-wide. Which broker a live order is sent to, and whether each one waits for a person to approve it. The swing desk is paper only and never sends an order."
+      >
+        <FieldGrid>
+          {common.map((spec) => (
+            <Field key={spec.key} spec={spec} state={state} isAdmin={isAdmin} />
+          ))}
+        </FieldGrid>
+      </SettingsSection>
 
-      <CapitalRescaleNotice
-        settings={catalog.settings}
-        draft={draft}
-        onApply={(values) => setDraft((current) => ({ ...current, ...values }))}
-      />
+      <div className="grid gap-5 lg:grid-cols-2">
+        <DeskSummary
+          testId="summary-intraday"
+          title="Intraday desk"
+          on={on("intraday")}
+          onOpen={onOpenTab ? () => onOpenTab("intraday") : undefined}
+          tiles={[
+            ["Capital", `₹${Number(effective.capital).toLocaleString("en-IN")}`],
+            ["Risk a trade", `₹${effective.planned_risk_per_trade}`],
+            ["Trades a day", `${effective.effective_trade_ceiling}`],
+            ["Daily loss stop", `₹${effective.daily_loss_limit}`],
+          ]}
+        />
+        <DeskSummary
+          testId="summary-swing"
+          title="Swing desk (paper)"
+          on={on("swing")}
+          onOpen={onOpenTab ? () => onOpenTab("swing") : undefined}
+          tiles={
+            swing
+              ? [
+                  ["Capital", `₹${Number(swing.settings.find((s) => s.key === "capital")?.value ?? 0).toLocaleString("en-IN")}`],
+                  ["Risk a trade", `₹${swing.effective.risk_per_trade.toLocaleString("en-IN")}`],
+                  ["Open positions", `${swing.settings.find((s) => s.key === "max_open_positions")?.value ?? "-"}`],
+                  ["Open-risk cap", `₹${swing.effective.heat_cap.toLocaleString("en-IN")}`],
+                ]
+              : []
+          }
+        />
+      </div>
 
-      {presets.length > 0 && (
-        <article className="panel p-5 sm:p-7">
-          <p className="eyebrow">Risk profiles</p>
-          <h3 className="mt-1 text-base font-semibold text-white">Start from a profile</h3>
-          <p className="mt-1 text-xs leading-5 text-slate-400">
-            Applying one saves it the same way a hand edit does: validated, versioned and audited. Raising a limit asks
-            first.
-          </p>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            {presets.map((preset) => (
-              <div key={preset.key} className="glass-inset rounded-md p-4">
-                <p className="text-sm font-semibold text-white">{preset.label}</p>
-                <p className="mt-1 text-xs leading-5 text-slate-400">{preset.description}</p>
-                <p className="mt-2 numeric text-xs text-slate-300">
-                  ₹{preset.effective.planned_risk_per_trade} a trade · ₹{preset.effective.daily_loss_limit} daily stop
-                  {preset.effective.daily_loss_percent ? ` (${preset.effective.daily_loss_percent}% of capital)` : ""} ·{" "}
-                  {preset.effective.effective_trade_ceiling} trades
-                </p>
-                {isAdmin && (
-                  <button onClick={() => void applyPreset(preset)} className="secondary-button mt-4">
-                    <ShieldCheck className="h-4 w-4" />
-                    Apply {preset.label}
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        </article>
-      )}
-
-      {catalog.group_order.map((group) => {
-        if (group === DESKS_GROUP) return null;
-        const items = catalog.settings.filter((item) => item.group === group);
-        if (!items.length) return null;
-        return (
-          <article key={group} className="panel p-5 sm:p-7">
-            <p className="eyebrow">Configuration</p>
-            <h3 className="mt-1 text-base font-semibold text-white">{catalog.group_labels[group]}</h3>
-            <div className="mt-5 grid gap-5 lg:grid-cols-2">
-              {items.map((spec) => (
-                <ControlField
-                  key={spec.key}
-                  spec={spec}
-                  value={draft[spec.key]}
-                  derived={derivedValue(spec, draft, catalog.effective)}
-                  changed={dirty.includes(spec.key)}
-                  disabled={!isAdmin}
-                  onChange={(next) => setDraft((current) => ({ ...current, [spec.key]: next }))}
-                />
-              ))}
-            </div>
-          </article>
-        );
-      })}
-
-      {isAdmin && (
-        <div className="flex flex-wrap items-center gap-3">
-          {dirty.length > 0 ? (
-            <>
-              <button onClick={() => void save()} disabled={saving} className="primary-button">
-                <Save className="h-4 w-4" />
-                Save {dirty.length} change{dirty.length === 1 ? "" : "s"}
-              </button>
-              <button onClick={() => void load()} className="secondary-button">
-                <RotateCcw className="h-4 w-4" />
-                Discard
-              </button>
-            </>
-          ) : (
-            // A greyed-out button is a pale smudge on the light theme and reads
-            // as broken rather than as "nothing to do".
-            <p className="text-sm text-slate-500">No changes to save.</p>
-          )}
-        </div>
+      {isAdmin && <SaveBar count={dirty.length} onDiscard={() => void load()} onReview={() => setReviewing(true)} />}
+      {reviewing && (
+        <ChangesModal
+          title="Save the account-wide settings?"
+          changes={changes}
+          warning="These apply to live trading on this account."
+          onConfirm={save}
+          onClose={() => setReviewing(false)}
+        />
       )}
     </section>
+  );
+}
+
+function DeskSummary({
+  title,
+  on,
+  tiles,
+  onOpen,
+  testId,
+}: {
+  title: string;
+  on: boolean;
+  tiles: [string, string][];
+  onOpen?: () => void;
+  testId: string;
+}) {
+  return (
+    <SettingsSection
+      testId={testId}
+      eyebrow="At a glance"
+      title={title}
+      actions={
+        <>
+          <span className={`status-pill ${on ? "status-good" : "status-watch"}`}>{on ? "ON" : "OFF"}</span>
+          {onOpen && (
+            <button type="button" className="secondary-button py-1.5 text-xs" onClick={onOpen}>
+              Open settings
+              <ArrowRight className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </>
+      }
+    >
+      <div className="grid grid-cols-2 gap-3">
+        {tiles.length ? tiles.map(([label, value]) => <Tile key={label} label={label} value={value} />) : <div className="skeleton col-span-2 h-20" />}
+      </div>
+    </SettingsSection>
+  );
+}
+
+/**
+ * Settings > Intraday trading: capital, risk, limits, window, order entry,
+ * signals and indicator periods, one section at a time.
+ */
+export function TradingControlsForm({ isAdmin, onMessage }: { isAdmin: boolean; onMessage: Notify }) {
+  const state = useTradingCatalog(onMessage);
+  const { catalog, draft, setDraft, dirty, changes, load, save } = state;
+  const [presets, setPresets] = useState<RiskPreset[]>([]);
+  const [section, setSection] = useState(INTRADAY_SECTIONS[0].id);
+  const [reviewing, setReviewing] = useState(false);
+
+  useEffect(() => {
+    void api.riskPresets().then(setPresets).catch(() => undefined);
+  }, []);
+
+  if (!catalog) return <div className="panel mt-6 max-w-6xl p-5"><div className="skeleton h-40" /></div>;
+
+  const current = INTRADAY_SECTIONS.find((item) => item.id === section);
+  const sectionTabs = [
+    ...INTRADAY_SECTIONS.map((item) => ({
+      id: item.id,
+      label: item.label,
+      edited: catalog.settings.filter((spec) => item.pick(spec) && dirty.includes(spec.key)).length,
+    })),
+    { id: INDICATORS, label: "Indicator periods" },
+  ];
+  const specs = current ? catalog.settings.filter(current.pick) : [];
+  const groups = current ? catalog.group_order.filter((group) => specs.some((spec) => spec.group === group)) : [];
+
+  return (
+    <section className="mt-6 max-w-6xl space-y-5" data-testid="settings-intraday">
+      <SectionNav sections={sectionTabs} active={section} onSelect={setSection} />
+
+      {section === "risk" && (
+        <>
+          <EffectiveSummary effective={catalog.effective} />
+          <CapitalRescaleNotice
+            settings={catalog.settings}
+            draft={draft}
+            onApply={(values) => setDraft((existing) => ({ ...existing, ...values }))}
+          />
+        </>
+      )}
+
+      {section === INDICATORS ? (
+        <IndicatorSettingsForm isAdmin={isAdmin} onMessage={onMessage} embedded />
+      ) : (
+        groups.map((group) => (
+          <SettingsSection
+            key={group}
+            title={section === "orders" ? "Order entry" : catalog.group_labels[group]}
+            eyebrow="Intraday"
+          >
+            <FieldGrid>
+              {specs
+                .filter((spec) => spec.group === group)
+                .map((spec) => (
+                  <Field key={spec.key} spec={spec} state={state} isAdmin={isAdmin} />
+                ))}
+            </FieldGrid>
+          </SettingsSection>
+        ))
+      )}
+
+      {section === "limits" && presets.length > 0 && (
+        <RiskProfiles presets={presets} isAdmin={isAdmin} hasDraft={dirty.length > 0} onMessage={onMessage} onApplied={load} />
+      )}
+
+      {isAdmin && section !== INDICATORS && (
+        <SaveBar count={dirty.length} onDiscard={() => void load()} onReview={() => setReviewing(true)} />
+      )}
+      {reviewing && (
+        <ChangesModal
+          title="Save intraday settings?"
+          changes={changes}
+          warning="The intraday desk trades real money. Check each line; the time each change applies is in its (i) hint."
+          onConfirm={save}
+          onClose={() => setReviewing(false)}
+        />
+      )}
+    </section>
+  );
+}
+
+/**
+ * Ready-made risk profiles. Applying one is saved like a hand edit. The server
+ * refuses a profile that raises a limit until that is acknowledged; the popup
+ * then shows the server's own words and asks again.
+ */
+function RiskProfiles({
+  presets,
+  isAdmin,
+  hasDraft,
+  onMessage,
+  onApplied,
+}: {
+  presets: RiskPreset[];
+  isAdmin: boolean;
+  hasDraft: boolean;
+  onMessage: Notify;
+  onApplied: () => Promise<void>;
+}) {
+  const [asking, setAsking] = useState<RiskPreset | null>(null);
+  const [raises, setRaises] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  function close() {
+    setAsking(null);
+    setRaises(null);
+  }
+
+  async function apply(confirmIncrease: boolean) {
+    if (!asking) return;
+    setBusy(true);
+    try {
+      await api.applyRiskPreset(asking.key, confirmIncrease);
+      onMessage(`Applied ${asking.label}.`, "success");
+      await onApplied();
+      close();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Could not apply preset";
+      if (!confirmIncrease && detail.includes("raises a risk limit")) setRaises(detail);
+      else onMessage(detail, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SettingsSection
+      eyebrow="Intraday"
+      title="Risk profiles"
+      hint="Applying a profile saves it the same way a hand edit does: validated, versioned and audited. A profile that raises a limit asks a second time."
+    >
+      <div className="grid gap-3 md:grid-cols-2">
+        {presets.map((preset) => (
+          <div key={preset.key} className="glass-inset flex flex-col rounded-md p-3.5">
+            <p className="flex items-center gap-1.5 text-sm font-semibold text-white">{preset.label}</p>
+            <p className="mt-1 text-xs leading-5 text-slate-400">{preset.description}</p>
+            <p className="numeric mt-2 text-xs text-slate-300">
+              ₹{preset.effective.planned_risk_per_trade} a trade · ₹{preset.effective.daily_loss_limit} daily stop ·{" "}
+              {preset.effective.effective_trade_ceiling} trades
+            </p>
+            {isAdmin && (
+              <button
+                type="button"
+                className="secondary-button mt-3 self-start py-1.5 text-xs"
+                disabled={hasDraft}
+                title={hasDraft ? "Save or discard your edits first" : undefined}
+                onClick={() => setAsking(preset)}
+              >
+                <ShieldCheck className="h-4 w-4" />
+                Apply {preset.label}
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+      {asking && (
+        <Modal
+          title={raises ? `${asking.label} raises a limit` : `Apply ${asking.label}?`}
+          eyebrow="Risk profile"
+          tone={raises ? "danger" : "warning"}
+          role="alertdialog"
+          busy={busy}
+          testId="preset-modal"
+          onClose={close}
+          footer={
+            <>
+              <button type="button" className="secondary-button" disabled={busy} onClick={close}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={raises ? "danger-button" : "primary-button"}
+                disabled={busy}
+                onClick={() => void apply(Boolean(raises))}
+              >
+                {raises ? "Yes, raise the limits" : `Apply ${asking.label}`}
+              </button>
+            </>
+          }
+        >
+          <p className="text-sm leading-6 text-slate-300">{asking.description}</p>
+          <p className="numeric mt-3 text-xs text-slate-300">
+            ₹{asking.effective.planned_risk_per_trade} a trade · ₹{asking.effective.daily_loss_limit} daily stop ·{" "}
+            {asking.effective.effective_trade_ceiling} trades
+          </p>
+          {raises && (
+            <p className="mt-4 flex gap-2 rounded-md border border-rose-500/40 bg-rose-950/25 p-3 text-xs leading-5 text-rose-100">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              {raises}
+            </p>
+          )}
+        </Modal>
+      )}
+    </SettingsSection>
   );
 }
 
@@ -237,21 +492,14 @@ export function TradingControlsForm({ isAdmin, onMessage }: { isAdmin: boolean; 
 const CAPITAL_LINKED = ["daily_loss_limit", "daily_profit_target"] as const;
 
 /**
- * Capital was edited; the rupee limits below did not move.
+ * Capital was edited; the rupee limits did not move.
  *
  * These are stored as absolute rupees on purpose: a daily stop is an amount you
  * are willing to lose today, and one that quietly rescaled when capital was
  * edited would turn a mistyped 100000 into a ten-times-larger loss limit
- * nobody chose. That reasoning is sound and this does not change it.
- *
- * But leaving them alone is its own silent failure in the other direction —
- * raise capital tenfold and a ₹100 stop becomes 0.1%, a limit that will never
- * be reached, which is just as far from what the operator meant. Both
- * behaviours fail quietly; only one of them is usually noticed.
- *
- * So: say what happened, show both percentages, and offer one button. Nothing
- * rescales without a click, and nothing rescales on save — the values land in
- * the draft and still have to be reviewed and saved like any other edit.
+ * nobody chose. But leaving them alone fails quietly in the other direction,
+ * so: say what happened, show both percentages, and offer one button that only
+ * fills the draft.
  */
 function CapitalRescaleNotice({
   settings,
@@ -270,8 +518,6 @@ function CapitalRescaleNotice({
     const amount = Number(draft[key] ?? 0);
     const spec = settings.find((item) => item.key === key);
     const oldPercent = (amount / saved) * 100;
-    // Rounded to whole rupees: these are limits a person states, not a
-    // derived figure, and 1000.0000000001 reads as a bug.
     const suggested = Math.round((oldPercent / 100) * next);
     return { key, label: spec?.label ?? key, amount, oldPercent, newPercent: (amount / next) * 100, suggested };
   }).filter((row) => row.amount > 0 && row.suggested !== row.amount);
@@ -279,36 +525,23 @@ function CapitalRescaleNotice({
   if (!rows.length) return null;
 
   return (
-    <article className="panel border border-amber-500/30 p-5 sm:p-7">
+    <article className="panel border border-amber-500/30 p-4 sm:p-5">
       <p className="eyebrow text-amber-300">Capital changed</p>
-      <h3 className="mt-1 text-base font-semibold text-white">
-        The rupee limits below have not moved with it
-      </h3>
-      <p className="mt-3 text-sm leading-6 text-slate-400">
-        Capital is going from ₹{saved.toLocaleString("en-IN")} to ₹{next.toLocaleString("en-IN")}. These limits are
-        stored as amounts, not percentages, so they still say what they said before — which now means something
-        different.
-      </p>
-
-      <div className="mt-4 space-y-2">
+      <h3 className="mt-1 text-base font-semibold text-white">The rupee limits in Daily limits have not moved with it</h3>
+      <div className="mt-3 space-y-1.5">
         {rows.map((row) => (
           <p key={row.key} className="numeric text-xs text-slate-300">
             <span className="text-slate-400">{row.label}:</span> ₹{row.amount.toLocaleString("en-IN")} was{" "}
-            {row.oldPercent.toFixed(2)}% of capital, now {row.newPercent.toFixed(2)}% — keep{" "}
-            {row.oldPercent.toFixed(2)}% with ₹{row.suggested.toLocaleString("en-IN")}
+            {row.oldPercent.toFixed(2)}% of capital, now {row.newPercent.toFixed(2)}% — keep {row.oldPercent.toFixed(2)}% with ₹
+            {row.suggested.toLocaleString("en-IN")}
           </p>
         ))}
       </div>
-
-      <button
-        onClick={() => onApply(Object.fromEntries(rows.map((row) => [row.key, row.suggested])))}
-        className="secondary-button mt-5"
-      >
+      <button onClick={() => onApply(Object.fromEntries(rows.map((row) => [row.key, row.suggested])))} className="secondary-button mt-4">
         Keep the same percentages
       </button>
-      <p className="mt-3 text-xs leading-5 text-slate-500">
-        This only fills the boxes below. Nothing is saved until you press Save, and leaving the amounts as they are
-        is a valid choice — a stop in rupees is a real decision, not only a fraction of capital.
+      <p className="mt-2 text-xs leading-5 text-slate-500">
+        This only fills the boxes; nothing is saved until you review and save. Leaving the amounts as they are is a valid choice.
       </p>
     </article>
   );
@@ -317,30 +550,28 @@ function CapitalRescaleNotice({
 function EffectiveSummary({ effective }: { effective: EffectiveLimits }) {
   const constrained = effective.effective_trade_ceiling < effective.configured_trade_ceiling;
   return (
-    <article className="panel p-5 sm:p-7">
-      <p className="eyebrow">What these settings allow</p>
-      <h3 className="mt-1 text-base font-semibold text-white">Effective limits</h3>
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Metric label="Planned risk a trade" value={`₹${effective.planned_risk_per_trade}`} note="If the stop is hit" />
-        <Metric
+    <SettingsSection
+      eyebrow="What these settings allow"
+      title="Effective limits"
+      hint="Read together from every control below. A stop is an instruction to the market, not a guarantee: a gap, slippage, or a stop that cannot be placed will all exceed the planned figures."
+    >
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Tile label="Planned risk a trade" value={`₹${effective.planned_risk_per_trade}`} note="If the stop is hit" />
+        <Tile
           label="Trades today"
           value={`${effective.effective_trade_ceiling}`}
           note={constrained ? `of ${effective.configured_trade_ceiling} configured` : "account-wide, on first fill"}
           tone={constrained ? "warn" : undefined}
         />
-        <Metric
+        <Tile
           label="Daily loss stop"
           value={`₹${effective.daily_loss_limit}`}
           note={effective.daily_loss_percent ? `${effective.daily_loss_percent}% of capital` : "not set"}
         />
-        <Metric
-          label="Exposure ceiling"
-          value={`₹${effective.exposure_ceiling}`}
-          note={`${effective.leverage_multiplier}× leverage — exposure, not cash`}
-        />
+        <Tile label="Exposure ceiling" value={`₹${effective.exposure_ceiling}`} note={`${effective.leverage_multiplier}× leverage`} />
       </div>
       {effective.warnings.length > 0 && (
-        <ul className="mt-4 space-y-2">
+        <ul className="mt-3 space-y-2">
           {effective.warnings.map((warning) => (
             <li key={warning} className="flex gap-2 rounded-md border border-amber-500/30 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
@@ -349,29 +580,13 @@ function EffectiveSummary({ effective }: { effective: EffectiveLimits }) {
           ))}
         </ul>
       )}
-      <p className="mt-4 text-xs leading-5 text-slate-500">
-        A stop is an instruction to the market, not a guarantee. A gap, slippage, or a stop that cannot be placed will
-        all exceed the planned figures above.
-      </p>
-    </article>
+    </SettingsSection>
   );
 }
-
-function Metric({ label, value, note, tone }: { label: string; value: string; note: string; tone?: "warn" }) {
-  return (
-    <div className="glass-inset rounded-md p-4">
-      <p className="eyebrow">{label}</p>
-      <p className={`mt-2 numeric text-xl font-semibold ${tone === "warn" ? "text-amber-300" : "text-white"}`}>{value}</p>
-      <p className="mt-1 text-xs text-slate-500">{note}</p>
-    </div>
-  );
-}
-
 
 /**
  * One card per desk: what it does, whether it is on, and a switch that asks
- * first. The words come from the server's catalogue; the consequence of
- * flipping it is spelled out before anything is saved.
+ * first, in a popup that spells out the consequence.
  */
 function DesksCard({
   specs,
@@ -382,65 +597,72 @@ function DesksCard({
   isAdmin: boolean;
   onSave: (key: string, turningOn: boolean) => Promise<boolean>;
 }) {
-  const [confirming, setConfirming] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<SettingSpec | null>(null);
   const [busy, setBusy] = useState(false);
+  const asking = confirming ? { desk: DESK_KEYS[confirming.key], on: confirming.value === true } : null;
   return (
-    <article className="panel p-5 sm:p-7" data-testid="desks-card">
-      <p className="eyebrow">What this account trades</p>
-      <h3 className="mt-1 text-base font-semibold text-white">Trading desks</h3>
-      <p className="mt-1 text-xs leading-5 text-slate-400">
-        Switching a desk off stops new trades on it. It never abandons a position that is already open.
-      </p>
-      <div className="mt-5 grid gap-4 lg:grid-cols-2">
+    <SettingsSection
+      testId="desks-card"
+      eyebrow="What this account trades"
+      title="Trading desks"
+      hint="Switching a desk off stops new trades on it. It never abandons a position that is already open."
+    >
+      <div className="grid gap-3 lg:grid-cols-2">
         {specs.map((spec) => {
           const desk = DESK_KEYS[spec.key];
           const on = spec.value === true;
-          const asking = confirming === spec.key;
           return (
-            <div key={spec.key} className="glass-inset rounded-md p-4" data-testid={`desk-${desk}`}>
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-sm font-semibold text-white">{spec.label}</p>
-                <span className={`status-pill ${on ? "status-good" : "status-watch"}`}>{on ? "ON" : "OFF"}</span>
+            <div key={spec.key} className="glass-inset flex items-center justify-between gap-3 rounded-md p-3.5" data-testid={`desk-${desk}`}>
+              <div className="min-w-0">
+                <p className="flex items-center gap-1.5 text-sm font-semibold text-white">
+                  {spec.label}
+                  <span className={`status-pill ${on ? "status-good" : "status-watch"}`}>{on ? "ON" : "OFF"}</span>
+                </p>
+                <p className="mt-1 text-xs text-slate-400">{desk === "swing" ? "Paper only — no swing order reaches the broker." : "Live orders, real money."}</p>
               </div>
-              <p className="mt-2 text-xs leading-5 text-slate-400">{spec.help}</p>
-              {desk === "swing" && (
-                <p className="mt-2 text-xs font-medium text-sky-300">Paper only — no swing order reaches the broker.</p>
-              )}
-              {isAdmin && !asking && (
-                <button onClick={() => setConfirming(spec.key)} className="secondary-button mt-4">
+              {isAdmin && (
+                <button onClick={() => setConfirming(spec)} className="secondary-button shrink-0 py-1.5 text-xs">
                   <Power className="h-4 w-4" />
                   {on ? "Turn off" : "Turn on"}
                 </button>
-              )}
-              {isAdmin && asking && (
-                <div className="mt-4 rounded-md border border-amber-500/30 bg-amber-950/20 p-3" role="alertdialog">
-                  <p className="text-sm font-semibold text-amber-100">
-                    Turn {spec.label.toLowerCase()} {on ? "off" : "on"}?
-                  </p>
-                  <p className="mt-1 text-xs leading-5 text-slate-300">{switchConsequence(desk, !on)}</p>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      disabled={busy}
-                      onClick={async () => {
-                        setBusy(true);
-                        const done = await onSave(spec.key, !on);
-                        setBusy(false);
-                        if (done) setConfirming(null);
-                      }}
-                      className={on ? "danger-button" : "primary-button"}
-                    >
-                      Yes, turn it {on ? "off" : "on"}
-                    </button>
-                    <button disabled={busy} onClick={() => setConfirming(null)} className="secondary-button">
-                      Cancel
-                    </button>
-                  </div>
-                </div>
               )}
             </div>
           );
         })}
       </div>
-    </article>
+      {confirming && asking && (
+        <Modal
+          title={`Turn ${confirming.label.toLowerCase()} ${asking.on ? "off" : "on"}?`}
+          eyebrow="Trading desks"
+          tone={asking.on ? "warning" : "default"}
+          role="alertdialog"
+          busy={busy}
+          testId="desk-modal"
+          onClose={() => setConfirming(null)}
+          footer={
+            <>
+              <button disabled={busy} onClick={() => setConfirming(null)} className="secondary-button">
+                Cancel
+              </button>
+              <button
+                disabled={busy}
+                className={asking.on ? "danger-button" : "primary-button"}
+                onClick={async () => {
+                  setBusy(true);
+                  const done = await onSave(confirming.key, !asking.on);
+                  setBusy(false);
+                  if (done) setConfirming(null);
+                }}
+              >
+                Yes, turn it {asking.on ? "off" : "on"}
+              </button>
+            </>
+          }
+        >
+          <p className="text-sm leading-6 text-slate-300">{switchConsequence(asking.desk, !asking.on)}</p>
+          <p className="mt-2 text-xs leading-5 text-slate-500">{confirming.help}</p>
+        </Modal>
+      )}
+    </SettingsSection>
   );
 }

@@ -177,8 +177,9 @@ export const workspaceTabs: Partial<Record<WorkspaceId, WorkspaceTab[]>> = {
     { id: "data", label: "Data & events" },
   ],
   settings: [
-    { id: "trading", label: "Trading controls" },
-    { id: "indicators", label: "Indicator periods" },
+    { id: "general", label: "General" },
+    { id: "intraday", label: "Intraday trading" },
+    { id: "swing", label: "Swing trading" },
     { id: "connections", label: "Connections" },
     { id: "charges", label: "Charges" },
     { id: "alerts", label: "Alerts" },

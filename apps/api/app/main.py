@@ -31,6 +31,7 @@ from app.api.routes import (
     shadow,
     strategy_builder,
     swing,
+    swing_settings,
     swing_tools,
     system,
     telegram,
@@ -175,3 +176,4 @@ app.include_router(diagnostics.router, prefix="/api/v1")
 app.include_router(users.router, prefix="/api/v1")
 app.include_router(strategy_builder.router, prefix="/api/v1")
 app.include_router(watchlist.router, prefix="/api/v1")
+app.include_router(swing_settings.router, prefix="/api/v1")

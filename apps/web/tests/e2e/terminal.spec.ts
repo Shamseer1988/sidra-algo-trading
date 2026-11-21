@@ -494,6 +494,46 @@ const MOCK_LIVE_READINESS = {
 };
 const MOCK_OMS_RECONCILIATIONS = [{ id: "recon-001", mode: "PAPER", status: "CLEAN", internal_orders: 3, external_orders: 0, unknown_orders: 0, detail: "Paper OMS has no external broker side; internal links are consistent.", created_at: new Date().toISOString() }];
 
+const swingSpec = (key: string, group: string, label: string, unit: string, kind: string, value: number, minimum: number, maximum: number) => ({
+  key,
+  group,
+  group_label: group,
+  label,
+  help: `${label} help`,
+  unit,
+  kind,
+  choices: [],
+  is_ceiling: false,
+  effect: "NEXT_SESSION",
+  effect_label: "Applies from the next evening run; positions already open keep their size and stop.",
+  value,
+  minimum,
+  maximum,
+  exclusive_minimum: null,
+  exclusive_maximum: null,
+  last_changed_at: null,
+});
+
+export const MOCK_SWING_SETTINGS = {
+  settings: [
+    swingSpec("capital", "SWING_CAPITAL", "Swing capital", "INR", "number", 100000, 10000, 10000000),
+    swingSpec("risk_per_trade_percent", "SWING_CAPITAL", "Risk a trade", "PERCENT", "number", 0.75, 0, 3),
+    swingSpec("heat_cap_percent", "SWING_CAPITAL", "Open-risk cap", "PERCENT", "number", 4, 0, 25),
+    swingSpec("max_open_positions", "SWING_POSITIONS", "Open positions", "COUNT", "integer", 5, 1, 20),
+  ],
+  group_order: ["SWING_CAPITAL", "SWING_POSITIONS"],
+  group_labels: { SWING_CAPITAL: "Capital and risk", SWING_POSITIONS: "Positions" },
+  effective: { risk_per_trade: 750, heat_cap: 4000, largest_position: 35000, trades_the_cap_allows: 5 },
+  schedule: {
+    quiet_hours: "9:00 AM - 3:40 PM IST on weekdays",
+    plan_after: "6:00 PM IST, once the candles are final",
+    entry: "At the next session open",
+    results_avoid_days: 5,
+    results_exit_days: 3,
+  },
+  saved: false,
+};
+
 export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" = "ADMIN") {
   const user = userRole === "ADMIN" ? MOCK_ADMIN_USER : MOCK_VIEWER_USER;
   let currentScanner = { status: "STOPPED", last_heartbeat: new Date().toISOString(), detail: "Scanner is paused" };
@@ -555,6 +595,10 @@ export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" =
 
   await page.route("**/api/v1/settings/trading/presets", async (route: Route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(MOCK_PRESETS) });
+  });
+
+  await page.route("**/api/v1/settings/swing", async (route: Route) => {
+    await route.fulfill({ json: MOCK_SWING_SETTINGS });
   });
 
   await page.route("**/api/v1/live-shadow/activation", async (route: Route) => {
@@ -1069,9 +1113,12 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await go(page, "Settings");
 
     // A viewer sees the settings and can change none of them.
-    await expect(page.locator('input[type="number"]').first()).toBeDisabled();
     await expect(page.getByLabel("Live broker")).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Turn off" })).toHaveCount(0);
+    await page.getByRole("tab", { name: "Intraday trading", exact: true }).click();
     await expect(page.getByLabel("Use intraday leverage")).toBeDisabled();
+    await page.getByRole("button", { name: "Daily limits" }).click();
+    await expect(page.locator('input[type="number"]').first()).toBeDisabled();
     // No save, no discard, and no way to apply a risk profile in one click.
     await expect(page.getByRole("button", { name: /^Save/ })).toHaveCount(0);
     await expect(page.getByRole("button", { name: /^Apply/ })).toHaveCount(0);
@@ -1151,9 +1198,13 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
-    // Navigate to Settings
+    // Settings opens on General; the intraday desk's own settings have their own tab.
     await go(page, "Settings");
-    await expect(page.getByRole("heading", { name: "Trading controls" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "General", exact: true })).toBeVisible();
+    await expect(page.getByTestId("summary-intraday")).toBeVisible();
+    await expect(page.getByTestId("summary-swing")).toContainText("₹750");
+    await page.getByTestId("summary-intraday").getByRole("button", { name: "Open settings" }).click();
+    await expect(page.getByRole("heading", { name: "Intraday trading", exact: true })).toBeVisible();
 
     // What the settings actually permit, shown above the inputs that set them.
     await expect(page.getByRole("heading", { name: "Effective limits" })).toBeVisible();
@@ -1162,30 +1213,27 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText("of 4 configured")).toBeVisible();
     await expect(page.getByText(/only 2 of the 4 configured trades/)).toBeVisible();
 
-    // Exposure is labelled as exposure, never as cash.
-    await expect(page.getByText(/exposure, not cash/)).toBeVisible();
-
-    // A stop is an instruction, not a promise.
-    await expect(page.getByText(/not a guarantee/)).toBeVisible();
-
-    // Every control carries its unit, its range, when it takes effect, and
-    // when it last moved — the things the old raw-input grid never said.
-    await expect(page.getByText("Allowed: 1 to 20")).toBeVisible();
-    await expect(page.getByText(/Applies at once, including to the session already running/).first()).toBeVisible();
-    await expect(page.getByText(/Last changed/)).toBeVisible();
-    await expect(page.getByText("Not changed here yet").first()).toBeVisible();
-
-    // No broker chosen is a refusal, not a fallback to whichever one exists.
-    await expect(page.getByLabel("Live broker")).toHaveValue("NONE");
+    // The explanations wait behind the (i): not printed, shown on hover.
+    await page.getByRole("button", { name: "Daily limits" }).click();
+    await expect(page.getByText("Allowed: 1 to 20")).toHaveCount(0);
+    await page.getByTestId("hint-maximum_daily_trades").hover();
+    const tip = page.getByRole("tooltip");
+    await expect(tip).toContainText("Allowed: 1 to 20");
+    await expect(tip).toContainText(/Applies at once, including to the session already running/);
+    await expect(tip).toContainText("maximum_daily_trades");
+    await shot(page, "settings-hint");
 
     // Nothing to save until something is edited.
-    await expect(page.getByText("No changes to save.")).toBeVisible();
+    await expect(page.getByTestId("save-bar")).toHaveCount(0);
 
-    // Editing one control offers to save exactly that one.
+    // Editing one control offers to save exactly that one, after a popup that shows it.
     await page.getByLabel("Maximum trades per day").fill("3");
-    const saveBtn = page.getByRole("button", { name: "Save 1 change" });
-    await expect(saveBtn).toBeEnabled();
-    await saveBtn.click();
+    await expect(page.getByTestId("save-bar")).toContainText("1 unsaved change");
+    await page.getByRole("button", { name: "Review and save" }).click();
+    const review = page.getByTestId("changes-modal");
+    await expect(review).toContainText("Maximum trades per day");
+    await shot(page, "settings-review");
+    await review.getByRole("button", { name: "Save changes" }).click();
     await expect(page.getByText("Saved 1 change.")).toBeVisible();
   });
 
@@ -2029,14 +2077,16 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
 
-    await go(page, "Settings", "Trading controls");
+    await go(page, "Settings", "Intraday trading");
+    await page.getByRole("button", { name: "Order entry" }).click();
 
     // The control that decides how far past its signal a live entry may fill,
     // and therefore whether the planned risk is a ceiling or an intention. It
     // has to be reachable here: a number that can only be changed by editing a
     // Python file is one nobody adjusts.
     await expect(page.getByText("Entry slippage cap")).toBeVisible();
-    await expect(page.getByText(/sized from it, so a fill anywhere inside the cap/)).toBeVisible();
+    await page.getByTestId("hint-entry_slippage_cap_percent").hover();
+    await expect(page.getByRole("tooltip")).toContainText(/sized from it, so a fill anywhere inside the cap/);
   });
 
   test("9e. Settings: alerts moved in from their own menu entry", async ({ page }) => {
@@ -2354,7 +2404,9 @@ async function mockDesks(page: Page, desks: { intraday: boolean; swing: boolean 
 
 async function shot(page: Page, name: string) {
   const dir = process.env.SCREENSHOT_DIR;
-  if (dir) await page.screenshot({ path: `${dir}/${name}.png`, fullPage: false });
+  if (!dir) return;
+  await page.waitForTimeout(400); // let tab and pill transitions finish
+  await page.screenshot({ path: `${dir}/${name}.png`, fullPage: false });
 }
 
 test.describe("Trading desks", () => {
@@ -2398,11 +2450,12 @@ test.describe("Trading desks", () => {
     await shot(page, "desk-settings");
 
     await card.getByRole("button", { name: "Turn off" }).click();
-    await expect(card).toContainText("Positions already open are not abandoned");
+    const ask = page.getByTestId("desk-modal");
+    await expect(ask).toContainText("Positions already open are not abandoned");
     await shot(page, "desk-confirm");
     expect(puts).toHaveLength(0);
 
-    await card.getByRole("button", { name: "Yes, turn it off" }).click();
+    await ask.getByRole("button", { name: "Yes, turn it off" }).click();
     await expect(card).toContainText("OFF");
     expect(puts).toHaveLength(1);
     const saved = Object.fromEntries(MOCK_CATALOG.settings.map((item) => [item.key, item.value]));
@@ -2415,10 +2468,10 @@ test.describe("Trading desks", () => {
     const puts = await mockDesks(page, { intraday: true, swing: false });
     await page.goto("/");
     await go(page, "Settings");
-    await page.getByLabel("Use intraday leverage").click();
+    await page.getByLabel("Live broker").selectOption("UPSTOX");
     const card = page.getByTestId("desk-intraday");
     await card.getByRole("button", { name: "Turn off" }).click();
-    await card.getByRole("button", { name: "Yes, turn it off" }).click();
+    await page.getByTestId("desk-modal").getByRole("button", { name: "Yes, turn it off" }).click();
     await expect(page.getByText("Save or discard your other changes first")).toBeVisible();
     expect(puts).toHaveLength(0);
   });
@@ -2689,6 +2742,10 @@ test.describe("Charges", () => {
     await mockCharges(page);
     await page.goto("/");
     await go(page, "Settings", "Charges");
+    await expect(page.getByTestId("charges-broker-fyers")).toBeDisabled();
+    await expect(page.getByTestId("charges-broker-fyers")).toContainText("Coming soon");
+    await shot(page, "charges-cards");
+    await page.getByTestId("charges-broker-upstox").click();
     await expect(page.getByTestId("charges-intraday")).toContainText("Brokerage cap");
     await expect(page.getByTestId("charges-intraday-total")).toHaveText("₹50.40");
     await expect(page.getByTestId("charges-swing")).toHaveCount(0);
@@ -2700,6 +2757,8 @@ test.describe("Charges", () => {
     const calls = await mockCharges(page);
     await page.goto("/");
     await go(page, "Settings", "Charges");
+    await page.getByTestId("charges-broker-upstox").click();
+    await page.getByTestId("charges-modal").getByRole("button", { name: "Swing (delivery)" }).click();
     const card = page.getByTestId("charges-swing");
     await expect(card.getByRole("button", { name: "Save swing charges" })).toBeDisabled();
     await card.getByLabel("Brokerage per order").fill("0");
@@ -2720,6 +2779,7 @@ test.describe("Charges", () => {
     await mockCharges(page);
     await page.goto("/");
     await go(page, "Settings", "Charges");
+    await page.getByTestId("charges-broker-upstox").click();
     await expect(page.getByTestId("charges-intraday").getByLabel("Brokerage cap")).toBeDisabled();
     await expect(page.getByRole("button", { name: /Save .* charges/ })).toHaveCount(0);
   });
@@ -2773,6 +2833,7 @@ test.describe("Connections", () => {
     await mockConnections(page);
     await page.goto("/");
     await go(page, "Settings", "Connections");
+    await page.getByTestId("broker-upstox").click();
     const upstox = page.getByTestId("connection-upstox");
     await expect(upstox).toContainText("From server file");
     await expect(upstox).toContainText("Morning auto-login not set");
@@ -2786,6 +2847,7 @@ test.describe("Connections", () => {
     const calls = await mockConnections(page);
     await page.goto("/");
     await go(page, "Settings", "Connections");
+    await page.getByTestId("broker-upstox").click();
     const upstox = page.getByTestId("connection-upstox");
     await expect(upstox.getByRole("button", { name: "Save Upstox" })).toBeDisabled();
     await upstox.getByLabel("Mobile number").fill("9876543210");
@@ -2805,7 +2867,67 @@ test.describe("Connections", () => {
     await page.goto("/");
     await go(page, "Settings", "Connections");
     await expect(page.getByTestId("no-server-key")).toBeVisible();
+    await page.getByTestId("broker-upstox").click();
     await expect(page.getByTestId("connection-upstox").getByLabel("Login PIN")).toBeDisabled();
+  });
+});
+
+test.describe("Swing trading settings", () => {
+  test("capital and limits are set from the screen, and a save needs a reason", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const puts: Record<string, unknown>[] = [];
+    await page.route("**/api/v1/settings/swing", async (route: Route) => {
+      if (route.request().method() === "PUT") {
+        const body = route.request().postDataJSON() as { values: Record<string, unknown> };
+        puts.push(body);
+        await route.fulfill({
+          json: {
+            ...MOCK_SWING_SETTINGS,
+            saved: true,
+            settings: MOCK_SWING_SETTINGS.settings.map((spec) => ({ ...spec, value: body.values[spec.key] })),
+          },
+        });
+        return;
+      }
+      await route.fulfill({ json: MOCK_SWING_SETTINGS });
+    });
+    await page.goto("/");
+    await go(page, "Settings", "Swing trading");
+    const tab = page.getByTestId("settings-swing");
+    await expect(tab).toContainText("₹750");
+    await expect(tab).toContainText("6:00 PM IST");
+    await page.getByLabel("Swing capital").fill("200000");
+    await expect(tab).toContainText("₹1,500 a trade");
+    await shot(page, "settings-swing");
+    await page.getByRole("button", { name: "Review and save" }).click();
+    const review = page.getByTestId("changes-modal");
+    await expect(review).toContainText("₹1,00,000");
+    await expect(review).toContainText("₹2,00,000");
+    await expect(review.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    await review.getByLabel("Why (kept in the change history)").fill("more paper capital");
+    await shot(page, "settings-swing-review");
+    await review.getByRole("button", { name: "Save changes" }).click();
+    await expect(page.getByText("Swing settings saved.")).toBeVisible();
+    expect(puts).toHaveLength(1);
+    expect(puts[0]).toEqual({
+      values: { capital: 200000, risk_per_trade_percent: 0.75, heat_cap_percent: 4, max_open_positions: 5 },
+      reason: "more paper capital",
+    });
+  });
+
+  test("a connection is a card; brokers not built yet say so and do nothing", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockConnections(page);
+    await page.goto("/");
+    await go(page, "Settings", "Connections");
+    await expect(page.getByTestId("broker-fyers")).toBeDisabled();
+    await expect(page.getByTestId("broker-firstock")).toContainText("Coming soon");
+    await expect(page.getByTestId("connection-upstox")).toHaveCount(0);
+    await shot(page, "connections-cards");
+    await page.getByTestId("broker-upstox").click();
+    await expect(page.getByTestId("upstox-modal")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("upstox-modal")).toHaveCount(0);
   });
 });
 

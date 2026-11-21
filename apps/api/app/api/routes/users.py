@@ -195,7 +195,7 @@ async def checklist(session: DbSession, settings: AppSettings, _: CurrentUser) -
             done=await _setting(session, TRADING_KEY) is not None,
             detail="Capital, risk per trade, trades a day and the daily loss stop, saved at least once.",
             workspace="settings",
-            tab="trading",
+            tab="intraday",
             required=True,
         ),
         ChecklistItem(

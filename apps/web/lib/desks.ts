@@ -85,6 +85,6 @@ export function switchConsequence(desk: Desk, turningOn: boolean): string {
       : "From the next candle no new intraday trade is opened. Positions already open are not abandoned: their stops, targets and the square-off keep working until they close.";
   }
   return turningOn
-    ? "Each evening after the close the swing desk plans trades for the next session and simulates them with ₹1,00,000 of paper money. No swing order is sent to the broker."
+    ? "Each evening after the close the swing desk plans trades for the next session and simulates them with the paper capital set in Settings › Swing trading. No swing order is sent to the broker."
     : "No new swing plans. Paper positions already open are still managed until they close; plans not yet bought are cancelled.";
 }
