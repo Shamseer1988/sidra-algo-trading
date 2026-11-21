@@ -11,6 +11,7 @@ import { ChargesForm } from "./charges-form";
 import { ConnectionsForm } from "./connections-form";
 import { IndicatorSettingsForm } from "./indicator-settings-form";
 import { TradingControlsForm } from "./trading-controls-form";
+import { SetupChecklist, UsersPanel } from "./users-panel";
 
 /**
  * Settings, one tab at a time.
@@ -53,6 +54,14 @@ const TAB_COPY: Record<string, { title: string; copy: string }> = {
     title: "Sessions",
     copy: "Every signed-in browser, and the ability to end any of them.",
   },
+  users: {
+    title: "Users",
+    copy: "Who can open this app and what each person may do. Every change is recorded in the audit log.",
+  },
+  setup: {
+    title: "Setup checklist",
+    copy: "What this app needs before it can trade, in order. Each step opens the screen that does it.",
+  },
 };
 
 export function SettingsPanel({
@@ -64,6 +73,7 @@ export function SettingsPanel({
   onTelegram,
   onRegisterWebhook,
   desks = { intraday: true, swing: false },
+  onOpen,
 }: {
   tab: string;
   isAdmin: boolean;
@@ -73,6 +83,7 @@ export function SettingsPanel({
   onTelegram: () => void;
   onRegisterWebhook: () => void;
   desks?: DeskState;
+  onOpen?: (workspace: string, tab: string | null) => void;
 }) {
   const meta = TAB_COPY[tab] ?? TAB_COPY.trading;
   return (
@@ -95,6 +106,10 @@ export function SettingsPanel({
         <AlertsPanel telegram={telegram} isAdmin={isAdmin} onTelegram={onTelegram} onRegisterWebhook={onRegisterWebhook} />
       ) : tab === "data" ? (
         <MarketDataFeedSelector isAdmin={isAdmin} onMessage={onMessage} onNavigate={onNavigate} />
+      ) : tab === "users" ? (
+        <UsersPanel isAdmin={isAdmin} onMessage={onMessage} />
+      ) : tab === "setup" ? (
+        <SetupChecklist onMessage={onMessage} onOpen={onOpen} />
       ) : tab === "security" ? (
         <SecurityPanel isAdmin={isAdmin} onMessage={onMessage} />
       ) : (

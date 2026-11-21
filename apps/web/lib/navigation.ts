@@ -179,6 +179,8 @@ export const workspaceTabs: Partial<Record<WorkspaceId, WorkspaceTab[]>> = {
     { id: "alerts", label: "Alerts" },
     { id: "data", label: "Market data" },
     { id: "security", label: "Sessions" },
+    { id: "users", label: "Users" },
+    { id: "setup", label: "Setup checklist" },
   ],
 };
 

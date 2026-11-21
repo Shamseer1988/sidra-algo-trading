@@ -150,12 +150,18 @@ string.
 
 ## Step 4 — Create your login
 
+Open the web terminal. With no account yet, the sign-in page shows **Create
+the first administrator**: an email and a password (twelve characters or more,
+typed twice). That page appears only while the app has no account at all;
+after that there is no signup, and other people are added by an administrator
+from **Settings › Users**. There is no default login.
+
+Then follow **Settings › Setup checklist**: each step opens the screen that
+does it. From the command line instead:
+
 ```sh
 docker compose exec api intraday-sentinel create-admin --email you@example.com
 ```
-
-It prompts for a password twice. Minimum twelve characters. This is the only
-account that exists; there is no default login and no signup page.
 
 ---
 
