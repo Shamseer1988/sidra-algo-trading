@@ -431,6 +431,8 @@ export type ConnectionsView = {
   upstox: { fields: CredentialField[]; login_ready: boolean; auto_login_ready: boolean; token_valid_until: string | null };
   telegram: { fields: CredentialField[]; ready: boolean };
 };
+export type DiagnosticReport = { name: string; title: string; help: string; options: string[]; when: string };
+export type DiagnosticRun = { name: string; command: string; exit_code: number; output: string; started_at: string; seconds: number; truncated: boolean };
 export type SwingJob = { id: string; status: "running" | "done" | "failed"; started_at: string; finished_at: string | null; detail: string };
 export type SwingJobs = { market_hours: boolean; jobs: Partial<Record<"backfill" | "backtest", SwingJob>> };
 export type SwingMetrics = { trades: number; wins: number; win_rate: number; net_pnl: number; charges: number; per_trade: number; average_r: number; profit_factor: number | null; max_drawdown: number; average_holding_days: number };
@@ -576,6 +578,9 @@ export const api = {
   swingStrategies: () => request<SwingStrategy[]>("/swing/strategies"),
   setSwingStrategyMode: (id: string, mode: StrategyMode, reason: string | null) =>
     request<SwingStrategy[]>(`/swing/strategies/${encodeURIComponent(id)}/mode`, { method: "PUT", body: JSON.stringify({ mode, reason }) }),
+  diagnosticReports: () => request<DiagnosticReport[]>("/diagnostics/reports"),
+  runDiagnosticReport: (name: string, body: { session_date: string | null; from_date: string | null; to_date: string | null; after: string | null; no_broker: boolean }) =>
+    request<DiagnosticRun>(`/diagnostics/reports/${encodeURIComponent(name)}`, { method: "POST", body: JSON.stringify(body) }),
   swingJobs: () => request<SwingJobs>("/swing/jobs"),
   swingCoverage: () => request<SwingCoverage>("/swing/data/coverage"),
   startSwingBackfill: (years: number) => request<SwingJobs>("/swing/data/backfill", { method: "POST", body: JSON.stringify({ years }) }),

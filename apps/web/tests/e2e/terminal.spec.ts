@@ -2891,3 +2891,36 @@ test.describe("Swing backtest and data", () => {
     expect(post?.body).toEqual({ symbol: "SIEMENS", event_type: "SPLIT", ex_date: "2025-04-07", price_factor: 2.0104, amount: null, note: "Siemens Energy demerger" });
   });
 });
+
+
+// --- Diagnostics (U5) ----------------------------------------------------------------
+
+test.describe("Diagnostics", () => {
+  test("runs a read-only report with its date and shows the script's own output", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const bodies: unknown[] = [];
+    await page.route("**/api/v1/diagnostics/reports", async (route: Route) => {
+      await route.fulfill({
+        json: [
+          { name: "daily_review", title: "Daily review", help: "The day in one place.", options: ["date"], when: "After 3:30 PM for the full day" },
+          { name: "check_settings", title: "Settings check", help: "Every setting in force.", options: [], when: "Any time" },
+        ],
+      });
+    });
+    await page.route("**/api/v1/diagnostics/reports/*", async (route: Route) => {
+      bodies.push(route.request().postDataJSON());
+      await route.fulfill({
+        json: { name: "daily_review", command: "python scripts/daily_review.py --date 2026-11-20", exit_code: 0, output: "DAILY REVIEW 2026-11-20\n  trades: 2", started_at: "2026-11-21T10:00:00", seconds: 3.2, truncated: false },
+      });
+    });
+    await page.goto("/");
+    await go(page, "Reports", "Diagnostics");
+    await page.getByLabel("Session date").fill("2026-11-20");
+    await page.getByRole("button", { name: "Run Daily review" }).click();
+    await expect(page.getByTestId("diagnostics-output")).toContainText("DAILY REVIEW 2026-11-20");
+    expect(bodies[0]).toEqual({ session_date: "2026-11-20", from_date: null, to_date: null, after: null, no_broker: false });
+    await shot(page, "u5-diagnostics");
+    await page.getByRole("radio", { name: /Settings check/ }).click();
+    await expect(page.getByLabel("Session date")).toHaveCount(0);
+  });
+});

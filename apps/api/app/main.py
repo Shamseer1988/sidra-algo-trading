@@ -15,6 +15,7 @@ from app.api.routes import (
     broker_books,
     charges,
     connections,
+    diagnostics,
     events,
     health,
     history,
@@ -167,3 +168,4 @@ app.include_router(swing.router, prefix="/api/v1")
 app.include_router(charges.router, prefix="/api/v1")
 app.include_router(connections.router, prefix="/api/v1")
 app.include_router(swing_tools.router, prefix="/api/v1")
+app.include_router(diagnostics.router, prefix="/api/v1")
