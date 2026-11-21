@@ -36,6 +36,7 @@ from app.api.routes import (
     telegram,
     universe,
     users,
+    watchlist,
 )
 from app.api.routes import settings as settings_routes
 from app.core.config import get_settings
@@ -173,3 +174,4 @@ app.include_router(swing_tools.router, prefix="/api/v1")
 app.include_router(diagnostics.router, prefix="/api/v1")
 app.include_router(users.router, prefix="/api/v1")
 app.include_router(strategy_builder.router, prefix="/api/v1")
+app.include_router(watchlist.router, prefix="/api/v1")

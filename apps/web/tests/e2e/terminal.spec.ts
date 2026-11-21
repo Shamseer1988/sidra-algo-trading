@@ -3213,3 +3213,105 @@ test.describe("Strategy actions and popups", () => {
     await expect(page.getByRole("tab", { name: "Builder" })).toHaveAttribute("aria-selected", "true");
   });
 });
+
+
+// --- Strategies > Subscriptions ---------------------------------------------------------
+
+test.describe("Subscriptions", () => {
+  const VIEW = {
+    source: "server file",
+    benchmark: "NSE_INDEX|Nifty 50",
+    benchmark_name: "NIFTY 50",
+    benchmarks: [{ key: "NSE_INDEX|Nifty 50", name: "NIFTY 50" }, { key: "NSE_INDEX|Nifty Bank", name: "NIFTY BANK" }],
+    shares: [
+      { instrument_key: "NSE_EQ|INE062A01020", symbol: "SBIN", name: "State Bank of India", in_nifty200: true, known: true, sector: "BANK" },
+      { instrument_key: "NSE_EQ|INE467B01029", symbol: "TCS", name: "Tata Consultancy Services Ltd.", in_nifty200: true, known: true, sector: "IT" },
+    ],
+    applies: "A change saved now applies from the next trading day; today's scan keeps the list it started with.",
+    max_shares: 100,
+    updated_at: null,
+  };
+
+  async function mockWatchlist(page: Page) {
+    const saved: Record<string, unknown>[] = [];
+    await page.route("**/api/v1/watchlist", async (route) => {
+      if (route.request().method() === "PUT") {
+        const body = route.request().postDataJSON() as Record<string, unknown>;
+        saved.push(body);
+        await route.fulfill({ json: { ...VIEW, source: "screen" } });
+      } else {
+        await route.fulfill({ json: VIEW });
+      }
+    });
+    await page.route("**/api/v1/watchlist/search*", async (route) => {
+      await route.fulfill({
+        json: [
+          { instrument_key: "NSE_EQ|INE742F01042", symbol: "ADANIPORTS", name: "Adani Ports and Special Economic Zone Ltd.", in_nifty200: true, source: "NIFTY 200 file", sector: "ADANI" },
+          { instrument_key: "NSE_EQ|INE423A01024", symbol: "ADANIENT", name: "Adani Enterprises Ltd.", in_nifty200: true, source: "NIFTY 200 file", sector: "ADANI" },
+        ],
+      });
+    });
+    return saved;
+  }
+
+  test("a share is found by symbol, confirmed by its full company name, and saved with the removal", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const saved = await mockWatchlist(page);
+    await page.goto("/");
+    await go(page, "Strategies", "Subscriptions");
+    await expect(page.getByTestId("share-SBIN")).toContainText("State Bank of India");
+    await expect(page.getByRole("button", { name: "Save changes" })).toBeDisabled();
+
+    await page.getByLabel("Add a share").fill("ADANIPORTS");
+    await page.getByTestId("search-results").getByRole("button", { name: /ADANIPORTS/ }).click();
+    const add = page.getByTestId("add-confirm");
+    await expect(add.getByTestId("add-confirm-name")).toHaveText("Adani Ports and Special Economic Zone Ltd.");
+    await shot(page, "subscriptions-add-confirm");
+    await add.getByRole("button", { name: "Yes, add ADANIPORTS" }).click();
+    await expect(page.getByTestId("share-ADANIPORTS")).toContainText("New");
+
+    await page.getByRole("button", { name: "Remove TCS" }).click();
+    await expect(page.getByTestId("share-TCS")).toContainText("Removing");
+    await page.getByRole("button", { name: "Save changes" }).click();
+
+    const confirm = page.getByTestId("save-confirm");
+    await expect(confirm).toContainText("+ ADANIPORTS — Adani Ports and Special Economic Zone Ltd.");
+    await expect(confirm).toContainText("− TCS — Tata Consultancy Services Ltd.");
+    await expect(confirm).toContainText("real money");
+    const yes = confirm.getByRole("button", { name: "Yes, save the watchlist" });
+    await expect(yes).toBeDisabled();
+    await confirm.getByLabel("Why (kept in the audit log)").fill("add ports, drop TCS");
+    await confirm.getByLabel(/I have checked the company names/).check();
+    await shot(page, "subscriptions-save-confirm");
+    await yes.click();
+    await expect.poll(() => saved.length).toBe(1);
+    expect(saved[0]).toEqual({
+      instruments: ["NSE_EQ|INE062A01020", "NSE_EQ|INE742F01042"],
+      benchmark: "NSE_INDEX|Nifty 50",
+      reason: "add ports, drop TCS",
+      confirm: true,
+    });
+  });
+
+  test("a share already listed cannot be added twice, and a viewer cannot change anything", async ({ page }) => {
+    await setupMockRoutes(page, "VIEWER");
+    await mockWatchlist(page);
+    await page.goto("/");
+    await go(page, "Strategies", "Subscriptions");
+    await expect(page.getByTestId("share-SBIN")).toBeVisible();
+    await expect(page.getByLabel("Add a share")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Remove SBIN" })).toHaveCount(0);
+    await expect(page.getByLabel("Benchmark index")).toBeDisabled();
+  });
+
+  test("changing the benchmark warns about the live strategy and is listed in the confirmation", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockWatchlist(page);
+    await page.goto("/");
+    await go(page, "Strategies", "Subscriptions");
+    await page.getByLabel("Benchmark index").selectOption("NSE_INDEX|Nifty Bank");
+    await expect(page.getByText(/changes what the live RS Pullback calls/)).toBeVisible();
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await expect(page.getByTestId("save-confirm")).toContainText("Benchmark: NIFTY 50 → NIFTY BANK");
+  });
+});

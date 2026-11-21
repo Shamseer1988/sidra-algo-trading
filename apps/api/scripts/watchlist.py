@@ -36,6 +36,7 @@ from app.db.models import (
     MarketCandle,  # noqa: E402
 )
 from app.db.session import SessionLocal  # noqa: E402
+from app.services import watchlist_store  # noqa: E402
 from app.services.price_ticks import TICK  # noqa: E402
 from app.services.trading_symbols import (  # noqa: E402
     instrument_master_symbols,
@@ -56,7 +57,11 @@ async def main() -> int:
     parser.add_argument("--tokens", action="store_true", help="Show the Upstox key beside each name.")
     args = parser.parse_args()
 
-    settings = get_settings()
+    # Strategies > Subscriptions when a list is saved there, else UPSTOX_SUBSCRIPTIONS.
+    async with SessionLocal() as session:
+        saved = await watchlist_store.load(session)
+    settings = watchlist_store.apply(get_settings(), saved)
+    print(f"Source: {'Strategies > Subscriptions (saved on screen)' if saved else 'UPSTOX_SUBSCRIPTIONS in .env'}")
     configured = configured_subscriptions(settings)
     streamed = feed_subscriptions(settings)
 

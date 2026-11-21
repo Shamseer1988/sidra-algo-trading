@@ -147,6 +147,7 @@ export const workspaceTabs: Partial<Record<WorkspaceId, WorkspaceTab[]>> = {
   strategies: [
     { id: "control", label: "Control center" },
     { id: "builder", label: "Builder" },
+    { id: "subscriptions", label: "Subscriptions" },
   ],
   scanner: [
     { id: "scanner", label: "Scanner" },

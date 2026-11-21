@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import AuditLog, MarketCandle, User, UserRole
 from app.db.session import SessionLocal
+from app.services import watchlist_store
 from app.services.broker_controls import BrokerControls, load_broker_controls, save_broker_controls
 from app.services.credential_store import effective_settings
 from app.services.scheduler import AUTO_AUTH_STATUS_KEY, send_auto_auth_telegram_alert
@@ -240,7 +241,7 @@ async def refresh_upstox_instrument_master(
     settings: AppSettings, user: User = Depends(require_roles(UserRole.ADMIN))
 ) -> InstrumentRefreshResponse:
     try:
-        result = await refresh_upstox_instruments(settings)
+        result = await refresh_upstox_instruments(await watchlist_store.effective(settings))
     except InstrumentRefreshError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     async with SessionLocal() as session:

@@ -21,6 +21,7 @@ from app.db.models import (
     User,
     UserRole,
 )
+from app.services import watchlist_store
 from app.services.backtest_sweep import SWEEPABLE, run_parameter_sweep
 from app.services.backtesting import run_completed_candle_backtest
 from app.services.indicator_settings import effective as effective_settings
@@ -171,6 +172,10 @@ async def _load_history(
     # Reading one setting would fail every backtest on the other broker with
     # "Benchmark candles are unavailable", which names the wrong cause.
     benchmark_keys = {app_settings.nifty_benchmark_token, app_settings.upstox_nifty_benchmark_key}
+    # And the benchmark chosen in Strategies > Subscriptions, when one is saved.
+    saved = await watchlist_store.load(session)
+    if saved is not None:
+        benchmark_keys.add(saved.benchmark)
     all_tokens = list(dict.fromkeys([*instrument_tokens, *benchmark_keys]))
     rows = list(
         (
