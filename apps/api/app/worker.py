@@ -14,6 +14,7 @@ from redis.asyncio import Redis
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import SessionLocal
+from app.services import watchlist_store
 from app.services.broker_controls import load_broker_controls
 from app.services.candle_aggregation import (
     CandleAggregationService,
@@ -112,6 +113,14 @@ async def run() -> None:
     # corrupts the session instead of re-measuring it.
     indicators: IndicatorSettings | None = None
     indicators_session: date | None = None
+    # The watchlist and benchmark saved in Strategies > Subscriptions, layered
+    # over UPSTOX_SUBSCRIPTIONS. Resolved once a session like the indicator
+    # periods, and re-read until 9:00 AM IST so a change made before the open
+    # applies that morning. After 9:00 it waits for the next session: one
+    # day's scan is never two different lists.
+    active_watchlist: watchlist_store.SavedWatchlist | None = None
+    watchlist_session: date | None = None
+    last_watchlist_check = 0.0
     last_instrument_check = 0.0
     last_universe_refresh: object = None
     market_data_backoff = RestartBackoff()
@@ -155,7 +164,26 @@ async def run() -> None:
                         active_broker = None
                     indicators = resolved
                     indicators_session = session_today
-                    settings = overlay(base_settings, indicators)
+
+                local_now = datetime.now(UTC).astimezone(MARKET_TIMEZONE)
+                pre_open = (local_now.hour, local_now.minute) < watchlist_store.PRE_OPEN_CUTOFF
+                if watchlist_session != session_today or (pre_open and now - last_watchlist_check >= 60):
+                    last_watchlist_check = now
+                    async with SessionLocal() as db:
+                        resolved_watchlist = await watchlist_store.load(db)
+                    if watchlist_session is not None and resolved_watchlist != active_watchlist:
+                        logger.info(
+                            "scanner.watchlist_changed",
+                            session=session_today.isoformat(),
+                            shares=len(resolved_watchlist.instruments) if resolved_watchlist else None,
+                            benchmark=resolved_watchlist.benchmark if resolved_watchlist else None,
+                        )
+                        # The feed is restarted on the new list (see the broker check below).
+                        aggregation = None
+                        active_broker = None
+                    active_watchlist = resolved_watchlist
+                    watchlist_session = session_today
+                settings = overlay(watchlist_store.apply(base_settings, active_watchlist), indicators)
 
                 if market_data_task and market_data_task.done():
                     detail = completed_task_detail(market_data_task)

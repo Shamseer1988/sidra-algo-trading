@@ -37,6 +37,7 @@ from app.api.routes.settings import (
     strategy_mode,
 )
 from app.db.models import ApplicationSetting, User, UserRole
+from app.services import watchlist_store
 from app.services.paper_execution import DEFAULT_PAPER_EXECUTION_CONTROLS, PAPER_EXECUTION_KEY, PaperExecutionControls
 from app.services.strategy_registry import StrategyConfiguration, StrategyRegistry
 from app.services.trading_symbols import resolve_script_names
@@ -171,6 +172,7 @@ async def catalog(session: DbSession, _: CurrentUser) -> BuilderCatalog:
 @router.get("/instruments", response_model=list[Instrument])
 async def instruments(session: DbSession, settings: AppSettings, _: CurrentUser) -> list[Instrument]:
     """The shares the scanner watches, by name, for picking a backtest's instruments."""
+    settings = watchlist_store.apply(settings, await watchlist_store.load(session))
     keys = [
         key
         for key in configured_subscriptions(settings)

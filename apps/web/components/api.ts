@@ -13,6 +13,9 @@ export type BuilderTemplate = { strategy_type: string; name: string; about: stri
 export type BuilderExisting = { id: string; name: string; strategy_type: string; mode: "OFF" | "PAPER" | "LIVE"; version: number; configuration: PaperStrategy };
 export type BuilderCatalog = { templates: BuilderTemplate[]; strategies: BuilderExisting[] };
 export type BuilderInstrument = { instrument_token: string; symbol: string };
+export type WatchShare = { instrument_key: string; symbol: string; name: string; in_nifty200: boolean; known: boolean; sector: string | null };
+export type WatchlistView = { source: string; benchmark: string; benchmark_name: string; benchmarks: { key: string; name: string }[]; shares: WatchShare[]; applies: string; max_shares: number; updated_at: string | null };
+export type WatchSearchResult = { instrument_key: string; symbol: string; name: string; in_nifty200: boolean; source: string; sector: string | null };
 export type User = { email: string; role: "ADMIN" | "TRADER" | "VIEWER"; is_active: boolean };
 export type ServiceStatus = { status: string; detail: string; checked_at: string };
 export type Overview = { mode: string; live_trading_enabled: boolean; api: ServiceStatus; database: ServiceStatus; redis: ServiceStatus; scanner: ServiceStatus; market_data: ServiceStatus; firstock: ServiceStatus; telegram: ServiceStatus };
@@ -591,6 +594,10 @@ export const api = {
   saveNewStrategy: (draft: PaperStrategy, reason: string) => request<PaperStrategy[]>("/strategy-builder/strategies", { method: "POST", body: JSON.stringify({ draft, reason: reason || null }) }),
   saveStrategy: (id: string, draft: PaperStrategy, reason: string, confirmLive = false) => request<PaperStrategy[]>(`/strategy-builder/strategies/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ draft, reason: reason || null, confirm_live: confirmLive }) }),
   deleteStrategy: (id: string) => request<PaperStrategy[]>(`/strategy-builder/strategies/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  watchlist: () => request<WatchlistView>("/watchlist"),
+  searchWatchlist: (q: string) => request<WatchSearchResult[]>(`/watchlist/search?q=${encodeURIComponent(q)}`),
+  saveWatchlist: (body: { instruments: string[]; benchmark: string; reason: string; confirm: boolean }) => request<WatchlistView>("/watchlist", { method: "PUT", body: JSON.stringify(body) }),
+  resetWatchlist: () => request<WatchlistView>("/watchlist", { method: "DELETE" }),
   setupStatus: () => request<SetupStatus>("/setup/status"),
   createFirstAdmin: (email: string, password: string) => request<ManagedUser>("/setup/first-admin", { method: "POST", body: JSON.stringify({ email, password }) }),
   setupChecklist: () => request<ChecklistItem[]>("/setup/checklist"),

@@ -62,8 +62,10 @@ async def main() -> int:
 
     from app.core.config import get_settings
     from app.services.upstox_oauth import load_access_token
+    from app.services.watchlist_store import effective
 
-    settings = get_settings()
+    # The watchlist saved in Strategies > Subscriptions, else UPSTOX_SUBSCRIPTIONS.
+    settings = await effective(get_settings())
     # Yesterday by default: today's candles are the live feed's job, and asking
     # for a session that is still open returns a partial one.
     today = datetime.now(MARKET_TIMEZONE).date()
