@@ -4,6 +4,7 @@ import { CheckCircle2, Circle, KeyRound, ListChecks, UserPlus, Users } from "luc
 import { FormEvent, useCallback, useEffect, useState } from "react";
 
 import { api, type ChecklistItem, type ManagedUser } from "../../components/api";
+import { Modal } from "../../components/modal";
 import { formatIstTimestamp } from "../../lib/formatting";
 
 /**
@@ -36,6 +37,9 @@ export function UsersPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMessage
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<ManagedUser["role"]>("VIEWER");
   const [busy, setBusy] = useState(false);
+  const [resetting, setResetting] = useState<ManagedUser | null>(null);
+  const [newPassword, setNewPassword] = useState("");
+  const [switchingOff, setSwitchingOff] = useState<ManagedUser | null>(null);
 
   const load = useCallback(() => {
     if (!isAdmin) return;
@@ -79,20 +83,78 @@ export function UsersPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMessage
     load();
   }
 
-  async function reset(user: ManagedUser) {
-    const next = window.prompt(`New password for ${user.email} (at least 12 characters):`);
-    if (!next) return;
+  async function reset() {
+    if (!resetting) return;
+    setBusy(true);
     try {
-      await api.resetUserPassword(user.id, next);
-      onMessage(`Password reset for ${user.email}; their sessions have ended.`);
+      await api.resetUserPassword(resetting.id, newPassword);
+      onMessage(`Password reset for ${resetting.email}; their sessions have ended.`);
+      setResetting(null);
+      setNewPassword("");
     } catch (error) {
       onMessage(errorText(error, "Could not reset the password"));
+    } finally {
+      setBusy(false);
     }
     load();
   }
 
   return (
     <section className="mt-6 space-y-5" data-testid="users-panel">
+      {resetting && (
+        <Modal
+          title={`New password for ${resetting.email}`}
+          eyebrow="Users"
+          busy={busy}
+          testId="reset-password"
+          onClose={() => setResetting(null)}
+          footer={
+            <>
+              <button className="secondary-button" disabled={busy} onClick={() => setResetting(null)}>
+                Cancel
+              </button>
+              <button className="primary-button" disabled={busy || newPassword.length < 12} onClick={() => void reset()}>
+                Reset password
+              </button>
+            </>
+          }
+        >
+          <label className="field-label">
+            New password (12+ characters)
+            <input className="field-input mt-1" type="text" autoComplete="off" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
+          </label>
+          <p className="mt-2 text-xs text-slate-400">Their open sessions end at once. Give them the new password yourself; it is not sent anywhere.</p>
+        </Modal>
+      )}
+      {switchingOff && (
+        <Modal
+          title={`Switch off ${switchingOff.email}?`}
+          eyebrow="Users"
+          tone="warning"
+          role="alertdialog"
+          testId="switch-off-confirm"
+          onClose={() => setSwitchingOff(null)}
+          footer={
+            <>
+              <button className="secondary-button" onClick={() => setSwitchingOff(null)}>
+                Cancel
+              </button>
+              <button
+                className="danger-button"
+                onClick={() => {
+                  const user = switchingOff;
+                  setSwitchingOff(null);
+                  void change(user, { is_active: false });
+                }}
+              >
+                Yes, switch off
+              </button>
+            </>
+          }
+        >
+          <p className="text-sm text-slate-300">They are signed out everywhere and cannot sign in until switched on again. Nothing they did is removed.</p>
+        </Modal>
+      )}
       {isAdmin && (
         <article className="panel p-5 sm:p-7">
           <div className="flex items-center gap-3 border-b border-slate-800 pb-4">
@@ -138,12 +200,12 @@ export function UsersPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMessage
                     </td>
                     <td className="py-2 pr-4 text-xs text-slate-400">{formatIstTimestamp(user.created_at)}</td>
                     <td className="py-2 text-right whitespace-nowrap">
-                      <button className="secondary-button px-2 py-1 text-xs" onClick={() => void reset(user)}>
+                      <button className="secondary-button px-2 py-1 text-xs" onClick={() => { setNewPassword(""); setResetting(user); }}>
                         Reset password
                       </button>{" "}
                       <button
                         className="secondary-button px-2 py-1 text-xs"
-                        onClick={() => void change(user, { is_active: !user.is_active })}
+                        onClick={() => (user.is_active ? setSwitchingOff(user) : void change(user, { is_active: true }))}
                       >
                         {user.is_active ? "Switch off" : "Switch on"}
                       </button>

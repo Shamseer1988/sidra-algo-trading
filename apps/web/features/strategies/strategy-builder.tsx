@@ -11,7 +11,8 @@ import {
   type PaperStrategy,
 } from "../../components/api";
 import { formatPrice } from "../../lib/formatting";
-import { ExitRulesFields } from "./exit-rules-fields";
+import { Modal } from "../../components/modal";
+import { StrategyRulesForm } from "./rules-form";
 
 /**
  * Strategies > Builder.
@@ -28,15 +29,6 @@ import { ExitRulesFields } from "./exit-rules-fields";
 
 type Source = { kind: "template"; type: string } | { kind: "copy" | "edit"; id: string };
 
-const NUMBERS: { key: keyof PaperStrategy; label: string; help: string; step: string }[] = [
-  { key: "minimum_score", label: "Minimum score (0-100)", help: "Higher takes fewer, cleaner setups.", step: "1" },
-  { key: "minimum_rr", label: "Minimum reward : risk", help: "2 means the target is twice the stop distance.", step: "0.1" },
-  { key: "volume_multiplier", label: "Volume multiplier", help: "Candle volume against the recent average.", step: "0.1" },
-  { key: "retest_tolerance_percent", label: "Retest tolerance %", help: "How close price must come back to the level.", step: "0.01" },
-  { key: "minimum_ema_spread_percent", label: "Minimum EMA spread %", help: "How far apart the fast and slow EMAs must be.", step: "0.01" },
-  { key: "max_trades_per_day", label: "Trades a day (this strategy)", help: "The account's own daily limit still applies.", step: "1" },
-  { key: "cooldown_minutes", label: "Cooldown minutes", help: "Wait after a trade before the next one.", step: "1" },
-];
 
 function isoDaysAgo(days: number): string {
   return new Date(Date.now() + 5.5 * 3600 * 1000 - days * 86400 * 1000).toISOString().slice(0, 10);
@@ -65,6 +57,7 @@ export function StrategyBuilder({
   const [run, setRun] = useState<BacktestRunDetail | null>(null);
   const [running, setRunning] = useState(false);
   const [reason, setReason] = useState("");
+  const [deleting, setDeleting] = useState<{ id: string; name: string } | null>(null);
 
   const load = () =>
     void api
@@ -102,15 +95,6 @@ export function StrategyBuilder({
           : { ...found.configuration },
       );
     }
-  }
-
-  const set = <K extends keyof PaperStrategy>(key: K, value: PaperStrategy[K]) =>
-    setDraft((current) => (current ? { ...current, [key]: value } : current));
-
-  function toggleSide(side: string) {
-    if (!draft) return;
-    const has = draft.allowed_sides.includes(side);
-    set("allowed_sides", has ? draft.allowed_sides.filter((item) => item !== side) : [...draft.allowed_sides, side]);
   }
 
   function togglePicked(token: string) {
@@ -153,11 +137,12 @@ export function StrategyBuilder({
     }
   }
 
-  async function remove(id: string, name: string) {
-    if (!window.confirm(`Delete ${name}? Its past signals, trades and backtests are kept.`)) return;
+  async function remove() {
+    if (!deleting) return;
     try {
-      await api.deleteStrategy(id);
-      onMessage(`Deleted ${name}.`);
+      await api.deleteStrategy(deleting.id);
+      onMessage(`Deleted ${deleting.name}.`);
+      setDeleting(null);
       load();
     } catch (error) {
       onMessage(errorText(error, "Could not delete the strategy"));
@@ -176,6 +161,28 @@ export function StrategyBuilder({
 
   return (
     <section className="mt-6 space-y-5" data-testid="strategy-builder">
+      {deleting && (
+        <Modal
+          title={`Delete ${deleting.name}?`}
+          eyebrow="Strategy builder"
+          tone="warning"
+          role="alertdialog"
+          testId="delete-confirm"
+          onClose={() => setDeleting(null)}
+          footer={
+            <>
+              <button className="secondary-button" onClick={() => setDeleting(null)}>
+                Cancel
+              </button>
+              <button className="danger-button" onClick={() => void remove()}>
+                Yes, delete it
+              </button>
+            </>
+          }
+        >
+          <p className="text-sm text-slate-300">Only the configuration goes. Its past signals, trades and backtests are kept.</p>
+        </Modal>
+      )}
       <article className="panel p-5 sm:p-7">
         <div className="flex items-center gap-3 border-b border-slate-800 pb-4">
           <Hammer className="h-5 w-5 text-emerald-400" />
@@ -226,7 +233,7 @@ export function StrategyBuilder({
                       <button
                         className="secondary-button px-2 py-1 text-xs"
                         disabled={item.mode === "LIVE"}
-                        title={item.mode === "LIVE" ? "A live strategy is not edited here. Set it to Paper first." : undefined}
+                        title={item.mode === "LIVE" ? "A live strategy is edited from the control center, with a real-money confirmation." : undefined}
                         onClick={() => begin({ kind: "edit", id: item.id })}
                       >
                         Edit
@@ -236,7 +243,7 @@ export function StrategyBuilder({
                         disabled={item.mode !== "OFF"}
                         title={item.mode !== "OFF" ? "Only a strategy that is Off can be deleted." : undefined}
                         aria-label={`Delete ${item.name}`}
-                        onClick={() => void remove(item.id, item.name)}
+                        onClick={() => setDeleting({ id: item.id, name: item.name })}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -254,63 +261,9 @@ export function StrategyBuilder({
           <p className="eyebrow">Step 2 · Rules{editing ? ` · editing ${editing.name}` : ""}</p>
           <h3 className="font-semibold text-white">{template?.name ?? draft.strategy_type}</h3>
           {template && <p className="mt-1 text-xs text-slate-400">{template.about}</p>}
-          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <label className="field-label sm:col-span-2">
-              Name
-              <input className="field-input mt-1" value={draft.name} maxLength={80} onChange={(event) => set("name", event.target.value)} />
-            </label>
-            <fieldset className="field-label">
-              Sides
-              <div className="mt-2 flex gap-4 text-sm text-slate-300">
-                {["LONG", "SHORT"].map((side) => (
-                  <label key={side} className="flex items-center gap-2">
-                    <input type="checkbox" checked={draft.allowed_sides.includes(side)} onChange={() => toggleSide(side)} />
-                    {side === "LONG" ? "Buy (long)" : "Sell (short)"}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-            <label className="field-label">
-              Risk per trade % (blank = account)
-              <input
-                className="field-input mt-1"
-                type="number"
-                min="0.01"
-                max="5"
-                step="0.01"
-                value={draft.risk_per_trade_percent ?? ""}
-                onChange={(event) => set("risk_per_trade_percent", event.target.value === "" ? null : Number(event.target.value))}
-              />
-            </label>
-            {NUMBERS.map((field) => (
-              <label key={field.key} className="field-label" title={field.help}>
-                {field.label}
-                <input
-                  className="field-input mt-1"
-                  type="number"
-                  step={field.step}
-                  value={draft[field.key] as number}
-                  onChange={(event) => set(field.key, Number(event.target.value) as never)}
-                />
-                <span className="mt-1 block text-[11px] font-normal normal-case tracking-normal text-slate-500">{field.help}</span>
-              </label>
-            ))}
-            {draft.strategy_type === "rs-pullback-v1" && (
-              <label className="field-label">
-                RS threshold % (blank = built-in)
-                <input
-                  className="field-input mt-1"
-                  type="number"
-                  min="0"
-                  max="10"
-                  step="0.05"
-                  value={draft.rs_threshold_percent ?? ""}
-                  onChange={(event) => set("rs_threshold_percent", event.target.value === "" ? null : Number(event.target.value))}
-                />
-              </label>
-            )}
+          <div className="mt-4">
+            <StrategyRulesForm draft={draft} onChange={setDraft} instruments={instruments} />
           </div>
-          <ExitRulesFields rules={draft.exit_rules} disabled={false} onChange={(next) => set("exit_rules", next)} />
         </article>
       )}
 

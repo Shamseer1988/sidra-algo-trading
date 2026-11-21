@@ -589,7 +589,7 @@ export const api = {
   builderInstruments: () => request<BuilderInstrument[]>("/strategy-builder/instruments"),
   backtestDraft: (body: { draft: PaperStrategy; start_date: string; end_date: string; instrument_tokens: string[] }) => request<BacktestRunDetail>("/strategy-builder/backtest", { method: "POST", body: JSON.stringify(body) }),
   saveNewStrategy: (draft: PaperStrategy, reason: string) => request<PaperStrategy[]>("/strategy-builder/strategies", { method: "POST", body: JSON.stringify({ draft, reason: reason || null }) }),
-  saveStrategy: (id: string, draft: PaperStrategy, reason: string) => request<PaperStrategy[]>(`/strategy-builder/strategies/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ draft, reason: reason || null }) }),
+  saveStrategy: (id: string, draft: PaperStrategy, reason: string, confirmLive = false) => request<PaperStrategy[]>(`/strategy-builder/strategies/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ draft, reason: reason || null, confirm_live: confirmLive }) }),
   deleteStrategy: (id: string) => request<PaperStrategy[]>(`/strategy-builder/strategies/${encodeURIComponent(id)}`, { method: "DELETE" }),
   setupStatus: () => request<SetupStatus>("/setup/status"),
   createFirstAdmin: (email: string, password: string) => request<ManagedUser>("/setup/first-admin", { method: "POST", body: JSON.stringify({ email, password }) }),
