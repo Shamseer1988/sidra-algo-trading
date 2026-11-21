@@ -2,66 +2,89 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Two trading-terminal themes built from one set of tokens.
+ *
+ * Night (dark): a deep blue-black desk with near-solid panels, so numbers sit
+ * on a steady background rather than a see-through one. Day (light): white
+ * panels on a cool grey desk, with every text tone at least 4.5:1 against the
+ * panel it sits on. Both share a faint chart grid behind the panels.
+ *
+ * Most screens were written with dark-theme Tailwind tones (text-slate-400,
+ * text-emerald-300 ...). The Day theme maps each of those onto a darker tone of
+ * the same hue at the bottom of this file; that list is what keeps a light
+ * screen readable, so a new tone used in a screen belongs there too.
+ */
 :root {
   color-scheme: dark;
-  --background: #070b11;
-  --foreground: #e8edf5;
-  --surface: #0d131c;
-  --surface-muted: #121a25;
-  --surface-elevated: #16202d;
-  --border: #253142;
-  --border-subtle: #1b2634;
-  --muted: #8491a5;
-  --muted-strong: #aab5c4;
+  --background: #090c12;
+  --foreground: #e7ebf2;
+  --text-body: #cbd3df;
+  --surface: #10151e;
+  --surface-muted: #141a25;
+  --surface-elevated: #19212e;
+  --border: #263042;
+  --border-subtle: #1b2331;
+  --muted: #8b95a8;
+  --muted-strong: #b4bdcb;
   --primary: #2dd4a3;
   --primary-strong: #13b887;
   --primary-soft: rgba(45, 212, 163, .12);
+  --primary-contrast: #03130e;
   --positive: #34d399;
   --negative: #fb7185;
   --warning: #f6c453;
   --info: #60a5fa;
-  --shadow: rgba(0, 0, 0, .28);
-  --glass-surface: rgba(10, 17, 28, .66);
-  --glass-surface-strong: rgba(9, 15, 24, .82);
-  --glass-muted: rgba(255, 255, 255, .045);
-  --glass-input: rgba(3, 8, 15, .48);
-  --glass-border: rgba(255, 255, 255, .1);
-  --glass-border-strong: rgba(255, 255, 255, .16);
-  --glass-highlight: rgba(255, 255, 255, .08);
-  --glass-shadow: rgba(0, 0, 0, .34);
-  --ambient-primary: rgba(16, 185, 129, .13);
-  --ambient-secondary: rgba(59, 130, 246, .09);
+  --shadow: rgba(0, 0, 0, .3);
+  --glass-surface: rgba(16, 21, 30, .84);
+  --glass-surface-strong: rgba(11, 15, 22, .93);
+  --glass-muted: rgba(148, 163, 184, .055);
+  --glass-input: rgba(4, 7, 12, .6);
+  --glass-border: rgba(148, 163, 184, .14);
+  --glass-border-strong: rgba(148, 163, 184, .22);
+  --glass-highlight: rgba(255, 255, 255, .045);
+  --glass-shadow: rgba(0, 0, 0, .36);
+  --row-hover: rgba(148, 163, 184, .07);
+  --ambient-primary: rgba(16, 185, 129, .08);
+  --ambient-secondary: rgba(59, 130, 246, .07);
+  --grid-line: rgba(148, 163, 184, .045);
+  --scrollbar: rgba(148, 163, 184, .22);
 }
 
 :root[data-theme="light"] {
   color-scheme: light;
-  --background: #f2f5f8;
-  --foreground: #111827;
+  --background: #edf1f6;
+  --foreground: #0f172a;
+  --text-body: #1e293b;
   --surface: #ffffff;
-  --surface-muted: #f7f9fb;
-  --surface-elevated: #edf2f6;
-  --border: #d8e0e8;
-  --border-subtle: #e7ecf1;
-  --muted: #647184;
-  --muted-strong: #465468;
+  --surface-muted: #f6f8fb;
+  --surface-elevated: #eef2f7;
+  --border: #d3dbe6;
+  --border-subtle: #e3e8ef;
+  --muted: #566377;
+  --muted-strong: #334155;
   --primary: #047857;
-  --primary-strong: #066b50;
-  --primary-soft: rgba(4, 120, 87, .09);
+  --primary-strong: #065f46;
+  --primary-soft: rgba(4, 120, 87, .1);
+  --primary-contrast: #ffffff;
   --positive: #047857;
   --negative: #be123c;
-  --warning: #a16207;
-  --info: #2563eb;
+  --warning: #a15c07;
+  --info: #1d4ed8;
   --shadow: rgba(15, 23, 42, .08);
-  --glass-surface: rgba(255, 255, 255, .58);
-  --glass-surface-strong: rgba(255, 255, 255, .76);
-  --glass-muted: rgba(255, 255, 255, .42);
-  --glass-input: rgba(255, 255, 255, .5);
-  --glass-border: rgba(255, 255, 255, .72);
-  --glass-border-strong: rgba(255, 255, 255, .92);
-  --glass-highlight: rgba(255, 255, 255, .92);
-  --glass-shadow: rgba(39, 57, 78, .14);
-  --ambient-primary: rgba(16, 185, 129, .18);
-  --ambient-secondary: rgba(37, 99, 235, .13);
+  --glass-surface: rgba(255, 255, 255, .95);
+  --glass-surface-strong: rgba(255, 255, 255, .97);
+  --glass-muted: rgba(15, 23, 42, .035);
+  --glass-input: #ffffff;
+  --glass-border: rgba(15, 23, 42, .11);
+  --glass-border-strong: rgba(15, 23, 42, .18);
+  --glass-highlight: rgba(255, 255, 255, .85);
+  --glass-shadow: rgba(15, 23, 42, .07);
+  --row-hover: rgba(15, 23, 42, .04);
+  --ambient-primary: rgba(16, 185, 129, .07);
+  --ambient-secondary: rgba(37, 99, 235, .06);
+  --grid-line: rgba(15, 23, 42, .04);
+  --scrollbar: rgba(15, 23, 42, .2);
 }
 * { box-sizing: border-box; }
 html { min-height: 100%; background: var(--background); }
@@ -69,75 +92,87 @@ body {
   min-height: 100vh;
   margin: 0;
   background:
-    radial-gradient(circle at 10% 5%, var(--ambient-primary), transparent 34rem),
-    radial-gradient(circle at 88% 16%, var(--ambient-secondary), transparent 38rem),
-    linear-gradient(145deg, var(--background), color-mix(in srgb, var(--background) 91%, var(--primary) 9%));
+    radial-gradient(1100px 560px at 0% 0%, var(--ambient-primary), transparent 65%),
+    radial-gradient(900px 520px at 100% 0%, var(--ambient-secondary), transparent 65%),
+    linear-gradient(var(--grid-line) 1px, transparent 1px) 0 0 / 48px 48px,
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px) 0 0 / 48px 48px,
+    var(--background);
   background-attachment: fixed;
   color: var(--foreground);
-  font-family: "Geist", "Segoe UI Variable", "Segoe UI", sans-serif;
+  font-family: "Geist", "Inter", "Segoe UI Variable", "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 button, input, select { font: inherit; }
 input[type="checkbox"] { accent-color: var(--primary); }
 button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 ::selection { background: var(--primary-soft); color: var(--foreground); }
+* { scrollbar-width: thin; scrollbar-color: var(--scrollbar) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-track { background: transparent; }
 
 @layer components {
   .panel, .login-stage > section, .login-stage > div {
     border: 1px solid var(--glass-border);
-    background: linear-gradient(145deg, var(--glass-highlight), transparent 42%), var(--glass-surface);
-    box-shadow: inset 0 1px 0 var(--glass-highlight), 0 18px 42px var(--glass-shadow);
-    backdrop-filter: blur(22px) saturate(145%);
-    -webkit-backdrop-filter: blur(22px) saturate(145%);
+    background: linear-gradient(145deg, var(--glass-highlight), transparent 40%), var(--glass-surface);
+    box-shadow: inset 0 1px 0 var(--glass-highlight), 0 12px 32px var(--glass-shadow);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
     @apply rounded-xl;
   }
   .sidebar {
-    background: linear-gradient(180deg, var(--glass-highlight), transparent 24%), var(--glass-surface-strong);
+    background: var(--glass-surface-strong);
     border-color: var(--glass-border);
-    box-shadow: inset -1px 0 0 var(--glass-highlight), 12px 0 40px var(--glass-shadow);
-    backdrop-filter: blur(28px) saturate(155%);
-    -webkit-backdrop-filter: blur(28px) saturate(155%);
+    box-shadow: 12px 0 40px var(--glass-shadow);
+    backdrop-filter: blur(24px) saturate(150%);
+    -webkit-backdrop-filter: blur(24px) saturate(150%);
     @apply fixed inset-y-0 left-0 z-30 flex w-64 -translate-x-full flex-col border-r transition-all duration-200 lg:translate-x-0;
   }
   header.sticky {
     border-color: var(--glass-border);
     background: var(--glass-surface-strong);
-    box-shadow: inset 0 -1px 0 var(--glass-highlight), 0 12px 30px var(--glass-shadow);
-    backdrop-filter: blur(26px) saturate(155%);
-    -webkit-backdrop-filter: blur(26px) saturate(155%);
+    box-shadow: 0 8px 24px var(--glass-shadow);
+    backdrop-filter: blur(24px) saturate(150%);
+    -webkit-backdrop-filter: blur(24px) saturate(150%);
   }
   .sidebar-collapsed { @apply lg:w-[76px]; }
   .sidebar-open { @apply translate-x-0 shadow-2xl shadow-black/60; }
   .nav-item { color: var(--muted); @apply flex items-center gap-3 rounded-md px-3 py-2.5 text-sm transition; }
-  .nav-item:hover { background: var(--glass-muted); color: var(--foreground); box-shadow: inset 0 1px 0 var(--glass-highlight); }
-  .nav-active { border: 1px solid color-mix(in srgb, var(--primary) 34%, transparent); background: color-mix(in srgb, var(--primary-soft) 76%, var(--glass-muted)); color: var(--primary); box-shadow: inset 2px 0 0 var(--primary), inset 0 1px 0 var(--glass-highlight), 0 8px 20px color-mix(in srgb, var(--primary) 10%, transparent); }
-  .status-pill { box-shadow: inset 0 1px 0 var(--glass-highlight); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); @apply inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide; }
-  .status-good { border-color: rgba(52, 211, 153, .28); background: rgba(6, 95, 70, .2); color: var(--positive); }
-  .status-watch { border-color: rgba(251, 191, 36, .28); background: rgba(146, 64, 14, .18); color: var(--warning); }
-  .status-bad { border-color: rgba(251, 113, 133, .3); background: rgba(159, 18, 57, .18); color: var(--negative); }
-  .primary-button { border: 1px solid color-mix(in srgb, var(--primary) 68%, white 32%); background: color-mix(in srgb, var(--primary) 78%, transparent); color: #03130e; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .4), 0 10px 24px color-mix(in srgb, var(--primary) 22%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-semibold transition hover:-translate-y-px hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50; }
-  .danger-button { border: 1px solid rgba(251, 113, 133, .62); background: rgba(225, 29, 72, .72); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .28), 0 10px 24px rgba(225, 29, 72, .18); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-semibold text-white transition hover:-translate-y-px hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50; }
-  .secondary-button { border-color: var(--glass-border-strong); background: var(--glass-muted); color: var(--muted-strong); box-shadow: inset 0 1px 0 var(--glass-highlight), 0 8px 20px color-mix(in srgb, var(--glass-shadow) 55%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); @apply inline-flex items-center justify-center gap-2 rounded-md border px-4 py-2.5 text-sm font-medium transition hover:-translate-y-px hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50; }
+  .nav-item:hover { background: var(--row-hover); color: var(--foreground); }
+  .nav-active { border: 1px solid color-mix(in srgb, var(--primary) 34%, transparent); background: var(--primary-soft); color: var(--primary); box-shadow: inset 2px 0 0 var(--primary); }
+  .status-pill { @apply inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide; }
+  .status-good { border-color: color-mix(in srgb, var(--positive) 34%, transparent); background: color-mix(in srgb, var(--positive) 12%, transparent); color: var(--positive); }
+  .status-watch { border-color: color-mix(in srgb, var(--warning) 36%, transparent); background: color-mix(in srgb, var(--warning) 12%, transparent); color: var(--warning); }
+  .status-bad { border-color: color-mix(in srgb, var(--negative) 36%, transparent); background: color-mix(in srgb, var(--negative) 11%, transparent); color: var(--negative); }
+  .primary-button { border: 1px solid var(--primary-strong); background: var(--primary); color: var(--primary-contrast); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .25), 0 8px 20px color-mix(in srgb, var(--primary) 20%, transparent); @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-semibold transition hover:-translate-y-px hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50; }
+  .danger-button { border: 1px solid #e11d48; background: #e11d48; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .2), 0 8px 20px rgba(225, 29, 72, .18); @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-semibold text-white transition hover:-translate-y-px hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50; }
+  .secondary-button { border-color: var(--glass-border-strong); background: var(--glass-muted); color: var(--muted-strong); box-shadow: inset 0 1px 0 var(--glass-highlight); @apply inline-flex items-center justify-center gap-2 rounded-md border px-4 py-2.5 text-sm font-medium transition hover:-translate-y-px disabled:cursor-not-allowed disabled:opacity-50; }
+  .secondary-button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--primary) 45%, var(--glass-border-strong)); color: var(--foreground); }
   .field-label { color: var(--muted); @apply block text-xs font-medium; }
-  .field-input { border-color: var(--glass-border-strong); background: var(--glass-input); color: var(--foreground); box-shadow: inset 0 1px 0 var(--glass-highlight); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); @apply w-full rounded-md border px-3 py-2.5 text-sm outline-none transition placeholder:text-slate-500 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20; }
+  .field-input { border-color: var(--glass-border-strong); background: var(--glass-input); color: var(--foreground); @apply w-full rounded-md border px-3 py-2.5 text-sm outline-none transition focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20; }
+  .field-input::placeholder { color: var(--muted); opacity: .75; }
+  .field-input:disabled { opacity: .7; cursor: not-allowed; }
   .eyebrow { color: var(--primary); @apply text-[10px] font-bold uppercase tracking-[.18em]; }
   .page-title { color: var(--foreground); @apply mt-2 text-2xl font-semibold tracking-tight sm:text-3xl; }
   .page-copy { color: var(--muted); @apply mt-2 max-w-2xl text-sm leading-6; }
-  .theme-control { border-color: var(--glass-border-strong); background: var(--glass-muted); color: var(--muted-strong); box-shadow: inset 0 1px 0 var(--glass-highlight); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); @apply inline-flex h-8 items-center gap-1.5 rounded-md border px-2 text-xs; }
+  .theme-control { border-color: var(--glass-border-strong); background: var(--glass-muted); color: var(--muted-strong); @apply inline-flex h-8 items-center gap-1.5 rounded-md border px-2 text-xs; }
   .theme-control select { background: transparent; color: inherit; @apply cursor-pointer border-0 outline-none; }
   .theme-control option, .field-input option { background: var(--surface); color: var(--foreground); }
   .market-clock { color: var(--foreground); font-variant-numeric: tabular-nums; @apply hidden items-center gap-2 text-xs font-semibold tracking-wide sm:inline-flex; }
   .market-clock span { color: var(--muted); @apply text-[9px] font-bold tracking-[.16em]; }
-  .brand-mark { background: linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--primary) 55%, white 45%)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .42), 0 10px 24px color-mix(in srgb, var(--primary) 24%, transparent); color: #03130e; @apply grid h-9 w-9 shrink-0 place-items-center rounded-md; }
-  .icon-button { border: 1px solid var(--glass-border); background: var(--glass-muted); box-shadow: inset 0 1px 0 var(--glass-highlight); @apply grid h-8 w-8 place-items-center rounded-md transition hover:brightness-110; }
+  .brand-mark { background: linear-gradient(135deg, var(--primary), color-mix(in srgb, var(--primary) 60%, var(--info) 40%)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35), 0 8px 20px color-mix(in srgb, var(--primary) 22%, transparent); color: var(--primary-contrast); @apply grid h-9 w-9 shrink-0 place-items-center rounded-md; }
+  .icon-button { border: 1px solid var(--glass-border); background: var(--glass-muted); color: var(--muted-strong); @apply grid h-8 w-8 place-items-center rounded-md transition; }
+  .icon-button:hover { color: var(--foreground); border-color: var(--glass-border-strong); }
   .user-menu { border: 1px solid var(--glass-border); background: var(--glass-muted); color: var(--foreground); @apply grid h-8 w-8 place-items-center rounded-full text-xs font-bold; }
-  .user-menu-popover { border: 1px solid var(--glass-border-strong); background: var(--glass-surface-strong); box-shadow: 0 12px 30px var(--glass-shadow); @apply absolute right-4 top-12 w-56 rounded-md p-3; }
-  .page-toolbar { @apply flex flex-col gap-4 border-b border-slate-800 pb-5 lg:flex-row lg:items-end lg:justify-between; }
+  .user-menu-popover { border: 1px solid var(--glass-border-strong); background: var(--surface); box-shadow: 0 12px 30px var(--glass-shadow); @apply absolute right-4 top-12 w-56 rounded-md p-3; }
+  .page-toolbar { border-bottom: 1px solid var(--glass-border); @apply flex flex-col gap-4 pb-5 lg:flex-row lg:items-end lg:justify-between; }
   .table-scroll { @apply overflow-x-auto; }
   .terminal-table { @apply min-w-full text-left text-sm; }
-  .terminal-table thead { color: var(--muted); background: var(--glass-muted); @apply border-b border-slate-800 text-[10px] font-bold uppercase tracking-[.13em]; }
+  .terminal-table thead { color: var(--muted); background: var(--glass-muted); border-bottom: 1px solid var(--glass-border); @apply text-[10px] font-bold uppercase tracking-[.13em]; }
   .terminal-table th { @apply whitespace-nowrap px-5 py-3; }
-  .terminal-table td { @apply whitespace-nowrap border-b border-slate-800/70 px-5 py-4 text-slate-300; }
-  .terminal-table tbody tr { @apply cursor-pointer transition-colors hover:bg-terminal-800; }
+  .terminal-table td { color: var(--text-body); border-bottom: 1px solid var(--border-subtle); @apply whitespace-nowrap px-5 py-4; }
+  .terminal-table tbody tr { @apply cursor-pointer transition-colors; }
+  .terminal-table tbody tr:hover { background: var(--row-hover); }
   .terminal-table td strong { color: var(--foreground); @apply block font-medium; }
   /* A span in a cell is a sub-label under the cell's main value — except when
      it is a badge. The exclusion list is why this rule can stay a blanket one:
@@ -152,14 +187,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   .workspace-tab { color: var(--muted); @apply -mb-px border-b-2 border-transparent px-3 py-2 text-sm font-medium transition-colors; }
   .workspace-tab:hover { color: var(--foreground); }
   .workspace-tab-active { color: var(--primary); border-color: var(--primary); }
-  .table-selected { background: color-mix(in srgb, var(--primary-soft) 76%, transparent); }
+  .table-selected { background: var(--primary-soft); }
   .numeric { font-variant-numeric: tabular-nums; }
   .muted-cell { color: var(--muted) !important; @apply text-xs; }
   .signal-price-grid { @apply mt-6 grid grid-cols-3 gap-3; }
   .signal-price-grid > div { border: 1px solid var(--glass-border); background: var(--glass-muted); @apply rounded-md p-3; }
   .signal-price-grid p { color: var(--muted); @apply text-[10px] font-bold uppercase tracking-wide; }
   .signal-price-grid strong { color: var(--foreground); @apply mt-2 block text-sm; }
-  .data-list { @apply divide-y divide-slate-800 border-y border-slate-800 text-sm; }
+  .data-list { border-top: 1px solid var(--glass-border); border-bottom: 1px solid var(--glass-border); @apply text-sm; }
+  .data-list > div + div { border-top: 1px solid var(--glass-border); }
   .data-list > div { @apply flex items-center justify-between gap-4 py-3; }
   .data-list dt { color: var(--muted); }
   .data-list dd { color: var(--foreground); @apply m-0 text-right; }
@@ -169,17 +205,18 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   .empty-inset { border: 1px dashed var(--glass-border-strong); background: var(--glass-muted); color: var(--muted); @apply rounded-md p-5; }
   .toggle-row { color: var(--muted-strong); @apply inline-flex items-center gap-2 text-sm; }
   .toggle-row input { @apply h-4 w-4; }
-  .skeleton { background: linear-gradient(90deg, var(--glass-muted), var(--glass-highlight), var(--glass-muted)); background-size: 200% 100%; @apply animate-pulse rounded-md; }
-  .scanner-filter-bar { border: 1px solid var(--glass-border); background: var(--glass-muted); box-shadow: inset 0 1px 0 var(--glass-highlight); @apply mt-5 flex flex-wrap items-center gap-2 rounded-lg p-3; }
+  .skeleton { background: linear-gradient(90deg, var(--glass-muted), var(--glass-border), var(--glass-muted)); background-size: 200% 100%; @apply animate-pulse rounded-md; }
+  .scanner-filter-bar { border: 1px solid var(--glass-border); background: var(--glass-muted); @apply mt-5 flex flex-wrap items-center gap-2 rounded-lg p-3; }
   .scanner-filter-bar .field-input { @apply py-2; }
-  .scanner-sort { @apply inline-flex items-center gap-1 text-left hover:text-slate-300; }
+  .scanner-sort { @apply inline-flex items-center gap-1 text-left; }
+  .scanner-sort:hover { color: var(--foreground); }
   .scanner-table td { @apply align-top; }
-  .glass-inset { border: 1px solid var(--glass-border); background: var(--glass-muted); box-shadow: inset 0 1px 0 var(--glass-highlight); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
-  .glass-notice { border: 1px solid var(--glass-border-strong); background: var(--glass-surface); box-shadow: inset 0 1px 0 var(--glass-highlight), 0 12px 28px var(--glass-shadow); backdrop-filter: blur(20px) saturate(145%); -webkit-backdrop-filter: blur(20px) saturate(145%); }
-  .glass-danger { border-color: rgba(251, 113, 133, .32); background: linear-gradient(135deg, rgba(225, 29, 72, .17), var(--glass-surface)); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 14px 32px rgba(159, 18, 57, .14); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+  .glass-inset { border: 1px solid var(--glass-border); background: var(--glass-muted); box-shadow: inset 0 1px 0 var(--glass-highlight); }
+  .glass-notice { border: 1px solid var(--glass-border-strong); background: var(--glass-surface); box-shadow: 0 12px 28px var(--glass-shadow); backdrop-filter: blur(18px) saturate(140%); -webkit-backdrop-filter: blur(18px) saturate(140%); }
+  .glass-danger { border-color: color-mix(in srgb, var(--negative) 34%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--negative) 14%, transparent), var(--glass-surface)); box-shadow: 0 12px 28px color-mix(in srgb, var(--negative) 12%, transparent); }
 
   .toast-stack { @apply pointer-events-none fixed right-4 top-4 z-[60] flex w-[min(92vw,26rem)] flex-col gap-2; }
-  .toast { border: 1px solid var(--glass-border-strong); background: var(--glass-surface); box-shadow: inset 0 1px 0 var(--glass-highlight), 0 14px 34px var(--glass-shadow); backdrop-filter: blur(20px) saturate(150%); -webkit-backdrop-filter: blur(20px) saturate(150%); @apply pointer-events-auto flex items-center gap-2.5 rounded-lg border-l-4 px-3.5 py-3 text-sm font-medium; animation: toast-in .18s ease-out; }
+  .toast { border: 1px solid var(--glass-border-strong); background: var(--surface); box-shadow: 0 14px 34px var(--glass-shadow); @apply pointer-events-auto flex items-center gap-2.5 rounded-lg border-l-4 px-3.5 py-3 text-sm font-medium; animation: toast-in .18s ease-out; }
   .toast--success { border-left-color: var(--positive); color: var(--positive); }
   .toast--error { border-left-color: var(--negative); color: var(--negative); }
   .toast--info { border-left-color: var(--warning); color: var(--warning); }
@@ -191,52 +228,53 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   to { opacity: 1; transform: translateX(0); }
 }
 
-/* Existing terminal utilities are remapped into the glass system. */
+/* Existing terminal utilities are remapped onto the theme tokens. */
 .bg-terminal-950 { background-color: transparent; }
 .bg-terminal-900, .bg-\[\#0d1218\] { background-color: var(--glass-surface); }
 .bg-terminal-800, .bg-terminal-800\/70 { background-color: var(--glass-muted); }
-.bg-terminal-800 { box-shadow: inset 0 1px 0 var(--glass-highlight); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
 .panel thead { background: var(--glass-muted); }
-.panel tbody tr:hover { background: var(--glass-muted); }
+.panel tbody tr:hover { background: var(--row-hover); }
 .panel svg.bg-terminal-950 { background: var(--glass-input); }
-.border-slate-800, .border-slate-800\/70, .border-slate-700 { border-color: var(--glass-border); }
-.border-rose-950, .border-rose-900 { border-color: rgba(251, 113, 133, .28); }
-.border-amber-900 { border-color: rgba(251, 191, 36, .28); }
+.border-slate-800, .border-slate-800\/70, .border-slate-800\/80, .border-slate-800\/60, .border-slate-700, .border-slate-700\/40, .border-slate-700\/30 { border-color: var(--glass-border); }
+.divide-slate-800 > :not([hidden]) ~ :not([hidden]) { border-color: var(--glass-border); }
+.border-rose-950, .border-rose-900, .border-rose-900\/40 { border-color: color-mix(in srgb, var(--negative) 30%, transparent); }
+.border-amber-900 { border-color: color-mix(in srgb, var(--warning) 30%, transparent); }
 .bg-emerald-950\/20 { background-color: color-mix(in srgb, var(--primary-soft) 72%, transparent); }
-.bg-rose-950\/40 { background-color: rgba(159, 18, 57, .14); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
-.bg-amber-950\/40 { background-color: rgba(146, 64, 14, .13); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
-:root[data-theme="light"] .text-white, :root[data-theme="light"] .text-slate-100, :root[data-theme="light"] .text-slate-200, :root[data-theme="light"] .text-slate-300 { color: var(--foreground); }
-:root[data-theme="light"] .text-slate-400, :root[data-theme="light"] .text-slate-500 { color: var(--muted); }
-:root[data-theme="light"] .text-emerald-300, :root[data-theme="light"] .text-emerald-400, :root[data-theme="light"] .text-bullish { color: var(--positive); }
-:root[data-theme="light"] .text-rose-200, :root[data-theme="light"] .text-rose-300, :root[data-theme="light"] .text-rose-400 { color: var(--negative); }
-:root[data-theme="light"] .text-amber-300, :root[data-theme="light"] .text-amber-100 { color: var(--warning); }
-/* The settings screen states when each control takes effect, and an operator
-   reading "applies to the session already running" needs to be able to read it
-   in both themes. These tones are legible on the dark surface and wash out on
-   the light one, so they are remapped here with the rest of the palette rather
-   than written as Tailwind dark: variants — darkMode is unconfigured, so that
-   variant follows the operating system rather than this app's theme toggle. */
-:root[data-theme="light"] .text-sky-300 { color: #0369a1; }
-:root[data-theme="light"] .bg-amber-950\/20 { background-color: rgba(251, 191, 36, .12); }
-:root[data-theme="light"] .bg-sky-950\/10 { background-color: rgba(56, 189, 248, .10); }
-:root[data-theme="light"] .bg-slate-800 { background-color: var(--glass-muted); }
-/* The History screen's reconciliation pills. Four statuses that each mean a
-   different next action, so the tones have to survive the light theme intact —
-   especially the neutral one: "estimated charges" is the normal steady state of
-   a reconciled day, and a pill that read as a warning would train an operator
-   to ignore warnings. */
-:root[data-theme="light"] .bg-slate-800\/60 { background-color: var(--glass-muted); }
-:root[data-theme="light"] .bg-rose-950\/20 { background-color: rgba(244, 63, 94, .10); }
-/* Notices: the desk banner and the swing desk's paper-only strip. */
-:root[data-theme="light"] .text-sky-100 { color: #0c4a6e; }
-:root[data-theme="light"] .bg-sky-950\/20 { background-color: rgba(56, 189, 248, .14); }
+.bg-rose-950\/40 { background-color: rgba(159, 18, 57, .14); }
+.bg-amber-950\/40 { background-color: rgba(146, 64, 14, .13); }
+
+/*
+ * Day theme: the dark-theme tones the screens are written in, each moved to a
+ * darker tone of the same hue so it reads on a white panel.
+ *   greys:   white/100/200 -> ink, 300 -> body, 400 -> secondary, 500 -> muted
+ *   colours: 100 -> 900, 200-500 -> 700 (emerald, rose, amber, sky, violet)
+ *   tints:   *-950/x backgrounds -> the same hue at 8-14% on white
+ */
+:root[data-theme="light"] :is(.text-white, .text-slate-100, .text-slate-200, .hover\:text-white:hover, .hover\:text-slate-200:hover) { color: var(--foreground); }
+:root[data-theme="light"] :is(.text-slate-300, .hover\:text-slate-300:hover) { color: var(--text-body); }
+:root[data-theme="light"] :is(.text-slate-400, .hover\:text-slate-400:hover) { color: #475569; }
+:root[data-theme="light"] .text-slate-500 { color: var(--muted); }
+:root[data-theme="light"] :is(.text-emerald-200, .text-emerald-300, .text-emerald-400, .text-emerald-500, .text-bullish, .hover\:text-emerald-400:hover, .focus\:text-emerald-400:focus) { color: #047857; }
+:root[data-theme="light"] :is(.text-rose-200, .text-rose-200\/90, .text-rose-300, .text-rose-400, .text-rose-500, .text-bearish, .hover\:text-rose-200:hover) { color: #be123c; }
 :root[data-theme="light"] .text-rose-100 { color: #881337; }
-:root[data-theme="light"] .bg-rose-950\/25 { background-color: rgba(244, 63, 94, .12); }
-:root[data-theme="light"] .bg-emerald-500\/10 { background-color: rgba(16, 185, 129, .12); }
-:root[data-theme="light"] .shadow-black\/20, :root[data-theme="light"] .shadow-black\/40, :root[data-theme="light"] .shadow-black\/60 { --tw-shadow-color: var(--shadow); }
+:root[data-theme="light"] :is(.text-amber-200, .text-amber-300, .text-amber-400, .text-amber-500, .text-watch) { color: #a15c07; }
+:root[data-theme="light"] .text-amber-100 { color: #78350f; }
+:root[data-theme="light"] :is(.text-sky-300, .text-sky-400, .text-sky-500) { color: #0369a1; }
+:root[data-theme="light"] .text-sky-100 { color: #0c4a6e; }
+:root[data-theme="light"] :is(.text-violet-300, .text-violet-400, .text-violet-500) { color: #6d28d9; }
+
+:root[data-theme="light"] :is(.bg-slate-800, .bg-slate-800\/40, .bg-slate-800\/60, .bg-slate-700\/40, .bg-slate-900\/50, .bg-slate-950\/60, .hover\:bg-slate-800\/40:hover) { background-color: rgba(15, 23, 42, .05); }
+:root[data-theme="light"] .bg-slate-600 { background-color: #cbd5e1; }
+:root[data-theme="light"] :is(.bg-emerald-950\/20, .bg-emerald-500\/10) { background-color: rgba(16, 185, 129, .1); }
+:root[data-theme="light"] :is(.bg-rose-950\/20, .bg-rose-950\/25, .bg-rose-950\/30, .bg-rose-950\/40) { background-color: rgba(244, 63, 94, .09); }
+:root[data-theme="light"] :is(.bg-amber-950\/20, .bg-amber-950\/30, .bg-amber-950\/40) { background-color: rgba(245, 158, 11, .12); }
+:root[data-theme="light"] :is(.bg-sky-950\/10, .bg-sky-950\/20) { background-color: rgba(14, 165, 233, .1); }
+:root[data-theme="light"] .border-slate-600 { border-color: var(--glass-border-strong); }
+:root[data-theme="light"] .border-amber-700\/60 { border-color: rgba(217, 119, 6, .4); }
+:root[data-theme="light"] :is(.shadow-black\/20, .shadow-black\/30, .shadow-black\/40, .shadow-black\/50, .shadow-black\/60) { --tw-shadow-color: var(--shadow); }
 
 @supports not (backdrop-filter: blur(1px)) {
-  .panel, .login-stage > section, .login-stage > div, .sidebar, header.sticky, .glass-inset, .glass-notice { background: var(--surface); }
+  .panel, .login-stage > section, .login-stage > div, .sidebar, header.sticky, .glass-notice { background: var(--surface); }
 }
 
 @media (prefers-reduced-motion: reduce) {
