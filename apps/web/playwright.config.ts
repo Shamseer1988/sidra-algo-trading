@@ -2,10 +2,16 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  // Pages are compiled before the first test (see tests/warm-up.ts), and local
+  // runs use at most four workers: the dev server compiles on request, and more
+  // parallel first loads than that made the first assertion of a random test
+  // or two time out on a busy machine.
+  globalSetup: "./tests/warm-up.ts",
   fullyParallel: true,
+  expect: { timeout: 10_000 },
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : undefined,
+  workers: process.env.CI ? 1 : 4,
   reporter: "list",
   use: {
     baseURL: "http://localhost:3100",

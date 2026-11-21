@@ -6,6 +6,9 @@ export type BrokerSnapshot = { broker: string; fetched_at: string; stale: boolea
 export type TradingStatus = { state: "TRADING" | "PAUSED" | "BLOCKED" | "STOPPED" | "PAPER"; headline: string; detail: string; remedy: string; blocker: string | null; trading: boolean; can_resume: boolean; can_pause: boolean; emergency_stop_active: boolean };
 export type NotificationToggle = { key: string; label: string; help: string; value: boolean };
 export type NotificationCatalog = { toggles: NotificationToggle[]; always_sent: string[] };
+export type SetupStatus = { needs_first_admin: boolean };
+export type ManagedUser = { id: string; email: string; role: "ADMIN" | "TRADER" | "VIEWER"; is_active: boolean; locked: boolean; created_at: string };
+export type ChecklistItem = { id: string; title: string; done: boolean; detail: string; workspace: string; tab: string | null; required: boolean };
 export type User = { email: string; role: "ADMIN" | "TRADER" | "VIEWER"; is_active: boolean };
 export type ServiceStatus = { status: string; detail: string; checked_at: string };
 export type Overview = { mode: string; live_trading_enabled: boolean; api: ServiceStatus; database: ServiceStatus; redis: ServiceStatus; scanner: ServiceStatus; market_data: ServiceStatus; firstock: ServiceStatus; telegram: ServiceStatus };
@@ -578,6 +581,14 @@ export const api = {
   swingStrategies: () => request<SwingStrategy[]>("/swing/strategies"),
   setSwingStrategyMode: (id: string, mode: StrategyMode, reason: string | null) =>
     request<SwingStrategy[]>(`/swing/strategies/${encodeURIComponent(id)}/mode`, { method: "PUT", body: JSON.stringify({ mode, reason }) }),
+  setupStatus: () => request<SetupStatus>("/setup/status"),
+  createFirstAdmin: (email: string, password: string) => request<ManagedUser>("/setup/first-admin", { method: "POST", body: JSON.stringify({ email, password }) }),
+  setupChecklist: () => request<ChecklistItem[]>("/setup/checklist"),
+  users: () => request<ManagedUser[]>("/users"),
+  addUser: (body: { email: string; password: string; role: ManagedUser["role"] }) => request<ManagedUser>("/users", { method: "POST", body: JSON.stringify(body) }),
+  changeUser: (id: string, body: { role?: ManagedUser["role"]; is_active?: boolean }) => request<ManagedUser>(`/users/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
+  resetUserPassword: (id: string, password: string) => request<ManagedUser>(`/users/${encodeURIComponent(id)}/password`, { method: "POST", body: JSON.stringify({ password }) }),
+  changeOwnPassword: (current_password: string, new_password: string) => request<void>("/account/password", { method: "POST", body: JSON.stringify({ current_password, new_password }) }),
   diagnosticReports: () => request<DiagnosticReport[]>("/diagnostics/reports"),
   runDiagnosticReport: (name: string, body: { session_date: string | null; from_date: string | null; to_date: string | null; after: string | null; no_broker: boolean }) =>
     request<DiagnosticRun>(`/diagnostics/reports/${encodeURIComponent(name)}`, { method: "POST", body: JSON.stringify(body) }),

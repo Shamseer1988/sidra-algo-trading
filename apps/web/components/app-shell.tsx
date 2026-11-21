@@ -24,6 +24,7 @@ import { BacktestingWorkspace } from "../features/backtesting/backtesting-worksp
 import { ScannerPanel } from "../features/scanner/scanner-panel";
 import { UniverseWorkspace } from "../features/universe/universe-workspace";
 import { SecurityPanel, SettingsPanel } from "../features/settings/settings-panel";
+import { SetupBanner } from "../features/settings/users-panel";
 import { UpstoxConsole } from "../features/brokers/upstox-console";
 import { FirstockConsole } from "../features/brokers/firstock-console";
 import { SchedulerPanel } from "../features/automation/scheduler-panel";
@@ -184,7 +185,7 @@ export function AppShell() {
       content = <RiskCenter safety={safety} isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
       break;
     case "settings":
-      content = <SettingsPanel tab={showing ?? "trading"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} onNavigate={selectWorkspace} telegram={telegram} onTelegram={() => void telegramAction()} onRegisterWebhook={() => void registerTelegramWebhook()} desks={desks} />;
+      content = <SettingsPanel tab={showing ?? "trading"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} onNavigate={selectWorkspace} telegram={telegram} onTelegram={() => void telegramAction()} onRegisterWebhook={() => void registerTelegramWebhook()} desks={desks} onOpen={(workspace, next) => { selectWorkspace(workspace as WorkspaceId); if (next) setTab(next); }} />;
       break;
     case "swing":
       content = <SwingWorkspace tab={showing ?? "portfolio"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
@@ -218,7 +219,7 @@ export function AppShell() {
       break;
   }
 
-  return <main className="min-h-screen bg-terminal-950 text-slate-200"><TerminalSidebar active={active} collapsed={collapsed} menuOpen={menuOpen} user={user} desks={desks} onSelect={selectWorkspace} onToggle={() => setCollapsed((value) => !value)} onSignOut={() => void signOut()} /><div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}><TerminalHeader active={active} overview={overview} scanner={scanner} safety={safety} user={user} onOpenNavigation={() => setMenuOpen((value) => !value)} onOpenControls={() => selectWorkspace("risk")} /><div className="mx-auto max-w-[1600px] p-4 sm:p-6"><DeskBanner state={desks} onOpenSettings={() => { setActive("settings"); setTab("trading"); setMenuOpen(false); }} />{tabs && showing && <WorkspaceTabs tabs={tabs} active={showing} onSelect={setTab} actions={active === "orders" ? <SourceToggle source={orderSource.source} setSource={orderSource.setSource} /> : active === "reports" && showing !== "diagnostics" ? <SourceToggle source={reportSource.source} setSource={reportSource.setSource} /> : null} />}{content}</div></div><Toaster toasts={toasts} onDismiss={dismissToast} /></main>;
+  return <main className="min-h-screen bg-terminal-950 text-slate-200"><TerminalSidebar active={active} collapsed={collapsed} menuOpen={menuOpen} user={user} desks={desks} onSelect={selectWorkspace} onToggle={() => setCollapsed((value) => !value)} onSignOut={() => void signOut()} /><div className={`min-h-screen transition-[padding] duration-200 ${collapsed ? "lg:pl-[76px]" : "lg:pl-64"}`}><TerminalHeader active={active} overview={overview} scanner={scanner} safety={safety} user={user} onOpenNavigation={() => setMenuOpen((value) => !value)} onOpenControls={() => selectWorkspace("risk")} /><div className="mx-auto max-w-[1600px] p-4 sm:p-6"><DeskBanner state={desks} onOpenSettings={() => { setActive("settings"); setTab("trading"); setMenuOpen(false); }} /><SetupBanner isAdmin={Boolean(isAdmin)} onOpen={() => { setActive("settings"); setTab("setup"); setMenuOpen(false); }} />{tabs && showing && <WorkspaceTabs tabs={tabs} active={showing} onSelect={setTab} actions={active === "orders" ? <SourceToggle source={orderSource.source} setSource={orderSource.setSource} /> : active === "reports" && showing !== "diagnostics" ? <SourceToggle source={reportSource.source} setSource={reportSource.setSource} /> : null} />}{content}</div></div><Toaster toasts={toasts} onDismiss={dismissToast} /></main>;
 }
 
 function Toaster({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {

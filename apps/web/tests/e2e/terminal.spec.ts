@@ -502,6 +502,11 @@ export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" =
     await route.fulfill({ json: user });
   });
 
+  // A finished setup by default, so the setup banner stays out of every other test.
+  await page.route("**/api/v1/setup/checklist", async (route: Route) => {
+    await route.fulfill({ json: [] });
+  });
+
   await page.route("**/api/v1/system/overview", async (route: Route) => {
     await route.fulfill({ json: MOCK_OVERVIEW });
   });
@@ -2922,5 +2927,108 @@ test.describe("Diagnostics", () => {
     await shot(page, "u5-diagnostics");
     await page.getByRole("radio", { name: /Settings check/ }).click();
     await expect(page.getByLabel("Session date")).toHaveCount(0);
+  });
+});
+
+
+// --- First run, users and the setup checklist (U6) ------------------------------------
+
+const CHECKLIST = [
+  { id: "admin", title: "Administrator account", done: true, detail: "1 account(s).", workspace: "settings", tab: "users", required: true },
+  { id: "upstox_app", title: "Upstox app keys", done: false, detail: "API key, secret and redirect URL.", workspace: "settings", tab: "connections", required: true },
+  { id: "telegram", title: "Telegram alerts", done: false, detail: "A bot token and chat ID.", workspace: "settings", tab: "connections", required: false },
+];
+
+test.describe("First run and users", () => {
+  test("a fresh install offers the first administrator, then signs in", async ({ page }) => {
+    await page.route("**/api/v1/auth/me", async (route) => route.fulfill({ status: 401, json: { detail: "Authentication required" } }));
+    await page.route("**/api/v1/setup/status", async (route) => route.fulfill({ json: { needs_first_admin: true } }));
+    const made: unknown[] = [];
+    await page.route("**/api/v1/setup/first-admin", async (route) => {
+      made.push(route.request().postDataJSON());
+      await route.fulfill({ status: 201, json: { id: "u1", email: "owner@example.com", role: "ADMIN", is_active: true, locked: false, created_at: "2026-11-21T10:00:00Z" } });
+    });
+    let signedIn = false;
+    await page.route("**/api/v1/auth/login", async (route) => {
+      signedIn = true;
+      await route.fulfill({ json: { email: "owner@example.com", role: "ADMIN" } });
+    });
+    await page.goto("/login");
+    await expect(page.getByRole("heading", { name: "Create the first administrator" })).toBeVisible();
+    await page.getByLabel("Email").fill("owner@example.com");
+    await page.getByLabel("Password", { exact: true }).fill("a long enough passphrase");
+    await page.getByLabel("Confirm password").fill("not the same passphrase");
+    await page.getByRole("button", { name: "Create administrator and sign in" }).click();
+    await expect(page.getByText("The two passwords are not the same.")).toBeVisible();
+    expect(made).toHaveLength(0);
+    await page.getByLabel("Confirm password").fill("a long enough passphrase");
+    await shot(page, "u6-first-admin");
+    await page.getByRole("button", { name: "Create administrator and sign in" }).click();
+    await expect.poll(() => signedIn).toBe(true);
+    expect(made[0]).toEqual({ email: "owner@example.com", password: "a long enough passphrase" });
+  });
+
+  test("an existing install shows the normal sign-in", async ({ page }) => {
+    await page.route("**/api/v1/auth/me", async (route) => route.fulfill({ status: 401, json: { detail: "Authentication required" } }));
+    await page.route("**/api/v1/setup/status", async (route) => route.fulfill({ json: { needs_first_admin: false } }));
+    await page.goto("/login");
+    await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible();
+    await expect(page.getByLabel("Confirm password")).toHaveCount(0);
+  });
+
+  test("an administrator adds a viewer and changes a role", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const calls: { method: string; url: string; body: unknown }[] = [];
+    const rows = [
+      { id: "a1", email: "admin@sidra.test", role: "ADMIN", is_active: true, locked: false, created_at: "2026-11-01T04:00:00Z" },
+      { id: "t1", email: "partner@sidra.test", role: "TRADER", is_active: true, locked: false, created_at: "2026-11-10T04:00:00Z" },
+    ];
+    await page.route("**/api/v1/users", async (route) => {
+      if (route.request().method() === "POST") {
+        const body = route.request().postDataJSON();
+        calls.push({ method: "POST", url: route.request().url(), body });
+        await route.fulfill({ status: 201, json: { id: "v1", email: body.email, role: body.role, is_active: true, locked: false, created_at: "2026-11-21T04:00:00Z" } });
+      } else {
+        await route.fulfill({ json: rows });
+      }
+    });
+    await page.route("**/api/v1/users/*", async (route) => {
+      calls.push({ method: route.request().method(), url: route.request().url(), body: route.request().postDataJSON() });
+      await route.fulfill({ json: { ...rows[1], role: "VIEWER" } });
+    });
+    await page.goto("/");
+    await go(page, "Settings", "Users");
+    await expect(page.getByTestId("user-row")).toHaveCount(2);
+    await page.getByLabel("Role for partner@sidra.test").selectOption("VIEWER");
+    await expect.poll(() => calls.length).toBe(1);
+    expect(calls[0]).toMatchObject({ method: "PUT", body: { role: "VIEWER" } });
+    expect(calls[0].url).toContain("/users/t1");
+    const form = page.locator("form").filter({ hasText: "Add account" });
+    await form.getByLabel("Email").fill("viewer@sidra.test");
+    await form.getByLabel(/First password/).fill("twelve chars ok");
+    await shot(page, "u6-users");
+    await form.getByRole("button", { name: "Add account" }).click();
+    await expect.poll(() => calls.length).toBe(2);
+    expect(calls[1].body).toEqual({ email: "viewer@sidra.test", password: "twelve chars ok", role: "VIEWER" });
+  });
+
+  test("a viewer sees only their own password card", async ({ page }) => {
+    await setupMockRoutes(page, "VIEWER");
+    await page.goto("/");
+    await go(page, "Settings", "Users");
+    await expect(page.getByRole("heading", { name: "My password" })).toBeVisible();
+    await expect(page.getByTestId("user-row")).toHaveCount(0);
+  });
+
+  test("an unfinished setup shows a banner that opens the checklist, and a step opens its screen", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/setup/checklist", async (route) => route.fulfill({ json: CHECKLIST }));
+    await page.goto("/");
+    await expect(page.getByTestId("setup-banner")).toContainText("1 required step left");
+    await page.getByRole("button", { name: "Open the setup checklist" }).click();
+    await expect(page.getByTestId("setup-checklist")).toContainText("Upstox app keys");
+    await shot(page, "u6-checklist");
+    await page.getByTestId("step-upstox_app").getByRole("button", { name: "Open" }).click();
+    await expect(page.getByRole("heading", { name: "Connections", exact: true })).toBeVisible();
   });
 });

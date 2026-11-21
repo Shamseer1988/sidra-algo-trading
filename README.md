@@ -49,13 +49,13 @@ shut is the lock above, not an absence of code.
    ```
 
 3. Open the protected web terminal on the configured local web port (default `http://127.0.0.1:3001`). FastAPI stays private inside Docker and is reached through same-origin `/api` routes.
-4. Create the first administrator after the stack is healthy:
+4. Create the first administrator: open the web terminal. A fresh install with no account shows **Create the first administrator** on the sign-in page, once; after that it is a normal sign-in, and further people are added from **Settings › Users**. **Settings › Setup checklist** then lists what is left (Upstox keys, login, limits, a strategy). The command line still works if you prefer it:
 
    ```powershell
    docker compose exec api python -m app.cli create-admin --email admin@example.com
    ```
 
-The command prompts for a password; one is never shipped in the repository.
+No password is ever shipped in the repository.
 
 For a production-style deployment, run migrations before starting the API with `docker compose exec api alembic upgrade head` and set `AUTO_CREATE_SCHEMA=false`.
 
