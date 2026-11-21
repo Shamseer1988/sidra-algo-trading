@@ -245,6 +245,23 @@ async def create_backtest(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="No enabled strategies are available for research"
         )
+    return await execute_backtest(request, app_settings, session, user, selected, controls, execution_controls)
+
+
+async def execute_backtest(
+    request: BacktestRunRequest,
+    app_settings,  # noqa: ANN001
+    session,  # noqa: ANN001
+    user: User,
+    selected: list[StrategyConfiguration],
+    controls: dict,
+    execution_controls: PaperExecutionControls,
+) -> BacktestRunDetail:
+    """Replay ``selected`` over the stored candles and persist the run.
+
+    Shared by Backtesting and by the strategy builder, so a draft strategy is
+    measured by exactly the code that measures a saved one.
+    """
     try:
         for item in selected:
             StrategyRegistry.definition(item.strategy_type)
