@@ -1197,8 +1197,12 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByRole("heading", { name: "Strategies" })).toBeVisible();
     await expect(page.getByText("ORB Retest — Default · v1")).toBeVisible();
     await expect(page.getByText("25%")).toBeVisible();
-    await expect(page.getByLabel("Strategy name ORB Retest — Default")).toBeVisible();
-    await expect(page.getByLabel(/Universe/)).toHaveValue("NSE:RELIANCE, NSE:INFY");
+    // The long editor is gone: rules open in a popup from the row's Edit button.
+    await expect(page.getByLabel("Strategy name ORB Retest — Default")).toHaveCount(0);
+    await page.getByRole("button", { name: "Edit ORB Retest — Default" }).click();
+    const editor = page.getByTestId("strategy-editor");
+    await expect(editor.getByLabel("Name")).toHaveValue("ORB Retest — Default");
+    await expect(editor.getByLabel("Minimum score (0-100)")).toHaveValue("90");
   });
 
   test("5c. Paper orderbook: simulated lifecycle and positions are clearly labeled", async ({ page }) => {
@@ -2250,6 +2254,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
     await go(page, "Strategies");
+    await page.getByRole("button", { name: "Edit ORB Retest — Default" }).click();
 
     // No trading or strategy setting should need a Python file or a .env edit.
     await expect(page.getByLabel("Trailing")).toBeVisible();
@@ -3078,7 +3083,7 @@ test.describe("Strategy builder", () => {
 
     await builder.getByRole("radio", { name: /Relative-Strength Pullback/ }).click();
     await builder.getByLabel("Minimum score (0-100)").fill("88");
-    await builder.getByText("RELIANCE", { exact: true }).click();
+    await page.getByTestId("builder-test").getByText("RELIANCE", { exact: true }).click();
     await builder.getByRole("button", { name: "Run backtest" }).click();
     await expect(page.getByTestId("builder-result")).toContainText("Trades");
     expect(posted[0].body.instrument_tokens).toEqual(["NSE_EQ|INE002A01018"]);
@@ -3105,3 +3110,106 @@ const MOCK_BACKTEST_RESULT_LIKE = {
   final_equity: 50412, net_pnl: 412, max_drawdown: 380, failure_detail: null, created_at: "2026-11-21T10:00:00Z",
   summary: { trades: 6, winners: 3, losers: 3, win_rate: 50, net_pnl: 412, profit_factor: 1.4, initial_capital: 50000, final_equity: 50412, return_percent: 0.82, max_drawdown: 380, equity_curve: [], strategy_comparison: [] },
 };
+
+
+// --- Strategies: actions and popups --------------------------------------------------------
+
+test.describe("Strategy actions and popups", () => {
+  async function mockSave(page: Page) {
+    const calls: { method: string; url: string; body: Record<string, unknown> | null }[] = [];
+    await page.route("**/api/v1/strategy-builder/instruments", async (route) => {
+      await route.fulfill({ json: [{ instrument_token: "NSE:RELIANCE", symbol: "RELIANCE" }, { instrument_token: "NSE:INFY", symbol: "INFY" }] });
+    });
+    await page.route("**/api/v1/strategy-builder/strategies/*", async (route) => {
+      const body = route.request().method() === "DELETE" ? null : (route.request().postDataJSON() as Record<string, unknown>);
+      calls.push({ method: route.request().method(), url: route.request().url(), body });
+      await route.fulfill({ json: MOCK_STRATEGIES });
+    });
+    return calls;
+  }
+
+  test("Edit opens the rules in a popup and saves them without touching the mode", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockModes(page);
+    const calls = await mockSave(page);
+    await page.goto("/");
+    await go(page, "Strategies");
+    await page.getByRole("button", { name: "Edit ORB Retest — Default" }).click();
+    const editor = page.getByTestId("strategy-editor");
+    await expect(editor).toBeVisible();
+    await expect(editor.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    await editor.getByLabel("Minimum score (0-100)").fill("85");
+    await editor.getByLabel("Why (kept in the change history)").fill("fewer, cleaner setups");
+    await shot(page, "strategy-edit-popup");
+    await editor.getByRole("button", { name: "Save changes" }).click();
+    await expect(editor).toHaveCount(0);
+    expect(calls[0].method).toBe("PUT");
+    expect(calls[0].url).toContain("/strategy-builder/strategies/orb-default");
+    expect(calls[0].body).toMatchObject({ reason: "fewer, cleaner setups", confirm_live: false, draft: { minimum_score: 85, enabled: true, live_orders: false } });
+  });
+
+  test("editing a live strategy needs a reason and a real-money tick", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockModes(page);
+    const calls = await mockSave(page);
+    await page.route("**/api/v1/settings/strategies", async (route) => {
+      await route.fulfill({ json: [{ ...MOCK_STRATEGIES[0], live_orders: true }] });
+    });
+    await page.goto("/");
+    await go(page, "Strategies");
+    await page.getByRole("button", { name: "Edit ORB Retest — Default" }).click();
+    const editor = page.getByTestId("strategy-editor");
+    await expect(editor.getByTestId("live-edit-warning")).toContainText("real money");
+    await editor.getByLabel("Minimum score (0-100)").fill("92");
+    const save = editor.getByRole("button", { name: "Save live strategy" });
+    await expect(save).toBeDisabled();
+    await editor.getByLabel(/Why/).fill("one change: stricter score");
+    await expect(save).toBeDisabled();
+    await editor.getByLabel("I understand this changes a strategy that trades real money.").check();
+    await shot(page, "strategy-edit-live");
+    await save.click();
+    await expect.poll(() => calls.length).toBe(1);
+    expect(calls[0].body).toMatchObject({ confirm_live: true, reason: "one change: stricter score", draft: { minimum_score: 92 } });
+  });
+
+  test("a mode change is confirmed in a popup in front of the table", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockModes(page);
+    await page.goto("/");
+    await go(page, "Strategies");
+    await page.getByTestId("mode-row-intraday-orb-default").getByRole("button", { name: "Off", exact: true }).click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute("aria-modal", "true");
+    await shot(page, "mode-popup");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+  });
+
+  test("only an Off strategy offers Delete, and it asks in a popup", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockModes(page);
+    const calls = await mockSave(page);
+    await page.route("**/api/v1/settings/strategies", async (route) => {
+      await route.fulfill({ json: [MOCK_STRATEGIES[0], { ...MOCK_STRATEGIES[0], id: "old", name: "Old draft", enabled: false, live_orders: false }] });
+    });
+    await page.goto("/");
+    await go(page, "Strategies");
+    await expect(page.getByRole("button", { name: "Delete ORB Retest — Default" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Delete Old draft" }).click();
+    const confirm = page.getByTestId("delete-confirm");
+    await expect(confirm).toContainText("kept");
+    await confirm.getByRole("button", { name: "Yes, delete it" }).click();
+    await expect.poll(() => calls.length).toBe(1);
+    expect(calls[0]).toMatchObject({ method: "DELETE" });
+    expect(calls[0].url).toContain("/strategy-builder/strategies/old");
+  });
+
+  test("New strategy opens the builder", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await go(page, "Strategies");
+    await page.getByRole("button", { name: "New strategy" }).click();
+    await expect(page.getByRole("tab", { name: "Builder" })).toHaveAttribute("aria-selected", "true");
+  });
+});

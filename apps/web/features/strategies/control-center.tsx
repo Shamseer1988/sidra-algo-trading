@@ -1,9 +1,11 @@
 "use client";
 
-import { Radio, ShieldAlert } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { FileText, Pencil, Radio, ShieldAlert, Trash2 } from "lucide-react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 
 import { api, type PaperStrategy, type StrategyMode, type SwingStrategy } from "../../components/api";
+import { Modal } from "../../components/modal";
+import { StrategyEditor } from "./strategy-editor";
 
 /**
  * Every strategy, intraday and swing, and what it is doing: Off, Paper or Live.
@@ -13,6 +15,11 @@ import { api, type PaperStrategy, type StrategyMode, type SwingStrategy } from "
  * sends real orders with real money. The server refuses Live without that
  * confirmation, and refuses swing Live altogether until the swing desk has
  * limits of its own.
+ *
+ * Each intraday row also carries its actions: Edit (the rules, in a popup; a
+ * live strategy only after a real-money confirmation and a reason), Details,
+ * and Delete for a strategy that is Off. Every confirmation is a popup in
+ * front of the table, never a box that appears somewhere below it.
  */
 
 export function modeOf(item: Pick<PaperStrategy, "enabled" | "live_orders">): StrategyMode {
@@ -38,14 +45,18 @@ export function StrategyControlCenter({
   isAdmin,
   onIntradayChanged,
   onMessage,
+  onDetails,
 }: {
   strategies: PaperStrategy[];
   isAdmin: boolean;
   onIntradayChanged: (next: PaperStrategy[]) => void;
   onMessage: (message: string) => void;
+  onDetails?: (id: string) => void;
 }) {
   const [swing, setSwing] = useState<SwingStrategy[]>([]);
   const [pending, setPending] = useState<Pending | null>(null);
+  const [editing, setEditing] = useState<PaperStrategy | null>(null);
+  const [deleting, setDeleting] = useState<PaperStrategy | null>(null);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -80,6 +91,20 @@ export function StrategyControlCenter({
     }
   }
 
+  async function remove() {
+    if (!deleting) return;
+    setBusy(true);
+    try {
+      onIntradayChanged(await api.deleteStrategy(deleting.id));
+      onMessage(`Deleted ${deleting.name}.`);
+      setDeleting(null);
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "Could not delete the strategy");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <article className="panel overflow-hidden" data-testid="strategy-control-center">
       <div className="flex items-center gap-3 border-b border-slate-800 px-5 py-4">
@@ -97,6 +122,7 @@ export function StrategyControlCenter({
               <th>Desk</th>
               <th>Mode</th>
               <th>What it means</th>
+              <th>Action</th>
             </tr>
           </thead>
           <tbody>
@@ -111,6 +137,26 @@ export function StrategyControlCenter({
                 isAdmin={isAdmin}
                 liveBlocked={null}
                 onPick={(to) => setPending({ desk: "intraday", id: item.id, name: item.name, from: modeOf(item), to })}
+                actions={
+                  <div className="flex gap-1.5">
+                    {isAdmin && (
+                      <button className="secondary-button px-2 py-1 text-xs" aria-label={`Edit ${item.name}`} onClick={() => setEditing(item)}>
+                        <Pencil className="h-3.5 w-3.5" />
+                        Edit
+                      </button>
+                    )}
+                    {onDetails && (
+                      <button className="secondary-button px-2 py-1 text-xs" aria-label={`Details of ${item.name}`} title="Details" onClick={() => onDetails(item.id)}>
+                        <FileText className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {isAdmin && modeOf(item) === "OFF" && (
+                      <button className="secondary-button px-2 py-1 text-xs" aria-label={`Delete ${item.name}`} title="Delete" onClick={() => setDeleting(item)}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                }
               />
             ))}
             {swing.map((item) => (
@@ -126,6 +172,7 @@ export function StrategyControlCenter({
                 onPick={(to) =>
                   setPending({ desk: "swing", id: item.id, name: SWING_LABELS[item.id] ?? item.name, from: item.mode, to })
                 }
+                actions={<span className="text-xs text-slate-500">Mode only</span>}
               />
             ))}
           </tbody>
@@ -133,22 +180,35 @@ export function StrategyControlCenter({
       </div>
 
       {pending && (
-        <div
+        <Modal
           role="alertdialog"
-          data-testid="mode-confirm"
-          className={`m-5 rounded-md border p-4 ${pending.to === "LIVE" ? "border-rose-500/40 bg-rose-950/25" : "border-amber-500/30 bg-amber-950/20"}`}
+          testId="mode-confirm"
+          busy={busy}
+          tone={pending.to === "LIVE" ? "danger" : "warning"}
+          eyebrow={pending.desk === "intraday" ? "Intraday strategy" : "Swing strategy"}
+          title={`${pending.name}: ${pending.from.toLowerCase()} → ${pending.to.toLowerCase()}?`}
+          onClose={() => setPending(null)}
+          footer={
+            <>
+              <button disabled={busy} onClick={() => setPending(null)} className="secondary-button">
+                Cancel
+              </button>
+              <button disabled={busy} onClick={() => void confirm()} className={pending.to === "LIVE" ? "danger-button" : "primary-button"}>
+                {pending.to === "LIVE" ? "Yes, trade this live" : `Yes, set to ${pending.to.toLowerCase()}`}
+              </button>
+            </>
+          }
         >
-          <p className={`flex items-center gap-2 text-sm font-semibold ${pending.to === "LIVE" ? "text-rose-100" : "text-amber-100"}`}>
+          <p className={`flex items-center gap-2 text-sm ${pending.to === "LIVE" ? "font-semibold text-rose-300" : "text-slate-300"}`}>
             {pending.to === "LIVE" && <ShieldAlert className="h-4 w-4" />}
-            {pending.name}: {pending.from.toLowerCase()} → {pending.to.toLowerCase()}?
+            {MODE_TEXT[pending.to]}
           </p>
-          <p className="mt-1 text-xs leading-5 text-slate-300">{MODE_TEXT[pending.to]}</p>
           {pending.to === "LIVE" && (
-            <p className="mt-1 text-xs font-semibold leading-5 text-rose-100">
+            <p className="mt-2 text-xs font-semibold leading-5 text-rose-300">
               Real money. Orders go to the broker automatically under your current approval mode and limits.
             </p>
           )}
-          <label className="field-label mt-3 block">
+          <label className="field-label mt-4 block">
             Why (kept in the change history)
             <input
               className="field-input mt-1"
@@ -158,15 +218,35 @@ export function StrategyControlCenter({
               placeholder="e.g. forward test before going live"
             />
           </label>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button disabled={busy} onClick={() => void confirm()} className={pending.to === "LIVE" ? "danger-button" : "primary-button"}>
-              {pending.to === "LIVE" ? "Yes, trade this live" : `Yes, set to ${pending.to.toLowerCase()}`}
-            </button>
-            <button disabled={busy} onClick={() => setPending(null)} className="secondary-button">
-              Cancel
-            </button>
-          </div>
-        </div>
+        </Modal>
+      )}
+
+      {editing && (
+        <StrategyEditor strategy={editing} onClose={() => setEditing(null)} onSaved={onIntradayChanged} onMessage={onMessage} />
+      )}
+
+      {deleting && (
+        <Modal
+          role="alertdialog"
+          testId="delete-confirm"
+          busy={busy}
+          tone="warning"
+          eyebrow="Intraday strategy"
+          title={`Delete ${deleting.name}?`}
+          onClose={() => setDeleting(null)}
+          footer={
+            <>
+              <button disabled={busy} className="secondary-button" onClick={() => setDeleting(null)}>
+                Cancel
+              </button>
+              <button disabled={busy} className="danger-button" onClick={() => void remove()}>
+                Yes, delete it
+              </button>
+            </>
+          }
+        >
+          <p className="text-sm text-slate-300">It is Off. Only the configuration goes; its past signals, trades and backtests are kept.</p>
+        </Modal>
       )}
     </article>
   );
@@ -181,6 +261,7 @@ function ModeRow({
   isAdmin,
   liveBlocked,
   onPick,
+  actions,
 }: {
   id: string;
   name: string;
@@ -190,6 +271,7 @@ function ModeRow({
   isAdmin: boolean;
   liveBlocked: string | null;
   onPick: (to: StrategyMode) => void;
+  actions?: ReactNode;
 }) {
   const tone: Record<StrategyMode, string> = {
     OFF: "border-slate-600 bg-slate-500/15 text-slate-200",
@@ -201,7 +283,7 @@ function ModeRow({
       <td>
         {/* A fixed-width block: the table keeps every cell on one line, and a
             cell's own max-width does not hold in an auto-sized table. */}
-        <div style={{ width: "18rem", whiteSpace: "normal" }}>
+        <div style={{ width: "13rem", whiteSpace: "normal" }}>
           <strong className="block text-white">{name}</strong>
           <span className="text-[11px] leading-4 opacity-75">{detail}</span>
         </div>
@@ -229,10 +311,11 @@ function ModeRow({
         </div>
       </td>
       <td className="text-xs leading-5 text-slate-400">
-        <div style={{ width: "20rem", whiteSpace: "normal" }}>
+        <div style={{ width: "15rem", whiteSpace: "normal" }}>
           {liveBlocked && mode !== "LIVE" ? `${MODE_TEXT[mode]} ${liveBlocked}` : MODE_TEXT[mode]}
         </div>
       </td>
+      <td>{actions}</td>
     </tr>
   );
 }

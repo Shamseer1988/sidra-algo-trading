@@ -12,9 +12,10 @@ What this screen can and cannot do, enforced here rather than by the screen:
 * **Save** a new strategy. It is always stored switched off and on paper. It
   starts trading on paper only when someone sets it to Paper in the control
   center, and goes live only through the control center's own confirmation.
-* **Edit** a strategy's rules, one strategy at a time. A strategy that is live
-  is refused: move it to Paper first. So nothing done in the builder can
-  change what a live strategy does with real money.
+* **Edit** a strategy's rules, one strategy at a time, never its mode. A
+  strategy that is live is changed only with ``confirm_live`` and a reason,
+  which the screen asks for in its own "real money" step; the change is
+  versioned, revisioned and audited as a live edit.
 * **Delete** a strategy that is Off. Its history stays; only the configuration
   goes.
 """
@@ -109,6 +110,9 @@ class DraftBacktest(BaseModel):
 class SaveRequest(BaseModel):
     draft: StrategyConfiguration
     reason: str | None = Field(default=None, max_length=300)
+    # Required, with a reason, to change the rules of a strategy that is live.
+    # The screen sets it only after its own "this trades real money" step.
+    confirm_live: bool = False
 
 
 def _refuse(code: int, detail: str) -> HTTPException:
@@ -232,11 +236,11 @@ async def save_existing(
     current = previous.get(strategy_id)
     if current is None:
         raise _refuse(status.HTTP_404_NOT_FOUND, "No strategy with that id.")
-    if strategy_mode(current) == "LIVE":
+    is_live = strategy_mode(current) == "LIVE"
+    if is_live and not (request.confirm_live and (request.reason or "").strip()):
         raise _refuse(
             status.HTTP_409_CONFLICT,
-            "This strategy is live. Its rules are not changed while it trades real money: "
-            "set it to Paper in the control center first.",
+            "This strategy is live and trades real money. Confirm the change and say why it is being made.",
         )
     _check_name(request.draft, previous, strategy_id)
     updated = request.draft.model_copy(
@@ -248,7 +252,7 @@ async def save_existing(
         previous,
         user,
         "strategy_builder.updated",
-        {"strategy_id": strategy_id, "reason": request.reason},
+        {"strategy_id": strategy_id, "reason": request.reason, "live": is_live},
     )
 
 

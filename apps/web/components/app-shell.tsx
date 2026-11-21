@@ -164,7 +164,7 @@ export function AppShell() {
       content = <Dashboard services={services} scanner={scanner} safety={safety} signals={signals} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} intraday={desks.intraday} />;
       break;
     case "strategies":
-      content = showing === "builder" ? <StrategyBuilder isAdmin={Boolean(isAdmin)} onMessage={setMessage} onOpenControlCenter={() => setTab("control")} /> : <StrategiesPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
+      content = showing === "builder" ? <StrategyBuilder isAdmin={Boolean(isAdmin)} onMessage={setMessage} onOpenControlCenter={() => setTab("control")} /> : <StrategiesPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} onOpenBuilder={() => setTab("builder")} />;
       break;
     case "scanner":
       content =

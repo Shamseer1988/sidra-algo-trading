@@ -101,16 +101,27 @@ async def test_a_duplicate_name_is_refused(admin):
     assert refused.value.status_code == 409
 
 
-async def test_a_live_strategy_cannot_be_edited_from_the_builder(admin):
+async def test_a_live_strategy_is_edited_only_with_confirmation_and_a_reason(admin):
     live = _config("Live one", enabled=True, live_orders=True)
     await _seed(live)
-    async with SessionLocal() as session:
-        with pytest.raises(HTTPException) as refused:
-            await routes.save_existing(
-                live.id, routes.SaveRequest(draft=live.model_copy(update={"minimum_score": 10})), session, admin
-            )
-    assert refused.value.status_code == 409
+    changed = live.model_copy(update={"minimum_score": 90})
+    for request in (
+        routes.SaveRequest(draft=changed),
+        routes.SaveRequest(draft=changed, confirm_live=True),
+        routes.SaveRequest(draft=changed, confirm_live=True, reason="   "),
+        routes.SaveRequest(draft=changed, reason="no confirmation"),
+    ):
+        async with SessionLocal() as session:
+            with pytest.raises(HTTPException) as refused:
+                await routes.save_existing(live.id, request, session, admin)
+        assert refused.value.status_code == 409
     assert (await _stored())[live.id].minimum_score == live.minimum_score
+    async with SessionLocal() as session:
+        await routes.save_existing(
+            live.id, routes.SaveRequest(draft=changed, confirm_live=True, reason="stricter score"), session, admin
+        )
+    stored = (await _stored())[live.id]
+    assert stored.minimum_score == 90 and stored.enabled and stored.live_orders
 
 
 async def test_an_edit_changes_the_rules_and_never_the_mode(admin):
