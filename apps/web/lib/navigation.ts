@@ -144,6 +144,10 @@ export const workspaceMeta: Record<WorkspaceId, { eyebrow: string; title: string
 export type WorkspaceTab = { id: string; label: string };
 
 export const workspaceTabs: Partial<Record<WorkspaceId, WorkspaceTab[]>> = {
+  strategies: [
+    { id: "control", label: "Control center" },
+    { id: "builder", label: "Builder" },
+  ],
   scanner: [
     { id: "scanner", label: "Scanner" },
     { id: "universe", label: "Universe" },

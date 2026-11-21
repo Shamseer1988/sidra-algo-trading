@@ -30,6 +30,7 @@ import { FirstockConsole } from "../features/brokers/firstock-console";
 import { SchedulerPanel } from "../features/automation/scheduler-panel";
 import { SignalsPanel } from "../features/signals/signals-panel";
 import { StrategiesPanel } from "../features/strategies/strategies-panel";
+import { StrategyBuilder } from "../features/strategies/strategy-builder";
 import { SwingWorkspace } from "../features/swing/swing-workspace";
 import { DiagnosticsPanel } from "../features/reports/diagnostics-panel";
 import { SystemHealthPanel } from "../features/system/system-health-panel";
@@ -163,7 +164,7 @@ export function AppShell() {
       content = <Dashboard services={services} scanner={scanner} safety={safety} signals={signals} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} intraday={desks.intraday} />;
       break;
     case "strategies":
-      content = <StrategiesPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
+      content = showing === "builder" ? <StrategyBuilder isAdmin={Boolean(isAdmin)} onMessage={setMessage} onOpenControlCenter={() => setTab("control")} /> : <StrategiesPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
       break;
     case "scanner":
       content =

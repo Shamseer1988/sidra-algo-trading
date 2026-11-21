@@ -3032,3 +3032,76 @@ test.describe("First run and users", () => {
     await expect(page.getByRole("heading", { name: "Connections", exact: true })).toBeVisible();
   });
 });
+
+
+// --- Strategy builder (U7) ----------------------------------------------------------------
+
+test.describe("Strategy builder", () => {
+  test("builds a draft from a template, backtests it unsaved, and saves it off", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const base = MOCK_STRATEGIES[0];
+    const live = { ...base, id: "rs-live", name: "RS Pullback", strategy_type: "rs-pullback-v1", enabled: true, live_orders: true };
+    const off = { ...base, id: "old-draft", name: "Old draft", enabled: false, live_orders: false };
+    await page.route("**/api/v1/strategy-builder/catalog", async (route) => {
+      await route.fulfill({
+        json: {
+          templates: [
+            { strategy_type: "rs-pullback-v1", name: "Relative-Strength Pullback", about: "Shares stronger than NIFTY, on a pullback.", prerequisites: [], defaults: { ...base, id: "new", name: "My Relative-Strength Pullback", strategy_type: "rs-pullback-v1", enabled: false, live_orders: false } },
+            { strategy_type: "orb-retest-v1", name: "Opening Range Breakout Retest", about: "First 15 minutes' range, broken and retested.", prerequisites: [], defaults: { ...base, id: "new", name: "My ORB", enabled: false, live_orders: false } },
+          ],
+          strategies: [
+            { id: live.id, name: live.name, strategy_type: live.strategy_type, mode: "LIVE", version: 4, configuration: live },
+            { id: off.id, name: off.name, strategy_type: off.strategy_type, mode: "OFF", version: 1, configuration: off },
+          ],
+        },
+      });
+    });
+    await page.route("**/api/v1/strategy-builder/instruments", async (route) => {
+      await route.fulfill({ json: [{ instrument_token: "NSE_EQ|INE002A01018", symbol: "RELIANCE" }, { instrument_token: "NSE_EQ|INE467B01029", symbol: "TCS" }] });
+    });
+    const posted: { url: string; body: Record<string, unknown> }[] = [];
+    await page.route("**/api/v1/strategy-builder/backtest", async (route) => {
+      posted.push({ url: route.request().url(), body: route.request().postDataJSON() });
+      await route.fulfill({ status: 201, json: { ...MOCK_BACKTEST_RESULT_LIKE, trades: [] } });
+    });
+    await page.route("**/api/v1/strategy-builder/strategies", async (route) => {
+      posted.push({ url: route.request().url(), body: route.request().postDataJSON() });
+      await route.fulfill({ status: 201, json: [live] });
+    });
+
+    await page.goto("/");
+    await go(page, "Strategies", "Builder");
+    const builder = page.getByTestId("strategy-builder");
+    await expect(builder.getByTestId("existing-rs-live").getByRole("button", { name: "Edit" })).toBeDisabled();
+    await expect(builder.getByRole("button", { name: "Delete RS Pullback" })).toBeDisabled();
+    await expect(builder.getByRole("button", { name: "Delete Old draft" })).toBeEnabled();
+
+    await builder.getByRole("radio", { name: /Relative-Strength Pullback/ }).click();
+    await builder.getByLabel("Minimum score (0-100)").fill("88");
+    await builder.getByText("RELIANCE", { exact: true }).click();
+    await builder.getByRole("button", { name: "Run backtest" }).click();
+    await expect(page.getByTestId("builder-result")).toContainText("Trades");
+    expect(posted[0].body.instrument_tokens).toEqual(["NSE_EQ|INE002A01018"]);
+    expect((posted[0].body.draft as { minimum_score: number }).minimum_score).toBe(88);
+    await shot(page, "u7-builder");
+
+    await builder.getByLabel("Why (kept in the change history)").fill("a stricter RS variant to paper trade");
+    await builder.getByRole("button", { name: "Save strategy" }).click();
+    await expect.poll(() => posted.length).toBe(2);
+    expect(posted[1].body).toMatchObject({ reason: "a stricter RS variant to paper trade", draft: { name: "My Relative-Strength Pullback", minimum_score: 88 } });
+  });
+
+  test("a viewer is told the builder is for administrators", async ({ page }) => {
+    await setupMockRoutes(page, "VIEWER");
+    await page.goto("/");
+    await go(page, "Strategies", "Builder");
+    await expect(page.getByText("Only an administrator can build or change strategies.")).toBeVisible();
+  });
+});
+
+const MOCK_BACKTEST_RESULT_LIKE = {
+  id: "bt-u7", status: "COMPLETED", start_date: "2026-10-26", end_date: "2026-11-20", timeframe_seconds: 60,
+  instrument_tokens: ["NSE_EQ|INE002A01018"], source_candle_count: 7125, data_fingerprint: "abc", initial_capital: 50000,
+  final_equity: 50412, net_pnl: 412, max_drawdown: 380, failure_detail: null, created_at: "2026-11-21T10:00:00Z",
+  summary: { trades: 6, winners: 3, losers: 3, win_rate: 50, net_pnl: 412, profit_factor: 1.4, initial_capital: 50000, final_equity: 50412, return_percent: 0.82, max_drawdown: 380, equity_curve: [], strategy_comparison: [] },
+};
