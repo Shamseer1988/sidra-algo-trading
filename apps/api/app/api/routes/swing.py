@@ -17,7 +17,6 @@ from app.api.deps import CurrentUser, DbSession, require_roles
 from app.db.models import ApplicationSetting, AuditLog, MarketCandle, SwingPaperPosition, User, UserRole
 from app.services.desks import SWING_DESK, desk_enabled
 from app.services.settings_history import record_revision, summarise
-from app.services.swing_backtest import SwingRules
 from app.services.swing_data import DAILY_TIMEFRAME_SECONDS
 from app.services.swing_paper import (
     CANCELLED,
@@ -33,6 +32,7 @@ from app.services.swing_paper import (
     paper_strategies,
     swing_modes,
 )
+from app.services.swing_settings import swing_rules
 
 router = APIRouter(prefix="/swing", tags=["Swing desk (paper)"])
 
@@ -155,7 +155,7 @@ def view(row: SwingPaperPosition, last: tuple[Decimal, date] | None = None) -> S
 async def summary(_: CurrentUser, session: DbSession) -> SwingSummary:
     controls = await session.get(ApplicationSetting, "trading_controls")
     running = await paper_strategies(session)
-    rules = SwingRules(strategies=running)
+    rules = await swing_rules(session, running)
     rows = list(
         (await session.scalars(select(SwingPaperPosition).where(SwingPaperPosition.status.in_((OPEN, PLANNED))))).all()
     )

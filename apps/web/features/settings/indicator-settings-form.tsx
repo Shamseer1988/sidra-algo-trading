@@ -1,10 +1,11 @@
 "use client";
 
-import { Database, FileCog, RotateCcw, Save } from "lucide-react";
+import { Database, FileCog } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api, type IndicatorCatalog, type IndicatorSettings } from "../../components/api";
 import { ControlField, dirtyKeys } from "./control-field";
+import { type Change, ChangesModal, FieldGrid, SaveBar, SettingsSection, shown } from "./settings-ui";
 
 /**
  * The indicator periods — the ruler the scanner measures with.
@@ -33,10 +34,18 @@ function derivedValue(key: string, value: unknown): string | null {
   return null;
 }
 
-export function IndicatorSettingsForm({ isAdmin, onMessage }: { isAdmin: boolean; onMessage: (message: string) => void }) {
+export function IndicatorSettingsForm({
+  isAdmin,
+  onMessage,
+  embedded = false,
+}: {
+  isAdmin: boolean;
+  onMessage: (message: string, kind?: "success" | "error" | "info") => void;
+  embedded?: boolean;
+}) {
   const [catalog, setCatalog] = useState<IndicatorCatalog | null>(null);
   const [draft, setDraft] = useState<Record<string, unknown>>({});
-  const [saving, setSaving] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -59,51 +68,52 @@ export function IndicatorSettingsForm({ isAdmin, onMessage }: { isAdmin: boolean
   // the round trip.
   const fastSlowConflict = Number(draft.ema_fast_period) >= Number(draft.ema_slow_period);
 
-  async function save() {
-    if (!catalog || !isAdmin) return;
-    setSaving(true);
+  const changes: Change[] = (catalog?.settings ?? [])
+    .filter((spec) => dirty.includes(spec.key))
+    .map((spec) => ({ key: spec.key, label: spec.label, from: shown(spec.value, spec.unit), to: shown(draft[spec.key], spec.unit) }));
+
+  async function save(): Promise<boolean> {
     try {
       await api.updateIndicators(draft as unknown as IndicatorSettings);
-      onMessage(`Saved ${dirty.length} indicator change${dirty.length === 1 ? "" : "s"}. They apply from the next session.`);
+      onMessage(`Saved ${dirty.length} indicator change${dirty.length === 1 ? "" : "s"}. They apply from the next session.`, "success");
       await load();
+      return true;
     } catch (error) {
-      onMessage(error instanceof Error ? error.message : "Could not save indicator periods");
-    } finally {
-      setSaving(false);
+      onMessage(error instanceof Error ? error.message : "Could not save indicator periods", "error");
+      return false;
     }
   }
 
-  if (!catalog) return <p className="mt-6 text-sm text-slate-500">Loading indicator periods…</p>;
+  if (!catalog) return <div className="panel p-5"><div className="skeleton h-32" /></div>;
 
   const fromDatabase = catalog.source === "DATABASE";
 
   return (
-    <section className="mt-6 max-w-5xl space-y-6">
-      <article className="panel p-5 sm:p-7">
-        <p
-          className={`mt-4 flex gap-2 rounded-md border p-3 text-xs leading-5 ${
-            fromDatabase ? "border-slate-800 text-slate-400" : "border-amber-500/30 bg-amber-950/20 text-amber-100"
-          }`}
-        >
-          {fromDatabase ? (
-            <Database className="mt-0.5 h-4 w-4 shrink-0 text-slate-500" />
-          ) : (
-            <FileCog className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
-          )}
-          <span>
-            {fromDatabase
-              ? "These values are stored in the database. The .env file is no longer consulted for them."
-              : "These values still come from this deployment's .env file. Saving here stores them in the database, and .env stops being consulted for them from that point on."}
+    <section className={`${embedded ? "" : "mt-6 max-w-6xl"} space-y-5`} data-testid="indicator-settings">
+      <SettingsSection
+        eyebrow="Intraday"
+        title="Indicator periods"
+        hint="The ruler every strategy, the universe builder and the backtester measure with. Changing one changes what a signal means, so they take effect from the next session."
+        actions={
+          <span
+            className={`status-pill ${fromDatabase ? "status-good" : "status-watch"}`}
+            title={
+              fromDatabase
+                ? "Stored in the database. The .env file is no longer consulted for them."
+                : "Still from this deployment's .env file. Saving here stores them in the database, and .env stops being consulted for them."
+            }
+          >
+            {fromDatabase ? <Database className="h-3 w-3" /> : <FileCog className="h-3 w-3" />}
+            {fromDatabase ? "Saved here" : "From server .env"}
           </span>
-        </p>
-
+        }
+      >
         {fastSlowConflict && (
-          <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100">
+          <p className="mb-3 rounded-md border border-amber-500/30 bg-amber-950/20 p-3 text-xs leading-5 text-amber-100">
             The fast EMA must be shorter than the slow EMA. The server will refuse this pair.
           </p>
         )}
-
-        <div className="mt-5 grid gap-5 lg:grid-cols-2">
+        <FieldGrid>
           {catalog.settings.map((spec) => (
             <ControlField
               key={spec.key}
@@ -115,26 +125,29 @@ export function IndicatorSettingsForm({ isAdmin, onMessage }: { isAdmin: boolean
               onChange={(next) => setDraft((current) => ({ ...current, [spec.key]: next }))}
             />
           ))}
-        </div>
-      </article>
+        </FieldGrid>
+      </SettingsSection>
 
       {isAdmin && (
-        <div className="flex flex-wrap items-center gap-3">
-          {dirty.length > 0 ? (
-            <>
-              <button onClick={() => void save()} disabled={saving || fastSlowConflict} className="primary-button">
-                <Save className="h-4 w-4" />
-                Save {dirty.length} change{dirty.length === 1 ? "" : "s"}
-              </button>
-              <button onClick={() => void load()} className="secondary-button">
-                <RotateCcw className="h-4 w-4" />
-                Discard
-              </button>
-            </>
-          ) : (
-            <p className="text-sm text-slate-500">No changes to save.</p>
-          )}
-        </div>
+        <SaveBar
+          count={dirty.length}
+          blocked={fastSlowConflict ? "Fast EMA must be shorter than slow EMA" : null}
+          onDiscard={() => void load()}
+          onReview={() => setReviewing(true)}
+        />
+      )}
+      {reviewing && (
+        <ChangesModal
+          title="Save indicator periods?"
+          changes={changes}
+          warning={
+            fromDatabase
+              ? "These apply from the next session."
+              : "These apply from the next session. After this save, the .env file is no longer read for indicator periods."
+          }
+          onConfirm={save}
+          onClose={() => setReviewing(false)}
+        />
       )}
     </section>
   );

@@ -317,6 +317,14 @@ export type BrokerFetchResult = {
   note: string;
 };
 export type HistoryRange = { from_date?: string; to_date?: string; mode?: "PAPER" | "LIVE"; broker?: string };
+export type SwingSettingsView = {
+  settings: SettingSpec[];
+  group_order: string[];
+  group_labels: Record<string, string>;
+  effective: { risk_per_trade: number; heat_cap: number; largest_position: number; trades_the_cap_allows: number };
+  schedule: { quiet_hours: string; plan_after: string; entry: string; results_avoid_days: number; results_exit_days: number };
+  saved: boolean;
+};
 export type RiskPreset = { key: string; label: string; description: string; controls: Record<string, number>; effective: EffectiveLimits };
 export type SettingRevision = { created_at: string; changed_keys: string[]; risk_increased: string[]; changed_by_user_id: string | null };
 export type SwingPosition = {
@@ -626,6 +634,9 @@ export const api = {
     request<ConnectionsView>("/connections/telegram", { method: "PUT", body: JSON.stringify(body) }),
   checkUpstoxConnection: () => request<ConnectionCheck>("/connections/upstox/check", { method: "POST" }),
   charges: () => request<ChargesView>("/charges"),
+  swingSettings: () => request<SwingSettingsView>("/settings/swing"),
+  saveSwingSettings: (values: Record<string, unknown>, reason: string) =>
+    request<SwingSettingsView>("/settings/swing", { method: "PUT", body: JSON.stringify({ values, reason }) }),
   saveIntradayCharges: (charges: IntradayCharges, reason: string | null) =>
     request<ChargesView>("/charges/intraday", { method: "PUT", body: JSON.stringify({ charges, reason }) }),
   saveSwingCharges: (charges: SwingCharges, reason: string | null) =>

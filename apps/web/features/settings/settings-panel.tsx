@@ -9,8 +9,8 @@ import { formatIstTimestamp } from "../../lib/formatting";
 import type { DeskState } from "../../lib/desks";
 import { ChargesForm } from "./charges-form";
 import { ConnectionsForm } from "./connections-form";
-import { IndicatorSettingsForm } from "./indicator-settings-form";
-import { TradingControlsForm } from "./trading-controls-form";
+import { SwingSettingsForm } from "./swing-settings-form";
+import { GeneralSettingsForm, TradingControlsForm } from "./trading-controls-form";
 import { SetupChecklist, UsersPanel } from "./users-panel";
 
 /**
@@ -26,13 +26,17 @@ import { SetupChecklist, UsersPanel } from "./users-panel";
  */
 /** What each tab is, in one line, so the page is never a heading-less form. */
 const TAB_COPY: Record<string, { title: string; copy: string }> = {
-  trading: {
-    title: "Trading controls",
-    copy: "Every control is described, bounded and validated by the server. The effective limits at the top are what these settings actually permit once they are read together.",
+  general: {
+    title: "General",
+    copy: "What both desks share: which desks trade, where live orders go, and a short read of each desk's own settings.",
   },
-  indicators: {
-    title: "Indicator periods",
-    copy: "The ruler every strategy, the universe builder and the backtester measure with. Changing one changes what a signal means, so they take effect from the next session.",
+  intraday: {
+    title: "Intraday trading",
+    copy: "Capital, risk, daily limits, the trading window, order entry, signals and indicator periods. Hover the (i) beside any setting for what it does and when a change applies.",
+  },
+  swing: {
+    title: "Swing trading",
+    copy: "The swing desk's paper capital and limits. Paper only: nothing here sends an order.",
   },
   connections: {
     title: "Connections",
@@ -85,7 +89,9 @@ export function SettingsPanel({
   desks?: DeskState;
   onOpen?: (workspace: string, tab: string | null) => void;
 }) {
-  const meta = TAB_COPY[tab] ?? TAB_COPY.trading;
+  // Old addresses still land somewhere sensible.
+  const current = tab === "trading" ? "general" : tab === "indicators" ? "intraday" : tab;
+  const meta = TAB_COPY[current] ?? TAB_COPY.general;
   return (
     <section>
       <div className="page-toolbar">
@@ -96,24 +102,26 @@ export function SettingsPanel({
         </div>
       </div>
 
-      {tab === "indicators" ? (
-        <IndicatorSettingsForm isAdmin={isAdmin} onMessage={onMessage} />
-      ) : tab === "connections" ? (
+      {current === "intraday" ? (
+        <TradingControlsForm isAdmin={isAdmin} onMessage={onMessage} />
+      ) : current === "swing" ? (
+        <SwingSettingsForm isAdmin={isAdmin} onMessage={onMessage} />
+      ) : current === "connections" ? (
         <ConnectionsForm isAdmin={isAdmin} onMessage={onMessage} />
-      ) : tab === "charges" ? (
+      ) : current === "charges" ? (
         <ChargesForm isAdmin={isAdmin} desks={desks} onMessage={onMessage} />
-      ) : tab === "alerts" ? (
+      ) : current === "alerts" ? (
         <AlertsPanel telegram={telegram} isAdmin={isAdmin} onTelegram={onTelegram} onRegisterWebhook={onRegisterWebhook} />
-      ) : tab === "data" ? (
+      ) : current === "data" ? (
         <MarketDataFeedSelector isAdmin={isAdmin} onMessage={onMessage} onNavigate={onNavigate} />
-      ) : tab === "users" ? (
+      ) : current === "users" ? (
         <UsersPanel isAdmin={isAdmin} onMessage={onMessage} />
-      ) : tab === "setup" ? (
+      ) : current === "setup" ? (
         <SetupChecklist onMessage={onMessage} onOpen={onOpen} />
-      ) : tab === "security" ? (
+      ) : current === "security" ? (
         <SecurityPanel isAdmin={isAdmin} onMessage={onMessage} />
       ) : (
-        <TradingControlsForm isAdmin={isAdmin} onMessage={onMessage} />
+        <GeneralSettingsForm isAdmin={isAdmin} onMessage={onMessage} onOpenTab={onOpen ? (next) => onOpen("settings", next) : undefined} />
       )}
     </section>
   );

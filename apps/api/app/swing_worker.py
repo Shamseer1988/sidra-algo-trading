@@ -36,7 +36,6 @@ from app.db.session import SessionLocal
 from app.services.charges import swing_cost_model
 from app.services.desks import SWING_DESK, desk_enabled
 from app.services.market_calculations import MARKET_TIMEZONE
-from app.services.swing_backtest import SwingRules
 from app.services.swing_data import backfill_daily_range, load_adjusted_daily
 from app.services.swing_paper import (
     EveningReport,
@@ -47,6 +46,7 @@ from app.services.swing_paper import (
     run_evening,
     summary_message,
 )
+from app.services.swing_settings import swing_rules
 from app.services.swing_universe import nifty200
 
 TRADING_KEY = "trading_controls"
@@ -111,6 +111,8 @@ async def process(settings, now: datetime, *, new_entries: bool = True) -> list[
         strategies = await paper_strategies(session)
         # Settings > Charges, also read once per run.
         costs = await swing_cost_model(session)
+        # Settings > Swing trading, also read once per run.
+        rules = await swing_rules(session, strategies)
         if not days:
             return []
         universe = {
@@ -139,7 +141,7 @@ async def process(settings, now: datetime, *, new_entries: bool = True) -> list[
                 symbols=symbols,
                 events=events,
                 new_entries=new_entries,
-                rules=SwingRules(strategies=strategies),
+                rules=rules,
                 costs=costs,
             )
             await mark_processed(session, day)

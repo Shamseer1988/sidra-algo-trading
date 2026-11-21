@@ -289,16 +289,17 @@ async def run_backtest_job(settings: Settings, years: int, strategies: list[str]
     import asyncio
 
     from app.services.charges import swing_charges
-    from app.services.swing_backtest import SwingRules, run_backtest
+    from app.services.swing_backtest import run_backtest
     from app.services.swing_data import load_adjusted_daily
+    from app.services.swing_settings import swing_rules
     from app.services.swing_universe import nifty200
 
     try:
         to_date = datetime.now(MARKET_TIMEZONE).date()
         from_date = to_date - timedelta(days=365 * max(years, 1))
         members = nifty200()
-        rules = SwingRules(strategies=tuple(strategies))
         async with SessionLocal() as session:
+            rules = await swing_rules(session, tuple(strategies))
             card = await swing_charges(session)
             benchmark = await load_adjusted_daily(session, settings.upstox_nifty_benchmark_key, from_date=from_date)
             universe = {

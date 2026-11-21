@@ -1,6 +1,8 @@
 "use client";
 
-import { Clock, Info } from "lucide-react";
+import { Clock } from "lucide-react";
+
+import { Hint } from "../../components/hint";
 
 import type { SettingSpec } from "../../components/api";
 import { formatIstTimestamp } from "../../lib/formatting";
@@ -71,18 +73,24 @@ export function ControlField({
 }) {
   const range = rangeHint(spec);
   return (
-    <div className={`rounded-md border p-4 ${changed ? "border-sky-500/40 bg-sky-950/10" : "border-slate-800"}`}>
-      <div className="flex items-start justify-between gap-3">
-        <label htmlFor={spec.key} className="text-sm font-semibold text-white">
+    <div
+      data-testid={`field-${spec.key}`}
+      className={`rounded-md border px-3.5 py-3 ${changed ? "border-sky-500/40 bg-sky-950/10" : "border-slate-800"}`}
+    >
+      <div className="flex items-center gap-1.5">
+        <label htmlFor={spec.key} className="min-w-0 truncate text-sm font-semibold text-white" title={spec.label}>
           {spec.label}
-          {spec.is_ceiling && <span className="ml-2 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-400">ceiling</span>}
         </label>
-        {derived && <span className="numeric shrink-0 text-xs text-emerald-300">{derived}</span>}
+        <Hint testId={`hint-${spec.key}`}>
+          <SettingHint spec={spec} range={range} />
+        </Hint>
+        {spec.is_ceiling && <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-400">ceiling</span>}
+        {changed && <span className="ml-auto text-[10px] font-semibold uppercase tracking-wide text-sky-300">Edited</span>}
       </div>
 
-      <div className="mt-3 flex items-center gap-2">
+      <div className="mt-2 flex items-center gap-2">
         {spec.kind === "boolean" ? (
-          <label className="flex cursor-pointer select-none items-center gap-3 text-sm text-slate-300">
+          <label className="flex cursor-pointer select-none items-center gap-3 py-1.5 text-sm text-slate-300">
             <input
               id={spec.key}
               type="checkbox"
@@ -96,7 +104,7 @@ export function ControlField({
           <select
             id={spec.key}
             disabled={disabled}
-            className="field-input font-mono text-sm disabled:cursor-not-allowed disabled:opacity-50"
+            className="field-input py-2 font-mono text-sm disabled:cursor-not-allowed disabled:opacity-50"
             value={String(value ?? "")}
             onChange={(event) => onChange(event.target.value)}
           >
@@ -115,40 +123,41 @@ export function ControlField({
               min={spec.minimum ?? undefined}
               max={spec.maximum ?? undefined}
               disabled={disabled}
-              className="field-input font-mono text-sm disabled:cursor-not-allowed disabled:opacity-50"
+              className="field-input py-2 font-mono text-sm disabled:cursor-not-allowed disabled:opacity-50"
               value={String(value ?? "")}
               onChange={(event) => onChange(spec.kind === "time" ? event.target.value : event.target.value === "" ? "" : Number(event.target.value))}
             />
-            {UNIT_SUFFIX[spec.unit] && <span className="text-xs text-slate-500">{UNIT_SUFFIX[spec.unit]}</span>}
+            {UNIT_SUFFIX[spec.unit] && <span className="shrink-0 text-xs text-slate-500">{UNIT_SUFFIX[spec.unit]}</span>}
           </>
         )}
       </div>
-
-      <p className="mt-3 flex gap-2 text-xs leading-5 text-slate-400">
-        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-500" />
-        <span>{spec.help}</span>
-      </p>
-
-      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-500">
-        {/*
-          The stored key, shown because every diagnostic names controls that way
-          and this screen names them the other way. An operator told to change
-          `maximum_daily_risk_percent` was searching a page whose only word for
-          it is "Daily planned-risk budget", and concluded the setting did not
-          exist. One vocabulary on both sides costs a line.
-        */}
-        <span className="font-mono text-slate-600" title="The name this control has in the audit script and the database">
-          {spec.key}
-        </span>
-        {range && <span>Allowed: {range}</span>}
-        <span className={EFFECT_TONE[spec.effect]}>
-          <Clock className="mr-1 inline h-3 w-3" />
-          {spec.effect_label}
-        </span>
-        <span>
-          {spec.last_changed_at ? `Last changed ${formatIstTimestamp(spec.last_changed_at)}` : "Not changed here yet"}
-        </span>
-      </div>
+      {derived && <p className="numeric mt-1.5 text-xs text-emerald-300">{derived}</p>}
     </div>
+  );
+}
+
+/**
+ * Everything that used to be printed under the box: what it does, its range,
+ * when a change applies, its stored name and when it last changed.
+ *
+ * The stored key stays because every diagnostic names controls that way. An
+ * operator told to change `maximum_daily_risk_percent` was searching a page
+ * whose only word for it is "Daily planned-risk budget".
+ */
+export function SettingHint({ spec, range }: { spec: SettingSpec; range: string }) {
+  return (
+    <span className="block space-y-1.5">
+      <span className="block text-slate-200">{spec.help}</span>
+      {range && <span className="block text-slate-400">Allowed: {range}</span>}
+      <span className={`block ${EFFECT_TONE[spec.effect]}`}>
+        <Clock className="mr-1 inline h-3 w-3" />
+        {spec.effect_label}
+      </span>
+      <span className="block text-slate-500">
+        <span className="font-mono">{spec.key}</span>
+        {" · "}
+        {spec.last_changed_at ? `last changed ${formatIstTimestamp(spec.last_changed_at)}` : "not changed here yet"}
+      </span>
+    </span>
   );
 }
