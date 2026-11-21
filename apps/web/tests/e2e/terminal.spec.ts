@@ -3437,3 +3437,71 @@ test.describe("Subscriptions", () => {
     await expect(page.getByTestId("save-confirm")).toContainText("Benchmark: NIFTY 50 → NIFTY BANK");
   });
 });
+
+// --- Themes -------------------------------------------------------------------
+
+/** WCAG relative luminance of a computed `rgb(...)` colour. */
+function luminance(css: string): number {
+  const [r, g, b] = (css.match(/[\d.]+/g) ?? ["0", "0", "0"]).slice(0, 3).map((part) => {
+    const c = Number(part) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+const THEME_SCREENS: [string, string | undefined][] = [
+  ["Dashboard", undefined],
+  ["Orders & Positions", undefined],
+  ["Reports", undefined],
+  ["Settings", "General"],
+  ["Settings", "Intraday trading"],
+  ["Settings", "Swing trading"],
+  ["Settings", "Connections"],
+];
+
+for (const theme of ["light", "dark"] as const) {
+  test.describe(`Theme: ${theme}`, () => {
+    test("secondary text and headings read against their panel", async ({ page }) => {
+      await page.addInitScript((value) => window.localStorage.setItem("sidra-theme", value), theme);
+      await setupMockRoutes(page, "ADMIN");
+      await page.goto("/");
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      for (const [workspace, tab] of THEME_SCREENS) {
+        await go(page, workspace, tab);
+        await shot(page, `theme-${theme}-${workspace}-${tab ?? "main"}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-"));
+      }
+      // Every grey a screen uses for secondary text, measured against the page:
+      // dark ink on the Day theme, light ink on the Night theme.
+      const tones = await page.evaluate(() => {
+        const out: Record<string, string> = {};
+        for (const cls of ["text-white", "text-slate-200", "text-slate-400", "text-slate-500", "text-emerald-300", "text-amber-300"]) {
+          const el = document.createElement("span");
+          el.className = cls;
+          document.body.appendChild(el);
+          out[cls] = getComputedStyle(el).color;
+          el.remove();
+        }
+        out.panel = getComputedStyle(document.querySelector(".panel") as Element).backgroundColor;
+        return out;
+      });
+      for (const [cls, colour] of Object.entries(tones)) {
+        if (cls === "panel") continue;
+        const l = luminance(colour);
+        if (theme === "light") expect(l, `${cls} is dark enough on white`).toBeLessThan(0.2);
+        else expect(l, `${cls} is light enough on the night desk`).toBeGreaterThan(0.15);
+      }
+      // A `dark:` tone follows the app's switch, not the operating system's.
+      await page.emulateMedia({ colorScheme: theme === "light" ? "dark" : "light" });
+      const probe = await page.evaluate(() => {
+        const el = document.createElement("span");
+        el.className = "text-slate-900 dark:text-white";
+        document.body.appendChild(el);
+        const colour = getComputedStyle(el).color;
+        el.remove();
+        return colour;
+      });
+      if (theme === "light") expect(luminance(probe)).toBeLessThan(0.05);
+      else expect(luminance(probe)).toBeGreaterThan(0.9);
+    });
+  });
+}
