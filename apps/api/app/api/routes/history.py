@@ -12,6 +12,7 @@ import csv
 import io
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -262,10 +263,15 @@ async def overview(
     to_date: date | None = Query(default=None),
     mode: str | None = Query(default=None, description="PAPER, LIVE, or omitted for both."),
     broker: str | None = Query(default=None, description="Narrow to one broker's account."),
+    strategy: Annotated[str | None, Query(description="One strategy family, any revision.")] = None,
 ) -> OverviewResponse:
     begin, end = _range(from_date, to_date)
-    records = await trade_history.load_trades(session, begin, end, execution_mode=mode, broker=broker)
-    days = await trade_history.summarise_days(session, records, begin, end, broker=broker, execution_mode=mode)
+    records = await trade_history.load_trades(
+        session, begin, end, execution_mode=mode, broker=broker, strategy=strategy
+    )
+    days = await trade_history.summarise_days(
+        session, records, begin, end, broker=broker, execution_mode=mode, strategy=strategy
+    )
     totals = trade_history.summarise_range(records, days, begin, end)
     return OverviewResponse(
         from_date=totals.from_date.isoformat(),
@@ -422,10 +428,15 @@ async def daily(
     to_date: date | None = Query(default=None),
     mode: str | None = Query(default=None, description="PAPER, LIVE, or omitted for both."),
     broker: str | None = Query(default=None, description="Narrow to one broker's account."),
+    strategy: Annotated[str | None, Query(description="One strategy family, any revision.")] = None,
 ) -> list[DayResponse]:
     begin, end = _range(from_date, to_date)
-    records = await trade_history.load_trades(session, begin, end, execution_mode=mode, broker=broker)
-    summaries = await trade_history.summarise_days(session, records, begin, end, broker=broker, execution_mode=mode)
+    records = await trade_history.load_trades(
+        session, begin, end, execution_mode=mode, broker=broker, strategy=strategy
+    )
+    summaries = await trade_history.summarise_days(
+        session, records, begin, end, broker=broker, execution_mode=mode, strategy=strategy
+    )
     return [_day(summary) for summary in summaries]
 
 
@@ -482,6 +493,39 @@ async def broker_trade_rows(
     ]
 
 
+class StrategyResponse(BaseModel):
+    strategy: str
+    execution_mode: str
+    trades: int
+    open_trades: int
+    wins: int
+    losses: int
+    scratches: int
+    win_rate_percent: Decimal | None
+    gross_pnl: Decimal
+    charges: Decimal
+    net_pnl: Decimal
+    average_r: Decimal | None
+    best_trade: Decimal | None
+    worst_trade: Decimal | None
+
+
+@router.get("/strategies", response_model=list[StrategyResponse])
+async def strategies(
+    session: DbSession,
+    _: CurrentUser,
+    from_date: date | None = Query(default=None),
+    to_date: date | None = Query(default=None),
+) -> list[StrategyResponse]:
+    """Each strategy's live and paper results over the range, side by side and never summed."""
+    begin, end = _range(from_date, to_date)
+    records = await trade_history.load_trades(session, begin, end)
+    return [
+        StrategyResponse.model_validate(row, from_attributes=True)
+        for row in trade_history.summarise_strategies(records)
+    ]
+
+
 @router.get("/trades", response_model=list[TradeResponse])
 async def trades(
     session: DbSession,
@@ -493,6 +537,7 @@ async def trades(
     strategy_version: str | None = Query(default=None),
     mode: str | None = Query(default=None, description="PAPER, LIVE, or omitted for both."),
     broker: str | None = Query(default=None, description="Narrow to one broker's account."),
+    strategy: Annotated[str | None, Query(description="One strategy family, any revision.")] = None,
 ) -> list[TradeResponse]:
     begin, end = (session_date, session_date) if session_date else _range(from_date, to_date)
     records = await trade_history.load_trades(
@@ -503,6 +548,7 @@ async def trades(
         strategy_version=strategy_version,
         execution_mode=mode,
         broker=broker,
+        strategy=strategy,
     )
     return [_trade(record) for record in records]
 
@@ -635,9 +681,11 @@ def _rows(items, columns) -> list[list]:
     return [[_cell(getattr(item, key)) for key, _ in columns] for item in items]
 
 
-async def _sheets(session, begin: date, end: date):
-    records = await trade_history.load_trades(session, begin, end)
-    days = await trade_history.summarise_days(session, records, begin, end)
+async def _sheets(session, begin: date, end: date, mode: str | None, strategy: str | None):
+    records = await trade_history.load_trades(session, begin, end, execution_mode=mode, strategy=strategy)
+    days = await trade_history.summarise_days(
+        session, records, begin, end, execution_mode=mode, strategy=strategy
+    )
     totals = trade_history.summarise_range(records, days, begin, end)
     return [_trade(record) for record in records], [_day(summary) for summary in days], totals
 
@@ -648,10 +696,12 @@ async def export_csv(
     _: CurrentUser,
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
+    mode: Annotated[str | None, Query(description="PAPER, LIVE, or omitted for both.")] = None,
+    strategy: Annotated[str | None, Query(description="One strategy family, any revision.")] = None,
 ) -> StreamingResponse:
     """The trade list as CSV. One sheet's worth, because CSV holds one table."""
     begin, end = _range(from_date, to_date)
-    trades_out, _days, _totals = await _sheets(session, begin, end)
+    trades_out, _days, _totals = await _sheets(session, begin, end, mode, strategy)
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow([label for _, label in TRADE_COLUMNS])
@@ -669,6 +719,8 @@ async def export_xlsx(
     _: CurrentUser,
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
+    mode: Annotated[str | None, Query(description="PAPER, LIVE, or omitted for both.")] = None,
+    strategy: Annotated[str | None, Query(description="One strategy family, any revision.")] = None,
 ) -> StreamingResponse:
     """Three sheets: the summary, the days, the trades.
 
@@ -680,12 +732,14 @@ async def export_xlsx(
     from openpyxl.styles import Font
 
     begin, end = _range(from_date, to_date)
-    trades_out, days_out, totals = await _sheets(session, begin, end)
+    trades_out, days_out, totals = await _sheets(session, begin, end, mode, strategy)
 
     book = Workbook()
     summary = book.active
     summary.title = "Summary"
     summary.append(["Trading history", f"{begin} to {end}"])
+    if mode or strategy:
+        summary.append(["Filtered to", ", ".join(part for part in (mode, strategy) if part)])
     summary.append([])
     summary.append(
         [

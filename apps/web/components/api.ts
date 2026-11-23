@@ -26,6 +26,10 @@ export type ScannerEvaluation = { id: string; instrument_token: string; script_n
 export type PaperSignal = { id: string; instrument_token: string; script_name?: string; session_date: string; candle_opened_at: string; side: "LONG" | "SHORT"; status: string; entry_price: number; stop_price: number; target_price: number; quantity: number; score: number; score_breakdown: Record<string, number>; created_at: string };
 export type PaperOrder = { id: string; paper_signal_id: string; client_order_id: string; instrument_token: string; session_date: string; side: "BUY" | "SELL"; order_type: string; order_role: string; status: string; quantity: number; filled_quantity: number; average_fill_price: number | null; limit_price: number | null; stop_price: number | null; fee_total: number; eligible_after: string; rejection_reason: string | null; created_at: string };
 export type PaperPosition = { id: string; paper_signal_id: string; instrument_token: string; session_date: string; strategy_version: string; side: "LONG" | "SHORT"; status: string; initial_quantity: number; open_quantity: number; average_entry_price: number | null; average_exit_price: number | null; current_price: number | null; stop_price: number; target_price: number; realized_pnl: number; unrealized_pnl: number; fees_total: number; total_pnl: number; opened_at: string | null; closed_at: string | null };
+export type PaperDayOrder = PaperOrder & { script_name: string; strategy: string };
+export type PaperDayPosition = PaperPosition & { script_name: string; strategy: string };
+export type PaperDayTotals = { trades: number; open_positions: number; wins: number; losses: number; scratches: number; gross_pnl: number; charges: number; net_pnl: number };
+export type PaperDay = { session_date: string; totals: PaperDayTotals; pending_orders: number; strategies: (PaperDayTotals & { strategy: string })[]; positions: PaperDayPosition[]; orders: PaperDayOrder[] };
 export type PaperExecutionSummary = { orders: number; pending_orders: number; fills: number; open_positions: number; realized_pnl: number; unrealized_pnl: number; total_pnl: number; fees_total: number };
 export type PaperRiskSummary = { session_date: string; daily_risk_limit: number; daily_risk_allocated: number; daily_risk_available: number; maximum_open_positions: number; active_reservations: number; open_positions: number; exposure_limit: number; current_exposure: number; exposure_available: number; leverage_multiplier: number; rejected_reservations: number };
 export type LiveActivation = { id: string | null; armed: boolean; reason: string; expires_at: string | null; revoked_at: string | null; revoked_reason: string | null; blocking_gates: string[] };
@@ -316,7 +320,8 @@ export type BrokerFetchResult = {
   fetched_at: string;
   note: string;
 };
-export type HistoryRange = { from_date?: string; to_date?: string; mode?: "PAPER" | "LIVE"; broker?: string };
+export type HistoryRange = { from_date?: string; to_date?: string; mode?: "PAPER" | "LIVE"; broker?: string; strategy?: string };
+export type StrategyResult = { strategy: string; execution_mode: "LIVE" | "PAPER"; trades: number; open_trades: number; wins: number; losses: number; scratches: number; win_rate_percent: string | null; gross_pnl: string; charges: string; net_pnl: string; average_r: string | null; best_trade: string | null; worst_trade: string | null };
 export type SwingSettingsView = {
   settings: SettingSpec[];
   group_order: string[];
@@ -646,6 +651,8 @@ export const api = {
   setStrategyMode: (id: string, mode: StrategyMode, confirmLive: boolean, reason: string | null) =>
     request<PaperStrategy[]>(`/settings/strategies/${encodeURIComponent(id)}/mode`, { method: "PUT", body: JSON.stringify({ mode, confirm_live: confirmLive, reason }) }),
   swingHistory: () => request<SwingPosition[]>("/swing/history"),
+  paperDay: (filter: { strategy?: string }) => request<PaperDay>(`/paper/day${historyQuery(filter)}`),
+  historyStrategies: (range: HistoryRange) => request<StrategyResult[]>(`/history/strategies${historyQuery(range)}`),
   historyOverview: (range: HistoryRange) => request<HistoryOverview>(`/history/overview${historyQuery(range)}`),
   historyDaily: (range: HistoryRange) => request<HistoryDay[]>(`/history/daily${historyQuery(range)}`),
   historyQuality: (range: HistoryRange) => request<ExecutionQuality>(`/history/quality${historyQuery(range)}`),

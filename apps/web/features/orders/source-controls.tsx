@@ -3,7 +3,7 @@
 import type { OrderSource } from "./use-order-source";
 
 /**
- * Paper or Broker, on the tab row where the other view choices are.
+ * Paper or Live (the broker's own books), on the tab row where the other view choices are.
  *
  * A segmented control rather than two buttons the size of actions: it chooses
  * what is displayed, like the tabs beside it, and sizing it like Refresh or
@@ -20,7 +20,7 @@ export function SourceToggle({ source, setSource }: Pick<OrderSource, "source" |
     >
       {([
         ["paper", "Paper"],
-        ["broker", "Broker"],
+        ["broker", "Live"],
       ] as const).map(([value, label]) => (
         <button
           key={value}

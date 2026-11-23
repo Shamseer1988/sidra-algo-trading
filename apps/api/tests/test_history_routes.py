@@ -18,7 +18,7 @@ from fastapi import HTTPException
 from app.api.routes import history as routes
 from app.db.session import SessionLocal
 from app.services import trade_history
-from tests.test_trade_history import SESSION_DATE, a_trade, clean, record_broker
+from tests.test_trade_history import NEXT_DATE, SESSION_DATE, a_trade, clean, record_broker
 
 OPERATOR = object()
 
@@ -279,3 +279,71 @@ async def test_the_workbook_carries_the_broker_figures_beside_our_own():
     assert values["Gross P&L"] == 500.0
     assert values["Broker realised"] == 380.0
     assert values["Reconciliation"] == "Mismatch"
+
+
+# --- strategy and ledger filters -----------------------------------------
+
+
+async def test_a_strategy_filter_takes_every_revision_and_nothing_else():
+    await a_trade(gross="500", strategy="rs-pullback-v1@7")
+    await a_trade(gross="300", strategy="rs-pullback-v1@8")
+    await a_trade(gross="-900", strategy="ema-momentum-v1@1")
+    async with SessionLocal() as session:
+        result = await routes.overview(
+            session, OPERATOR, SESSION_DATE, SESSION_DATE, None, None, strategy="rs-pullback-v1"
+        )
+    assert result.trades == 2
+    assert result.gross_pnl == 800
+
+
+async def test_a_strategy_view_does_not_compare_itself_with_the_whole_account_statement():
+    """The statement covers both strategies; one of them alone would always look like a mismatch."""
+    await a_trade(gross="500", charges="40", live=True, strategy="rs-pullback-v1@8")
+    await a_trade(gross="300", charges="40", live=True, strategy="ema-momentum-v1@1", instrument="NSE_EQ|INE062A01020")
+    await record_broker(realized="800", charges="80")
+    async with SessionLocal() as session:
+        whole = await routes.daily(session, OPERATOR, SESSION_DATE, SESSION_DATE, None, None)
+        one = await routes.daily(session, OPERATOR, SESSION_DATE, SESSION_DATE, None, None, strategy="rs-pullback-v1")
+    assert one[0].reconciliation == whole[0].reconciliation
+    assert one[0].broker_realized_pnl is None
+
+
+async def test_strategies_keep_live_and_paper_apart():
+    await a_trade(gross="500", charges="40", live=True, strategy="rs-pullback-v1@8")
+    await a_trade(gross="-200", charges="40", strategy="rs-pullback-v1@8", instrument="NSE_EQ|INE062A01020")
+    async with SessionLocal() as session:
+        rows = await routes.strategies(session, OPERATOR, SESSION_DATE, SESSION_DATE)
+    assert [(row.strategy, row.execution_mode, row.net_pnl) for row in rows] == [
+        ("rs-pullback-v1", "LIVE", 460),
+        ("rs-pullback-v1", "PAPER", -240),
+    ]
+
+
+async def test_the_paper_day_holds_one_session_and_totals_per_strategy():
+    from app.api.routes import paper
+
+    await a_trade(gross="500", charges="40", strategy="rs-pullback-v1@8")
+    await a_trade(gross="-200", charges="40", strategy="ema-momentum-v1@6")
+    await a_trade(gross="999", session_date=NEXT_DATE)
+    async with SessionLocal() as session:
+        full = await paper.day(OPERATOR, session, session_date=SESSION_DATE)
+        one = await paper.day(OPERATOR, session, strategy="ema-momentum-v1", session_date=SESSION_DATE)
+    assert full.totals.trades == 2
+    assert full.totals.net_pnl == 220
+    assert [(row.strategy, row.net_pnl) for row in full.strategies] == [
+        ("ema-momentum-v1", -240),
+        ("rs-pullback-v1", 460),
+    ]
+    # The filter narrows the rows and the totals, never the list to choose from.
+    assert one.totals.net_pnl == -240
+    assert len(one.strategies) == 2
+    assert one.positions[0].script_name
+
+
+async def test_today_still_shows_a_position_left_open_by_an_earlier_session():
+    from app.api.routes import paper
+
+    _, position_id = await a_trade(open_quantity=10, status="OPEN")
+    async with SessionLocal() as session:
+        result = await paper.day(OPERATOR, session)
+    assert str(position_id) in {row.id for row in result.positions}

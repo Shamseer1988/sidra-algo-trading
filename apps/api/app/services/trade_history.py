@@ -699,6 +699,11 @@ async def _live_only_records(
     return records
 
 
+def strategy_family(version: str) -> str:
+    """``rs-pullback-v1@8`` -> ``rs-pullback-v1``. Every saved revision of one strategy is one strategy to a reader."""
+    return version.split("@", 1)[0]
+
+
 async def load_trades(
     session: AsyncSession,
     from_date: date,
@@ -708,6 +713,7 @@ async def load_trades(
     strategy_version: str | None = None,
     execution_mode: str | None = None,
     broker: str | None = None,
+    strategy: str | None = None,
 ) -> list[TradeRecord]:
     """Every position in the range, as trades, newest first.
 
@@ -716,6 +722,9 @@ async def load_trades(
     deliberately: a day's reconciliation against the broker is a fact about the
     live trades of that day, and recomputing it from a paper-only subset would
     report a mismatch that is only an artefact of the filter.
+
+    ``strategy`` is a family (``rs-pullback-v1``, any revision) and is applied
+    late for the same reason as the mode.
 
     ``broker`` is different, and is applied on both sides *before* the verdict.
     A statement is one account's, so an UPSTOX day compared against a record
@@ -883,6 +892,8 @@ async def load_trades(
         records = [record for record in records if record.execution_mode == wanted]
     if broker:
         records = [record for record in records if (record.broker or "").upper() == broker.upper()]
+    if strategy:
+        records = [record for record in records if strategy_family(record.strategy_version) == strategy]
     return records
 
 
@@ -910,6 +921,7 @@ async def summarise_days(
     *,
     broker: str | None = None,
     execution_mode: str | None = None,
+    strategy: str | None = None,
 ) -> list[DaySummary]:
     """One row per session date that had activity, newest first.
 
@@ -922,6 +934,10 @@ async def summarise_days(
     no record of belongs on the screen. It does in a live or unfiltered view,
     because it is a day that really was traded; it does not in a paper view,
     where nothing reached a broker by definition.
+
+    ``strategy`` must match ``load_trades`` too. A broker statement covers the
+    whole account, so a one-strategy view carries no broker figures, and each
+    day takes the verdict its own trades were already given from the whole day.
     """
     halts = {
         (row.session_date, row.mode): row
@@ -962,6 +978,11 @@ async def summarise_days(
         halt = halts.get((session_date, LIVE)) or halts.get((session_date, PAPER))
         if halt is not None:
             day.halt_reason = f"{halt.mode}: {halt.reason} at ₹{_money(halt.session_pnl)}"
+        if strategy:
+            own = [record for record in records if record.session_date == session_date]
+            lead = next((record for record in own if record.execution_mode == LIVE), own[0])
+            day.reconciliation, day.reconciliation_note = lead.reconciliation, lead.reconciliation_note
+            continue
         snapshot = snapshots.get(session_date)
         day.reconciliation, day.reconciliation_note = reconcile_day(
             live_trades=day.live_trades,
@@ -979,7 +1000,7 @@ async def summarise_days(
             day.broker_realized_pnl = None if snapshot.realized_pnl is None else _money(snapshot.realized_pnl)
             day.broker_charges = None if snapshot.charges is None else _money(snapshot.charges)
 
-    if (execution_mode or "").upper() != PAPER:
+    if not strategy and (execution_mode or "").upper() != PAPER:
         for session_date, snapshot in snapshots.items():
             if session_date in days or not (from_date <= session_date <= to_date):
                 continue
@@ -1103,6 +1124,60 @@ def summarise_range(records: list[TradeRecord], days: list[DaySummary], from_dat
         overview.broker_charges = sum((day.broker_charges or Decimal("0") for day in settled), start=Decimal("0"))
         overview.broker_net_pnl = overview.broker_realized_pnl - overview.broker_charges
     return overview
+
+
+@dataclass
+class StrategySummary:
+    """One strategy on one ledger, over a range. Open trades count in ``trades`` and the money, not in the rate."""
+
+    strategy: str
+    execution_mode: str
+    trades: int = 0
+    open_trades: int = 0
+    wins: int = 0
+    losses: int = 0
+    scratches: int = 0
+    gross_pnl: Decimal = Decimal("0")
+    charges: Decimal = Decimal("0")
+    net_pnl: Decimal = Decimal("0")
+    best_trade: Decimal | None = None
+    worst_trade: Decimal | None = None
+    average_r: Decimal | None = None
+
+    @property
+    def win_rate_percent(self) -> Decimal | None:
+        closed = self.wins + self.losses + self.scratches
+        return (Decimal(self.wins) * 100 / closed).quantize(Decimal("0.01")) if closed else None
+
+
+def summarise_strategies(records: list[TradeRecord]) -> list[StrategySummary]:
+    """One row per strategy and ledger. Live and paper are never added together."""
+    rows: dict[tuple[str, str], StrategySummary] = {}
+    multiples: dict[tuple[str, str], list[Decimal]] = {}
+    for record in records:
+        key = (strategy_family(record.strategy_version), record.execution_mode)
+        row = rows.setdefault(key, StrategySummary(*key))
+        row.trades += 1
+        row.gross_pnl += record.gross_pnl
+        row.charges += record.charges
+        row.net_pnl += record.net_pnl
+        if record.is_open:
+            row.open_trades += 1
+            continue
+        outcome = _classify(record.net_pnl)
+        if outcome == "win":
+            row.wins += 1
+        elif outcome == "loss":
+            row.losses += 1
+        else:
+            row.scratches += 1
+        row.best_trade = record.net_pnl if row.best_trade is None else max(row.best_trade, record.net_pnl)
+        row.worst_trade = record.net_pnl if row.worst_trade is None else min(row.worst_trade, record.net_pnl)
+        if record.r_multiple is not None:
+            multiples.setdefault(key, []).append(record.r_multiple)
+    for key, values in multiples.items():
+        rows[key].average_r = (sum(values, start=Decimal("0")) / len(values)).quantize(Decimal("0.01"))
+    return sorted(rows.values(), key=lambda row: (row.strategy, row.execution_mode))
 
 
 # --- one trade, in full ---------------------------------------------------
