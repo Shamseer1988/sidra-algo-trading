@@ -517,6 +517,12 @@ def _never_filled(submissions: dict[UUID, list[LiveOrderSubmission]]) -> set[UUI
     }
 
 
+async def traded_live_ids(session: AsyncSession, from_date: date, to_date: date) -> set[UUID]:
+    """Signals ``load_trades`` reports as LIVE, so another screen can agree on which those are."""
+    placed = await live_signal_ids(session, from_date, to_date)
+    return placed - _never_filled(await _live_submissions(session, placed))
+
+
 async def _signals(
     session: AsyncSession,
     signal_ids: set[UUID],

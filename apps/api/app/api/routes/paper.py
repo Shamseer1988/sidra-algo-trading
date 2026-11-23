@@ -15,7 +15,7 @@ from app.services.paper_execution import (
     PAPER_EXECUTION_KEY,
     PaperExecutionControls,
 )
-from app.services.trade_history import SCRATCH, strategy_family
+from app.services.trade_history import SCRATCH, strategy_family, traded_live_ids
 from app.services.trading_symbols import resolve_script_names
 
 router = APIRouter(prefix="/paper", tags=["Paper execution"])
@@ -140,11 +140,13 @@ def _position(row: PaperPosition) -> PaperPositionResponse:
 class PaperDayOrder(PaperOrderResponse):
     script_name: str
     strategy: str
+    live_copy: bool
 
 
 class PaperDayPosition(PaperPositionResponse):
     script_name: str
     strategy: str
+    live_copy: bool
 
 
 class PaperDayTotals(BaseModel):
@@ -166,6 +168,7 @@ class PaperDayResponse(BaseModel):
     session_date: str
     totals: PaperDayTotals
     pending_orders: int
+    live_copies: int
     strategies: list[PaperDayStrategy]
     positions: list[PaperDayPosition]
     orders: list[PaperDayOrder]
@@ -198,6 +201,10 @@ async def day(
 
     Today's view also carries any position still open, or order still pending,
     from an earlier session: hiding one because of its date would read as flat.
+
+    The simulated copy of a trade that reached the broker is listed and marked,
+    and left out of every total, so these totals are the ones History and the
+    P&L calendar give for paper. The real trade is under Live.
     """
     today = datetime.now(MARKET_TIMEZONE).date()
     wanted = session_date or today
@@ -220,24 +227,33 @@ async def day(
     names = await resolve_script_names(
         session, {row.instrument_token for row in rows} | {order.instrument_token for order, _version in order_rows}
     )
+    dates = [row.session_date for row in rows] + [order.session_date for order, _version in order_rows]
+    live = await traded_live_ids(session, min(dates), max(dates)) if dates else set()
     families: dict[str, list[PaperPosition]] = {}
     for _order_row, version in order_rows:
         families.setdefault(strategy_family(version), [])
     for row in rows:
-        families.setdefault(strategy_family(row.strategy_version), []).append(row)
+        own = families.setdefault(strategy_family(row.strategy_version), [])
+        if row.paper_signal_id not in live:
+            own.append(row)
     if strategy:
         rows = [row for row in rows if strategy_family(row.strategy_version) == strategy]
         order_rows = [pair for pair in order_rows if strategy_family(pair[1]) == strategy]
     return PaperDayResponse(
         session_date=wanted.isoformat(),
-        totals=PaperDayTotals(**_day_totals(rows)),
-        pending_orders=sum(order.status in ("PENDING", "PARTIALLY_FILLED") for order, _version in order_rows),
+        totals=PaperDayTotals(**_day_totals([row for row in rows if row.paper_signal_id not in live])),
+        pending_orders=sum(
+            order.status in ("PENDING", "PARTIALLY_FILLED") and order.paper_signal_id not in live
+            for order, _version in order_rows
+        ),
+        live_copies=sum(row.paper_signal_id in live for row in rows),
         strategies=[PaperDayStrategy(strategy=name, **_day_totals(own)) for name, own in sorted(families.items())],
         positions=[
             PaperDayPosition(
                 **_position(row).model_dump(),
                 script_name=names[row.instrument_token],
                 strategy=strategy_family(row.strategy_version),
+                live_copy=row.paper_signal_id in live,
             )
             for row in rows
         ],
@@ -246,6 +262,7 @@ async def day(
                 **_order(order).model_dump(),
                 script_name=names[order.instrument_token],
                 strategy=strategy_family(version),
+                live_copy=order.paper_signal_id in live,
             )
             for order, version in order_rows
         ],

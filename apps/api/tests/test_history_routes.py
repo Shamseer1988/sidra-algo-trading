@@ -347,3 +347,19 @@ async def test_today_still_shows_a_position_left_open_by_an_earlier_session():
     async with SessionLocal() as session:
         result = await paper.day(OPERATOR, session)
     assert str(position_id) in {row.id for row in result.positions}
+
+
+async def test_the_paper_day_lists_a_live_trades_copy_but_agrees_with_the_calendar_on_the_total():
+    from app.api.routes import paper
+
+    await a_trade(gross="550", charges="40", live=True, strategy="rs-pullback-v1@8")
+    await a_trade(gross="300", charges="40", strategy="cpr-breakout-v1@2", instrument="NSE_EQ|INE062A01020")
+    async with SessionLocal() as session:
+        result = await paper.day(OPERATOR, session, session_date=SESSION_DATE)
+        calendar = await routes.daily(session, OPERATOR, SESSION_DATE, SESSION_DATE, "PAPER", None)
+    assert (result.totals.trades, result.totals.net_pnl) == (calendar[0].trades, calendar[0].net_pnl) == (1, 260)
+    assert result.live_copies == 1
+    assert {row.strategy: row.live_copy for row in result.positions} == {
+        "rs-pullback-v1": True,
+        "cpr-breakout-v1": False,
+    }
