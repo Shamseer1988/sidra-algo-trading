@@ -437,12 +437,13 @@ const MOCK_PAPER_DAY = {
   session_date: "2026-08-31",
   totals: { trades: 1, open_positions: 1, wins: 0, losses: 0, scratches: 0, gross_pnl: 125.5, charges: 15.25, net_pnl: 110.25 },
   pending_orders: 1,
+  live_copies: 0,
   strategies: [
     { strategy: "orb-retest-v1", trades: 1, open_positions: 1, wins: 0, losses: 0, scratches: 0, gross_pnl: 125.5, charges: 15.25, net_pnl: 110.25 },
     { strategy: "cpr-breakout-v1", trades: 1, open_positions: 0, wins: 1, losses: 0, scratches: 0, gross_pnl: 550.39, charges: 52.8, net_pnl: 497.59 },
   ],
-  positions: MOCK_PAPER_POSITIONS.map((row) => ({ ...row, script_name: "RELIANCE", strategy: "orb-retest-v1" })),
-  orders: MOCK_PAPER_ORDERS.map((row) => ({ ...row, script_name: "RELIANCE", strategy: "orb-retest-v1" })),
+  positions: MOCK_PAPER_POSITIONS.map((row) => ({ ...row, script_name: "RELIANCE", strategy: "orb-retest-v1", live_copy: false })),
+  orders: MOCK_PAPER_ORDERS.map((row) => ({ ...row, script_name: "RELIANCE", strategy: "orb-retest-v1", live_copy: false })),
 };
 const MOCK_STRATEGY_RESULTS = [
   { strategy: "rs-pullback-v1", execution_mode: "LIVE", trades: 3, open_trades: 0, wins: 2, losses: 1, scratches: 0, win_rate_percent: "66.67", gross_pnl: "578.54", charges: "97.62", net_pnl: "480.92", average_r: "0.64", best_trade: "434.00", worst_trade: "-245.00" },
@@ -1297,6 +1298,19 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByRole("heading", { name: "History" })).toBeVisible();
   });
 
+  test("5d-1. Paper: the copy of a live trade is marked and said to be uncounted", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/paper/day*", async (route) => {
+      const copy = { ...MOCK_PAPER_DAY.positions[0], id: "copy", script_name: "SBIN", strategy: "rs-pullback-v1", live_copy: true };
+      await route.fulfill({ json: { ...MOCK_PAPER_DAY, live_copies: 1, positions: [...MOCK_PAPER_DAY.positions, copy] } });
+    });
+    await page.goto("/");
+    await go(page, "Orders & Positions", "Positions");
+    await expect(page.getByRole("row").filter({ hasText: "SBIN" })).toContainText("Live copy");
+    await expect(page.getByRole("row").filter({ hasText: "RELIANCE" })).not.toContainText("Live copy");
+    await expect(page.getByText("Plus 1 live copy, not counted")).toBeVisible();
+  });
+
   test("5e. History: ledger and strategy filters reach the server and the exports", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
@@ -2095,7 +2109,7 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByText(/This is not a sample/)).toBeVisible();
 
     // The funnel: setups found, what survived risk, what filled.
-    await expect(page.getByText("41")).toBeVisible();
+    await expect(page.getByText("41", { exact: true })).toBeVisible();
     await expect(page.getByText(/1 unknown, left out/)).toBeVisible();
     // Why setups were refused — including the share-price band.
     await expect(page.getByText(/is above the 1500 cap/)).toBeVisible();

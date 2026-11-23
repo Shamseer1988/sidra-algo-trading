@@ -251,8 +251,7 @@ export function DayGlance({
             </div>
           )}
           <Note>
-            A trade sent to the broker counts as Live here and is left out of Paper. The Paper today card also includes
-            its simulated copy.
+            A trade sent to the broker counts as Live and is never counted again as Paper.
           </Note>
         </article>
 

@@ -72,8 +72,8 @@ export function PaperExecutionPanel({
           <p className="eyebrow">Today only{day ? ` · ${day.session_date}` : ""}</p>
           <h2 className="page-title">{view === "orders" ? "Paper orderbook" : "Paper positions"}</h2>
           <p className="page-copy">
-            Simulated trades; none of these reached a broker. A strategy that trades live also appears here as its
-            simulated copy. The real orders are under Live.
+            Simulated trades; none of these reached a broker. A trade that was also sent to the broker is marked
+            Live copy and left out of the totals; the real one is under Live.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -102,8 +102,15 @@ export function PaperExecutionPanel({
             </Chip>
             {day.strategies.map((item) => (
               <Chip key={item.strategy} active={strategy === item.strategy} onClick={() => setStrategy(item.strategy)}>
-                {strategyLabel(item.strategy)} · {item.trades}{" "}
-                <span className={`numeric ${tone(item.net_pnl)}`}>{signed(item.net_pnl)}</span>
+                {strategyLabel(item.strategy)}
+                {item.trades > 0 ? (
+                  <>
+                    {" "}· {item.trades}{" "}
+                    <span className={`numeric ${tone(item.net_pnl)}`}>{signed(item.net_pnl)}</span>
+                  </>
+                ) : (
+                  <span className="opacity-70"> · none counted</span>
+                )}
               </Chip>
             ))}
           </div>
@@ -118,7 +125,7 @@ export function PaperExecutionPanel({
             <Metric
               label="Trades"
               value={totals.trades}
-              note={`${totals.wins} won, ${totals.losses} lost${totals.scratches ? `, ${totals.scratches} flat` : ""}`}
+              note={`${totals.wins} won, ${totals.losses} lost${totals.scratches ? `, ${totals.scratches} flat` : ""}${day.live_copies ? `. Plus ${day.live_copies} live cop${day.live_copies === 1 ? "y" : "ies"}, not counted` : ""}`}
             />
             <Metric label="Open positions" value={totals.open_positions} note="still running" />
             <Metric label="Pending orders" value={day.pending_orders} note="waiting for a fill" />
@@ -212,6 +219,7 @@ function Orderbook({ rows }: { rows: PaperDayOrder[] }) {
               <td className="muted-cell">{formatIstTimestamp(row.created_at)}</td>
               <td>
                 <strong title={row.instrument_token}>{row.script_name}</strong>
+                {row.live_copy && <LiveCopy />}
               </td>
               <td>{strategyLabel(row.strategy)}</td>
               <td>
@@ -272,6 +280,7 @@ function Positions({ rows }: { rows: PaperDayPosition[] }) {
               <tr key={row.id}>
                 <td>
                   <strong title={row.instrument_token}>{row.script_name}</strong>
+                  {row.live_copy && <LiveCopy />}
                 </td>
                 <td>{strategyLabel(row.strategy)}</td>
                 <td>
@@ -307,5 +316,16 @@ function Positions({ rows }: { rows: PaperDayPosition[] }) {
         </tbody>
       </table>
     </Frame>
+  );
+}
+
+function LiveCopy() {
+  return (
+    <span
+      className="status-pill status-watch ml-2 leading-4"
+      title="Simulated copy of a trade that was sent to the broker. Not counted in the totals."
+    >
+      Live copy
+    </span>
   );
 }
