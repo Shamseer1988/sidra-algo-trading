@@ -1,8 +1,10 @@
 "use client";
 
-import { CheckCircle2, Circle, KeyRound, ListChecks, UserPlus, Users } from "lucide-react";
+import { CheckCircle2, Circle, KeyRound, ListChecks, UserPlus, Users, X } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 
+import { istDate } from "../../lib/strategy-names";
+import { useDismissed } from "../../lib/use-dismissed";
 import { api, type ChecklistItem, type ManagedUser } from "../../components/api";
 import { Modal } from "../../components/modal";
 import { formatIstTimestamp } from "../../lib/formatting";
@@ -365,14 +367,19 @@ export function SetupBanner({ isAdmin, onOpen }: { isAdmin: boolean; onOpen: () 
       .then((items) => setLeft(items.filter((item) => item.required && !item.done).length))
       .catch(() => setLeft(0));
   }, [isAdmin]);
-  if (!isAdmin || !left) return null;
+  // Back tomorrow, or as soon as another step is left undone.
+  const [closed, close] = useDismissed("setup", `${istDate()}:${left}`);
+  if (!isAdmin || !left || closed) return null;
   return (
     <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-400 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-200" data-testid="setup-banner">
-      <span>
+      <span className="flex-1">
         Setup is not finished: {left} required step{left === 1 ? "" : "s"} left.
       </span>
       <button className="secondary-button px-2 py-1 text-xs" onClick={onOpen}>
         Open the setup checklist
+      </button>
+      <button className="secondary-button px-2 py-1" onClick={close} aria-label="Close setup notice">
+        <X className="h-4 w-4" />
       </button>
     </div>
   );

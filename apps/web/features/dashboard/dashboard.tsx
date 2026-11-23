@@ -11,6 +11,8 @@ import {
 
 import type { PaperSignal, SafetyStatus, ScannerStatus } from "../../components/api";
 
+import { DayGlance } from "./day-glance";
+
 type Service = readonly [string, { status: string; detail: string }, typeof Activity];
 
 function statusClass(status: string) {
@@ -53,6 +55,10 @@ export function Dashboard({
   onStart,
   onStop,
   onRefresh,
+  onOpenOrders,
+  onOpenHistory,
+  onOpenReports,
+  revision,
   intraday = true,
 }: {
   services: readonly Service[];
@@ -63,6 +69,11 @@ export function Dashboard({
   onStart: () => void;
   onStop: () => void;
   onRefresh: () => void;
+  onOpenOrders: () => void;
+  onOpenHistory: () => void;
+  onOpenReports: () => void;
+  /** Changes when something traded or Refresh was pressed. */
+  revision: number;
   /** False while the intraday desk is switched off: its scanner and signals are not shown. */
   intraday?: boolean;
 }) {
@@ -92,7 +103,7 @@ export function Dashboard({
         <div>
           <p className="eyebrow">Operations overview</p>
           <h2 className="page-title">{configuredLive ? "Live command center" : "Paper command center"}</h2>
-          <p className="page-copy">Live operational state from Sidra services. No generated prices or simulated broker status.</p>
+          <p className="page-copy">Today&apos;s trading first, then the state of the system behind it.</p>
         </div>
         <button onClick={onRefresh} className="secondary-button"><RefreshCw className="h-4 w-4" />Refresh state</button>
       </div>
@@ -104,9 +115,11 @@ export function Dashboard({
         </div>
       )}
 
+      <DayGlance revision={revision} onOpenOrders={onOpenOrders} onOpenHistory={onOpenHistory} onOpenReports={onOpenReports} />
+
       <section className={`mt-5 grid gap-3 sm:grid-cols-2 ${intraday ? "xl:grid-cols-4" : "xl:grid-cols-3"}`}>
-        {intraday && <Metric label="Qualified signals" value={String(signals.length)} note={`${longSignals} long · ${shortSignals} short`} />}
-        <Metric label="Telegram delivery" value={String(alerted)} note="Paper alerts confirmed" />
+        {intraday && <Metric label="Recent signals" value={String(signals.length)} note={`${longSignals} long · ${shortSignals} short, all recent days`} />}
+        <Metric label="Telegram delivery" value={String(alerted)} note="Of the recent signals, alerts confirmed" />
         <Metric label="Paper tracking" value={safety.paper_tracking_enabled ? "ACTIVE" : "PAUSED"} note="Journal and notifications" />
         <Metric label="Live execution" value={liveValue} note={liveNote} />
       </section>
