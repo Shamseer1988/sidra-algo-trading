@@ -1318,6 +1318,30 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByRole("table", { name: "Paper: simulated" })).toContainText("+₹877.17");
   });
 
+  test("2z. Dashboard: live and paper are separate cards, and the period switch re-ranks strategies", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    const live = page.getByRole("article", { name: "Live today" });
+    await expect(live).toContainText("₹685.00");
+    await expect(live).not.toContainText("110.25");
+    await expect(page.getByRole("article", { name: "Paper today" })).toContainText("+₹110.25");
+    await expect(page.getByRole("article", { name: "Leading today" })).toContainText("CPR Breakout");
+    const table = page.getByRole("table", { name: "Strategies by net result" });
+    await expect(table.getByRole("row").nth(1)).toContainText("CPR Breakout");
+    await page.getByRole("group", { name: "Strategy period" }).getByRole("button", { name: "30 days" }).click();
+    await expect(table).toContainText("too few to judge");
+    await page.getByRole("button", { name: "Open Leading today" }).click();
+    await expect(page.getByRole("heading", { name: "By strategy" })).toBeVisible();
+  });
+
+  test("2z-1. Dashboard: one figure that cannot be read does not blank the others", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.route("**/api/v1/paper/day*", async (route) => route.fulfill({ status: 500, json: { detail: "no" } }));
+    await page.goto("/");
+    await expect(page.getByRole("article", { name: "Live today" })).toContainText("₹685.00");
+    await expect(page.getByRole("article", { name: "Paper today" })).toContainText("Could not be read");
+  });
+
   test("5c-0. Orders: the source toggle rides the tab row, and is not a tab", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
@@ -2480,11 +2504,26 @@ test.describe("Trading desks", () => {
     await shot(page, "desk-intraday-off");
   });
 
+  test("an information banner closes and stays closed; a different one still shows", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await mockDesks(page, { intraday: true, swing: true });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Close this notice" }).click();
+    await expect(page.getByTestId("desk-banner")).toHaveCount(0);
+    await page.reload();
+    await expect(page.getByTestId("day-glance")).toBeVisible();
+    await expect(page.getByTestId("desk-banner")).toHaveCount(0);
+    await mockDesks(page, { intraday: false, swing: true });
+    await page.reload();
+    await expect(page.getByTestId("desk-banner")).toContainText("Intraday trading is off");
+  });
+
   test("both desks off is said in red on every page", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await mockDesks(page, { intraday: false, swing: false });
     await page.goto("/");
     await expect(page.getByTestId("desk-banner")).toContainText("Both trading desks are off");
+    await expect(page.getByRole("button", { name: "Close this notice" })).toHaveCount(0);
     await go(page, "Settings");
     await expect(page.getByTestId("desk-banner")).toContainText("Both trading desks are off");
   });

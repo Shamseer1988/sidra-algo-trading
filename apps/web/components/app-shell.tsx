@@ -92,6 +92,7 @@ export function AppShell() {
   const [dataQuality, setDataQuality] = useState<DataQuality[]>([]);
   const [regime, setRegime] = useState<MarketRegime | null>(null);
   const [scannerRevision, setScannerRevision] = useState(0);
+  const [glanceRevision, setGlanceRevision] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -162,7 +163,7 @@ export function AppShell() {
   let content: ReactNode;
   switch (active) {
     case "dashboard":
-      content = <Dashboard services={services} scanner={scanner} safety={safety} signals={signals} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={refreshAll} intraday={desks.intraday} />;
+      content = <Dashboard services={services} scanner={scanner} safety={safety} signals={signals} canOperate={Boolean(canOperate)} onStart={() => void scannerAction("start")} onStop={() => void scannerAction("stop")} onRefresh={() => { setGlanceRevision((value) => value + 1); refreshAll(); }} onOpenOrders={() => { orderSource.setSource("paper"); selectWorkspace("orders"); setTab("positions"); }} onOpenHistory={() => selectWorkspace("history")} onOpenReports={() => { selectWorkspace("reports"); setTab("strategies"); }} revision={glanceRevision} intraday={desks.intraday} />;
       break;
     case "strategies":
       content = showing === "subscriptions" ? <SubscriptionsPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} /> : showing === "builder" ? <StrategyBuilder isAdmin={Boolean(isAdmin)} onMessage={setMessage} onOpenControlCenter={() => setTab("control")} /> : <StrategiesPanel isAdmin={Boolean(isAdmin)} onMessage={setMessage} onOpenBuilder={() => setTab("builder")} />;
