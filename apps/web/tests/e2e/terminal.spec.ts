@@ -566,7 +566,7 @@ export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" =
     await route.fulfill({ json: MOCK_OVERVIEW });
   });
 
-  await page.route("**/api/v1/system/market-session", async (route: Route) => {
+  await page.route("**/api/v1/system/market-session*", async (route: Route) => {
     await route.fulfill({ json: MOCK_MARKET_SESSION });
   });
 
@@ -1332,6 +1332,28 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(table).toContainText("too few to judge");
     await page.getByRole("button", { name: "Open Leading today" }).click();
     await expect(page.getByRole("heading", { name: "By strategy" })).toBeVisible();
+  });
+
+  test("2y. Dashboard: the strip says when the market next opens, and how much of the day is used", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const tomorrow = (ahead: number) => {
+      const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+      const value = new Date(`${today}T00:00:00Z`);
+      value.setUTCDate(value.getUTCDate() + ahead);
+      return value.toISOString().slice(0, 10);
+    };
+    await page.route("**/api/v1/system/market-session*", async (route) => {
+      const at = new URL(route.request().url()).searchParams.get("at");
+      const closed = at?.startsWith(tomorrow(1));
+      await route.fulfill({
+        json: { ...MOCK_MARKET_SESSION, trading_day: !closed, session_date: closed ? null : (at ?? tomorrow(0)).slice(0, 10), reason: closed ? "Guru Nanak Jayanti" : "Regular session" },
+      });
+    });
+    await page.goto("/");
+    const strip = page.getByTestId("day-strip");
+    await expect(strip).toContainText("Tomorrow closed: Guru Nanak Jayanti. Next:");
+    await expect(strip).toContainText(`3 of ${MOCK_CONTROLS.maximum_daily_trades}`);
+    await expect(page.getByText("command center", { exact: false }).filter({ hasText: /^(Live|Paper) command/ })).toHaveCount(0);
   });
 
   test("2z-1. Dashboard: one figure that cannot be read does not blank the others", async ({ page }) => {
@@ -2331,7 +2353,6 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
 
     await expect(page.getByText("Live submission is open")).toBeVisible();
     await expect(page.getByText("Safety boundary intact")).not.toBeVisible();
-    await expect(page.getByText("Live command center")).toBeVisible();
   });
   test("10. Strategy detail: says what it is for and how the trade is left", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
