@@ -1,18 +1,22 @@
 """Paper-execution ledger APIs. These endpoints cannot call a broker."""
 
-from datetime import datetime
+from datetime import date, datetime
+from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from app.api.deps import CurrentUser, DbSession, require_roles
-from app.db.models import ApplicationSetting, PaperFill, PaperOrder, PaperPosition, User, UserRole
+from app.db.models import ApplicationSetting, PaperFill, PaperOrder, PaperPosition, PaperSignal, User, UserRole
+from app.services.market_calculations import MARKET_TIMEZONE
 from app.services.paper_execution import (
     DEFAULT_PAPER_EXECUTION_CONTROLS,
     PAPER_EXECUTION_KEY,
     PaperExecutionControls,
 )
+from app.services.trade_history import SCRATCH, strategy_family
+from app.services.trading_symbols import resolve_script_names
 
 router = APIRouter(prefix="/paper", tags=["Paper execution"])
 
@@ -130,6 +134,121 @@ def _position(row: PaperPosition) -> PaperPositionResponse:
         total_pnl=float(row.total_pnl),
         opened_at=row.opened_at,
         closed_at=row.closed_at,
+    )
+
+
+class PaperDayOrder(PaperOrderResponse):
+    script_name: str
+    strategy: str
+
+
+class PaperDayPosition(PaperPositionResponse):
+    script_name: str
+    strategy: str
+
+
+class PaperDayTotals(BaseModel):
+    trades: int
+    open_positions: int
+    wins: int
+    losses: int
+    scratches: int
+    gross_pnl: float
+    charges: float
+    net_pnl: float
+
+
+class PaperDayStrategy(PaperDayTotals):
+    strategy: str
+
+
+class PaperDayResponse(BaseModel):
+    session_date: str
+    totals: PaperDayTotals
+    pending_orders: int
+    strategies: list[PaperDayStrategy]
+    positions: list[PaperDayPosition]
+    orders: list[PaperDayOrder]
+
+
+def _day_totals(rows: list[PaperPosition]) -> dict:
+    closed = [row for row in rows if row.status == "CLOSED"]
+    wins = sum(row.total_pnl > SCRATCH for row in closed)
+    losses = sum(row.total_pnl < -SCRATCH for row in closed)
+    return {
+        "trades": len(rows),
+        "open_positions": len(rows) - len(closed),
+        "wins": wins,
+        "losses": losses,
+        "scratches": len(closed) - wins - losses,
+        "gross_pnl": float(sum(row.realized_pnl + row.unrealized_pnl for row in rows)),
+        "charges": float(sum(row.fees_total for row in rows)),
+        "net_pnl": float(sum(row.total_pnl for row in rows)),
+    }
+
+
+@router.get("/day", response_model=PaperDayResponse)
+async def day(
+    _: CurrentUser,
+    session: DbSession,
+    strategy: Annotated[str | None, Query(description="One strategy family, any revision.")] = None,
+    session_date: Annotated[date | None, Query(description="Defaults to today, IST.")] = None,
+) -> PaperDayResponse:
+    """One session's simulated orders and positions, totalled by the server.
+
+    Today's view also carries any position still open, or order still pending,
+    from an earlier session: hiding one because of its date would read as flat.
+    """
+    today = datetime.now(MARKET_TIMEZONE).date()
+    wanted = session_date or today
+    in_day = PaperPosition.session_date == wanted
+    order_in_day = PaperOrder.session_date == wanted
+    if wanted == today:
+        in_day = or_(in_day, PaperPosition.status != "CLOSED")
+        order_in_day = or_(order_in_day, PaperOrder.status.in_(["PENDING", "PARTIALLY_FILLED"]))
+    rows = list(
+        (await session.scalars(select(PaperPosition).where(in_day).order_by(PaperPosition.opened_at.desc()))).all()
+    )
+    order_rows = (
+        await session.execute(
+            select(PaperOrder, PaperSignal.strategy_version)
+            .join(PaperSignal, PaperSignal.id == PaperOrder.paper_signal_id)
+            .where(order_in_day)
+            .order_by(PaperOrder.created_at.desc())
+        )
+    ).all()
+    names = await resolve_script_names(
+        session, {row.instrument_token for row in rows} | {order.instrument_token for order, _version in order_rows}
+    )
+    families: dict[str, list[PaperPosition]] = {}
+    for _order_row, version in order_rows:
+        families.setdefault(strategy_family(version), [])
+    for row in rows:
+        families.setdefault(strategy_family(row.strategy_version), []).append(row)
+    if strategy:
+        rows = [row for row in rows if strategy_family(row.strategy_version) == strategy]
+        order_rows = [pair for pair in order_rows if strategy_family(pair[1]) == strategy]
+    return PaperDayResponse(
+        session_date=wanted.isoformat(),
+        totals=PaperDayTotals(**_day_totals(rows)),
+        pending_orders=sum(order.status in ("PENDING", "PARTIALLY_FILLED") for order, _version in order_rows),
+        strategies=[PaperDayStrategy(strategy=name, **_day_totals(own)) for name, own in sorted(families.items())],
+        positions=[
+            PaperDayPosition(
+                **_position(row).model_dump(),
+                script_name=names[row.instrument_token],
+                strategy=strategy_family(row.strategy_version),
+            )
+            for row in rows
+        ],
+        orders=[
+            PaperDayOrder(
+                **_order(order).model_dump(),
+                script_name=names[order.instrument_token],
+                strategy=strategy_family(version),
+            )
+            for order, version in order_rows
+        ],
     )
 
 

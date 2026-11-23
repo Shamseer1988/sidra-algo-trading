@@ -4,6 +4,7 @@ import type { OrderSource } from "../orders/use-order-source";
 import { ExecutionQualityPanel } from "./execution-quality";
 import { PnlCalendar } from "./pnl-calendar";
 import { PnlSummary } from "./pnl-summary";
+import { StrategyReport } from "./strategy-report";
 
 /**
  * Reports: the two ways of looking back.
@@ -26,6 +27,7 @@ export function ReportsWorkspace({
   source: OrderSource;
 }) {
   if (tab === "pnl") return <PnlSummary onMessage={onMessage} source={source} />;
+  if (tab === "strategies") return <StrategyReport onMessage={onMessage} />;
   if (tab === "quality") return <ExecutionQualityPanel onMessage={onMessage} source={source} />;
   return <PnlCalendar onMessage={onMessage} source={source} />;
 }

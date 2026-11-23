@@ -18,15 +18,23 @@ import type { OrderSource } from "./use-order-source";
  * Settings → Trading controls, and it is said on the screen so the selector
  * here cannot be mistaken for it.
  */
-export function OrdersWorkspace({ view, source: state }: { view: "orders" | "positions"; source: OrderSource }) {
-  if (state.source !== "broker") return <PaperExecutionPanel view={view} />;
+export function OrdersWorkspace({
+  view,
+  source: state,
+  onOpenHistory,
+}: {
+  view: "orders" | "positions";
+  source: OrderSource;
+  onOpenHistory: () => void;
+}) {
+  if (state.source !== "broker") return <PaperExecutionPanel view={view} onOpenHistory={onOpenHistory} />;
 
   const live = state.choices?.brokers.find((item) => item.key === state.choices?.selected);
   return (
     <section>
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <p className="max-w-3xl text-xs text-slate-500 dark:text-slate-400">
-          Viewing only. Which broker a live order actually reaches is the live broker in Settings → Trading controls
+          Today at the broker, viewing only; earlier days are in History and Reports. Which broker a live order actually reaches is the live broker in Settings → Trading controls
           {state.choices
             ? ` (currently ${state.choices.selected === "NONE" ? "none" : (live?.label ?? state.choices.selected)})`
             : ""}

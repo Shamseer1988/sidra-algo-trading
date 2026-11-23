@@ -1,7 +1,7 @@
 "use client";
 
 import { CloudDownload, Download, FileSpreadsheet, Info, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   api,
@@ -11,6 +11,8 @@ import {
   type ReconciliationStatus,
 } from "../../components/api";
 import { formatIstTimestamp } from "../../lib/formatting";
+import { strategyLabel } from "../../lib/strategy-names";
+import { lastDays, type Range, RangeFilter, StrategySelect } from "./filters";
 import { Money, percent, ratio, rupees, toNumber } from "./money";
 import { ReconciliationPill } from "./reconciliation";
 import { TradeDetail } from "./trade-detail";
@@ -25,17 +27,6 @@ import { TradeDetail } from "./trade-detail";
  * the two disagree, both are shown side by side and the row says which is which.
  */
 
-function isoDate(value: Date): string {
-  return value.toISOString().slice(0, 10);
-}
-
-function defaultRange(): { from: string; to: string } {
-  const today = new Date();
-  const back = new Date(today);
-  back.setDate(back.getDate() - 30);
-  return { from: isoDate(back), to: isoDate(today) };
-}
-
 export function HistoryWorkspace({
   canOperate = true,
   onMessage,
@@ -43,9 +34,17 @@ export function HistoryWorkspace({
   canOperate?: boolean;
   onMessage: (message: string) => void;
 }) {
-  const initial = useMemo(defaultRange, []);
-  const [from, setFrom] = useState(initial.from);
-  const [to, setTo] = useState(initial.to);
+  const [range, setRange] = useState<Range>(() => lastDays(30));
+  const [mode, setMode] = useState<"" | "LIVE" | "PAPER">("");
+  const [strategy, setStrategy] = useState("");
+  const [strategies, setStrategies] = useState<string[]>([]);
+  const filter = {
+    from_date: range.from,
+    to_date: range.to,
+    mode: mode || undefined,
+    strategy: strategy || undefined,
+  };
+  const latest = useRef(0);
   const [overview, setOverview] = useState<HistoryOverview | null>(null);
   const [days, setDays] = useState<HistoryDay[]>([]);
   const [trades, setTrades] = useState<HistoryTrade[]>([]);
@@ -55,23 +54,35 @@ export function HistoryWorkspace({
   const [openTrade, setOpenTrade] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    const request = ++latest.current;
     setLoading(true);
     try {
-      const range = { from_date: from, to_date: to };
-      const [nextOverview, nextDays, nextTrades] = await Promise.all([
-        api.historyOverview(range),
-        api.historyDaily(range),
-        api.historyTrades(range),
+      const query = {
+        from_date: range.from,
+        to_date: range.to,
+        mode: mode || undefined,
+        strategy: strategy || undefined,
+      };
+      const [nextOverview, nextDays, nextTrades, byStrategy] = await Promise.all([
+        api.historyOverview(query),
+        api.historyDaily(query),
+        api.historyTrades(query),
+        api.historyStrategies({ from_date: range.from, to_date: range.to }),
       ]);
+      // A slow answer for an older filter must not replace the current one.
+      if (request !== latest.current) return;
+      setStrategies([...new Set(byStrategy.map((row) => row.strategy))]);
       setOverview(nextOverview);
       setDays(nextDays);
       setTrades(nextTrades);
     } catch (error) {
-      onMessage(error instanceof Error ? error.message : "Could not load the trading history");
+      if (request === latest.current) {
+        onMessage(error instanceof Error ? error.message : "Could not load the trading history");
+      }
     } finally {
-      setLoading(false);
+      if (request === latest.current) setLoading(false);
     }
-  }, [from, to, onMessage]);
+  }, [range, mode, strategy, onMessage]);
 
   useEffect(() => {
     void load();
@@ -114,28 +125,53 @@ export function HistoryWorkspace({
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-2">
-          <label className="text-xs text-slate-400">
-            From
-            <input type="date" value={from} onChange={(event) => setFrom(event.target.value)} className="field-input mt-1 block font-mono text-sm" />
-          </label>
-          <label className="text-xs text-slate-400">
-            To
-            <input type="date" value={to} onChange={(event) => setTo(event.target.value)} className="field-input mt-1 block font-mono text-sm" />
-          </label>
           <button className="secondary-button" onClick={() => void load()} disabled={loading}>
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             Refresh
           </button>
-          <a className="secondary-button" href={api.historyExportUrl("csv", { from_date: from, to_date: to })} download>
+          <a className="secondary-button" href={api.historyExportUrl("csv", filter)} download>
             <Download className="h-4 w-4" />
             CSV
           </a>
-          <a className="secondary-button" href={api.historyExportUrl("xlsx", { from_date: from, to_date: to })} download>
+          <a className="secondary-button" href={api.historyExportUrl("xlsx", filter)} download>
             <FileSpreadsheet className="h-4 w-4" />
             Excel
           </a>
         </div>
       </div>
+
+      <div className="mt-5 flex flex-wrap items-end gap-3">
+        <div role="group" aria-label="Ledger" className="flex gap-1">
+          {([
+            ["", "All"],
+            ["LIVE", "Live"],
+            ["PAPER", "Paper"],
+          ] as const).map(([value, label]) => (
+            <button
+              key={label}
+              type="button"
+              aria-pressed={mode === value}
+              className={`${mode === value ? "primary-button" : "secondary-button"} px-3 py-2 text-xs`}
+              onClick={() => setMode(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <StrategySelect value={strategy} options={strategies} onChange={setStrategy} />
+        <RangeFilter
+          range={range}
+          onChange={(next) => {
+            setRange(next);
+            setDayFilter(null);
+          }}
+        />
+      </div>
+      {mode === "" && (
+        <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+          All adds live and paper trades together. Choose Live for real money only.
+        </p>
+      )}
 
       {overview && <Summary overview={overview} />}
 
@@ -409,7 +445,7 @@ function TradesTable({
                       {trade.is_open ? " · open" : ""}
                     </span>
                   </td>
-                  <td className="muted-cell text-xs">{trade.strategy_version}</td>
+                  <td className="text-xs" title={trade.strategy_version}>{strategyLabel(trade.strategy_version)}</td>
                   <td className="numeric">{trade.quantity}</td>
                   <td className="numeric text-xs">
                     {trade.entry_price ?? "—"} → {trade.exit_price ?? "—"}
