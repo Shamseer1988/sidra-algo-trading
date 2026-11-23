@@ -3,13 +3,12 @@ import {
   ArrowUpRight,
   LockKeyhole,
   Radio,
-  RefreshCw,
   ShieldAlert,
   ShieldCheck,
   TriangleAlert,
 } from "lucide-react";
 
-import type { PaperSignal, SafetyStatus, ScannerStatus } from "../../components/api";
+import type { PaperSignal, SafetyStatus, ScannerStatus, TradingControls } from "../../components/api";
 
 import { DayGlance } from "./day-glance";
 
@@ -59,6 +58,7 @@ export function Dashboard({
   onOpenHistory,
   onOpenReports,
   revision,
+  controls,
   intraday = true,
 }: {
   services: readonly Service[];
@@ -74,6 +74,7 @@ export function Dashboard({
   onOpenReports: () => void;
   /** Changes when something traded or Refresh was pressed. */
   revision: number;
+  controls: TradingControls;
   /** False while the intraday desk is switched off: its scanner and signals are not shown. */
   intraday?: boolean;
 }) {
@@ -99,23 +100,14 @@ export function Dashboard({
 
   return (
     <section>
-      <div className="flex flex-col gap-4 border-b border-slate-800 pb-5 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <p className="eyebrow">Operations overview</p>
-          <h2 className="page-title">{configuredLive ? "Live command center" : "Paper command center"}</h2>
-          <p className="page-copy">Today&apos;s trading first, then the state of the system behind it.</p>
-        </div>
-        <button onClick={onRefresh} className="secondary-button"><RefreshCw className="h-4 w-4" />Refresh state</button>
-      </div>
-
       {safety.emergency_stop_active && (
-        <div className="mt-5 flex gap-3 rounded-lg border border-rose-900 bg-rose-950/40 p-4 text-sm text-rose-200">
+        <div className="mb-4 flex gap-3 rounded-lg border border-rose-900 bg-rose-950/40 p-4 text-sm text-rose-200">
           <ShieldAlert className="h-5 w-5 shrink-0" />
           <div><b>Emergency stop is active.</b><br />{safety.emergency_stop_reason}</div>
         </div>
       )}
 
-      <DayGlance revision={revision} onOpenOrders={onOpenOrders} onOpenHistory={onOpenHistory} onOpenReports={onOpenReports} />
+      <DayGlance revision={revision} controls={controls} onRefresh={onRefresh} onOpenOrders={onOpenOrders} onOpenHistory={onOpenHistory} onOpenReports={onOpenReports} />
 
       <section className={`mt-5 grid gap-3 sm:grid-cols-2 ${intraday ? "xl:grid-cols-4" : "xl:grid-cols-3"}`}>
         {intraday && <Metric label="Recent signals" value={String(signals.length)} note={`${longSignals} long · ${shortSignals} short, all recent days`} />}

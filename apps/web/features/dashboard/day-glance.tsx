@@ -3,8 +3,9 @@
 import { ArrowUpRight, Landmark, NotebookPen, Trophy } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
-import { api, type HistoryDay, type HistoryOverview, type PaperDay, type StrategyResult } from "../../components/api";
+import { api, type HistoryDay, type HistoryOverview, type PaperDay, type StrategyResult, type TradingControls } from "../../components/api";
 import { istDate, strategyLabel } from "../../lib/strategy-names";
+import { DayStrip } from "./day-strip";
 import { percent, rupees, toNumber } from "../history/money";
 
 /**
@@ -38,11 +39,15 @@ function ink(value: number | null): string {
 
 export function DayGlance({
   revision,
+  controls,
+  onRefresh,
   onOpenOrders,
   onOpenHistory,
   onOpenReports,
 }: {
   revision: number;
+  controls: TradingControls;
+  onRefresh: () => void;
   onOpenOrders: () => void;
   onOpenHistory: () => void;
   onOpenReports: () => void;
@@ -85,10 +90,13 @@ export function DayGlance({
 
   if (!glance) {
     return (
-      <div className="mt-5 grid gap-4 lg:grid-cols-3">
-        {[0, 1, 2].map((item) => (
-          <div key={item} className="skeleton h-44" />
-        ))}
+      <div className="space-y-4">
+        <div className="skeleton h-24" />
+        <div className="grid gap-4 lg:grid-cols-3">
+          {[0, 1, 2].map((item) => (
+            <div key={item} className="skeleton h-44" />
+          ))}
+        </div>
       </div>
     );
   }
@@ -102,7 +110,8 @@ export function DayGlance({
   );
 
   return (
-    <div className="mt-5 space-y-4" data-testid="day-glance">
+    <div className="space-y-4" data-testid="day-glance">
+      <DayStrip live={live} controls={controls} tick={glance} onRefresh={onRefresh} />
       <div className="grid gap-4 lg:grid-cols-3">
         <Card icon={<Landmark className="h-4 w-4" />} title="Live today" tag="Real money" onOpen={onOpenHistory}>
           {live ? (
