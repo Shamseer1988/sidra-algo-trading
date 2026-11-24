@@ -118,8 +118,12 @@ async def test_sessions_are_newest_first():
     await check(day=EARLIER)
     await check(day=DAY)
     async with SessionLocal() as session:
-        found = await scanner_report.recent_sessions(session, limit=2)
-    assert found == [DAY, EARLIER]
+        found = await scanner_report.recent_sessions(session, limit=1_000)
+        newest = await scanner_report.recent_sessions(session, limit=1)
+    # Other tests leave sessions of their own behind, some further in the future.
+    assert found == sorted(set(found), reverse=True)
+    assert [day for day in found if day in (DAY, EARLIER)] == [DAY, EARLIER]
+    assert newest == found[:1]
 
 
 async def test_pages_cover_every_row_once_even_when_they_tie():
