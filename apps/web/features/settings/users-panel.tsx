@@ -166,7 +166,7 @@ export function UsersPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMessage
               <h3 className="font-semibold text-white">Accounts</h3>
             </div>
           </div>
-          <div className="mt-4 overflow-x-auto">
+          <div className="table-scroll mt-4">
             <table className="w-full text-sm">
               <thead className="text-left text-xs uppercase tracking-wide text-slate-500">
                 <tr>

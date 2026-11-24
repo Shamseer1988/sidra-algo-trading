@@ -166,7 +166,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   .user-menu { border: 1px solid var(--glass-border); background: var(--glass-muted); color: var(--foreground); @apply grid h-8 w-8 place-items-center rounded-full text-xs font-bold; }
   .user-menu-popover { border: 1px solid var(--glass-border-strong); background: var(--surface); box-shadow: 0 12px 30px var(--glass-shadow); @apply absolute right-4 top-12 w-56 rounded-md p-3; }
   .page-toolbar { border-bottom: 1px solid var(--glass-border); @apply flex flex-col gap-4 pb-5 lg:flex-row lg:items-end lg:justify-between; }
-  .table-scroll { @apply overflow-x-auto; }
+  /* Every table scrolls both ways inside its own box, under a heading row that
+     stays put. The heading is opaque because rows pass beneath it. */
+  .table-scroll { max-height: min(70vh, 640px); overscroll-behavior-x: contain; @apply overflow-auto; }
+  .table-scroll thead th { background: var(--surface-muted); box-shadow: inset 0 -1px 0 var(--border); @apply sticky top-0 z-10; }
   .terminal-table { @apply min-w-full text-left text-sm; }
   .terminal-table thead { color: var(--muted); background: var(--glass-muted); border-bottom: 1px solid var(--glass-border); @apply text-[10px] font-bold uppercase tracking-[.13em]; }
   .terminal-table th { @apply whitespace-nowrap px-5 py-3; }

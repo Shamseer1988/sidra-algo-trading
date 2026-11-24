@@ -3,6 +3,7 @@
 import { Gauge, ListPlus, Plus, Save, Search, ShieldAlert, Undo2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { Paged } from "../../components/paged";
 import { api, type WatchSearchResult, type WatchShare, type WatchlistView } from "../../components/api";
 import { Modal } from "../../components/modal";
 import { formatIstTimestamp } from "../../lib/formatting";
@@ -237,46 +238,50 @@ export function SubscriptionsPanel({ isAdmin, onMessage }: { isAdmin: boolean; o
           </div>
         )}
 
-        <div className="mt-5 table-scroll">
-          <table className="terminal-table">
-            <thead>
-              <tr>
-                <th>Symbol</th>
-                <th>Company</th>
-                <th>Sector group</th>
-                <th>Index</th>
-                {isAdmin && <th>Action</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {shares.map((share) => {
-                const out = removed.has(share.instrument_key);
-                return (
-                  <tr key={share.instrument_key} data-testid={`share-${share.symbol}`} className={out ? "opacity-50" : ""}>
-                    <td>
-                      <strong className={`text-white ${out ? "line-through" : ""}`}>{share.symbol}</strong>
-                      {share.added && <span className="ml-2 status-pill status-good">New</span>}
-                      {out && <span className="ml-2 status-pill status-bad">Removing</span>}
-                    </td>
-                    <td className={`text-xs ${share.known ? "text-slate-300" : "text-amber-400"}`}>
-                      <div style={{ width: "20rem", whiteSpace: "normal" }}>{share.name}</div>
-                    </td>
-                    <td className="text-xs">{share.sector ?? <span className="text-amber-400" title="No sector group: the per-sector limit treats it as its own group.">Own group</span>}</td>
-                    <td className="text-xs text-slate-400">{share.in_nifty200 ? "NIFTY 200" : "—"}</td>
-                    {isAdmin && (
-                      <td>
-                        <button className="secondary-button px-2 py-1 text-xs" aria-label={`${out ? "Keep" : "Remove"} ${share.symbol}`} onClick={() => toggleRemove(share)}>
-                          {out ? <Undo2 className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5" />}
-                          {out ? "Keep" : "Remove"}
-                        </button>
-                      </td>
-                    )}
+        <Paged rows={shares}>
+          {(visible) => (
+            <div className="mt-5 table-scroll">
+              <table className="terminal-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Company</th>
+                    <th>Sector group</th>
+                    <th>Index</th>
+                    {isAdmin && <th>Action</th>}
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                </thead>
+                <tbody>
+                  {visible.map((share) => {
+                    const out = removed.has(share.instrument_key);
+                    return (
+                      <tr key={share.instrument_key} data-testid={`share-${share.symbol}`} className={out ? "opacity-50" : ""}>
+                        <td>
+                          <strong className={`text-white ${out ? "line-through" : ""}`}>{share.symbol}</strong>
+                          {share.added && <span className="ml-2 status-pill status-good">New</span>}
+                          {out && <span className="ml-2 status-pill status-bad">Removing</span>}
+                        </td>
+                        <td className={`text-xs ${share.known ? "text-slate-300" : "text-amber-400"}`}>
+                          <div style={{ width: "20rem", whiteSpace: "normal" }}>{share.name}</div>
+                        </td>
+                        <td className="text-xs">{share.sector ?? <span className="text-amber-400" title="No sector group: the per-sector limit treats it as its own group.">Own group</span>}</td>
+                        <td className="text-xs text-slate-400">{share.in_nifty200 ? "NIFTY 200" : "—"}</td>
+                        {isAdmin && (
+                          <td>
+                            <button className="secondary-button px-2 py-1 text-xs" aria-label={`${out ? "Keep" : "Remove"} ${share.symbol}`} onClick={() => toggleRemove(share)}>
+                              {out ? <Undo2 className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5" />}
+                              {out ? "Keep" : "Remove"}
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Paged>
 
         {isAdmin && view.source === "screen" && (
           <button className="mt-4 text-xs text-slate-500 underline hover:text-slate-300" onClick={() => setResetting(true)}>

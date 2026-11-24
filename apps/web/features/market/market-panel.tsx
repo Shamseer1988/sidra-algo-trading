@@ -2,8 +2,6 @@
 
 import {
   CalendarDays,
-  ChevronLeft,
-  ChevronRight,
   RefreshCw,
   Search,
   ShieldAlert,
@@ -11,6 +9,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { Pager } from "../../components/paged";
 import type { DataQuality, MarketRegime, MarketSession, Overview, ScannerStatus } from "../../components/api";
 import { formatIstTimestamp, statusTone, titleCase } from "../../lib/formatting";
 import { resolveScriptName } from "../../lib/instruments";
@@ -40,7 +39,7 @@ export function MarketPanel({
     const q = query.trim().toLowerCase();
     if (!q) return quality;
     return quality.filter((item) => {
-      const script = resolveScriptName(item.instrument_token).toLowerCase();
+      const script = (item.script_name || resolveScriptName(item.instrument_token)).toLowerCase();
       const token = item.instrument_token.toLowerCase();
       const state = item.state.toLowerCase();
       const reason = item.reason.toLowerCase();
@@ -65,7 +64,7 @@ export function MarketPanel({
       <div className="page-toolbar">
         <div>
           <p className="eyebrow">Market intelligence</p>
-          <h2 className="page-title">Market state & instruments</h2>
+          <h2 className="page-title">Market and data feed</h2>
           <p className="page-copy">
             Session status and real-time market data feed quality for tracked instruments.
           </p>
@@ -169,47 +168,27 @@ export function MarketPanel({
                 className="field-input w-full pl-9 pr-3 text-xs"
               />
             </div>
-
-            {/* Rows Per Page Dropdown */}
-            <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-              <span>Show:</span>
-              <select
-                aria-label="Rows per page"
-                value={pageSize}
-                onChange={(e) => {
-                  setPageSize(Number(e.target.value));
-                  setPage(1);
-                }}
-                className="field-input w-20 py-1 text-xs"
-              >
-                <option value={10}>10</option>
-                <option value={25}>25</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-                <option value={150}>150</option>
-              </select>
-            </div>
           </div>
         </div>
 
         {/* Table with Vertical & Horizontal Scrolling and Sticky Header */}
         {filtered.length ? (
-          <div className="table-scroll max-h-[560px] overflow-auto">
+          <div className="table-scroll">
             <table className="terminal-table w-full text-left text-xs">
-              <thead className="sticky top-0 z-10">
+              <thead>
                 <tr>
-                  <th className="py-3.5 pl-5 pr-4">Script Name</th>
-                  <th className="py-3.5 px-4">Instrument Code</th>
-                  <th className="py-3.5 px-4">Quality State</th>
-                  <th className="py-3.5 px-4 text-right">1-Min Bars</th>
+                  <th className="py-3.5 pl-5 pr-4">Share</th>
+                  <th className="py-3.5 px-4">Code and note</th>
+                  <th className="py-3.5 px-4">Data</th>
+                  <th className="py-3.5 px-4 text-right">1-min candles</th>
                   <th className="py-3.5 px-4 text-right">Ticks</th>
-                  <th className="py-3.5 px-4 text-right">Avg Latency</th>
-                  <th className="py-3.5 pl-4 pr-5">Signal Gate</th>
+                  <th className="py-3.5 px-4 text-right">Delay</th>
+                  <th className="py-3.5 pl-4 pr-5">May signal?</th>
                 </tr>
               </thead>
               <tbody>
                 {paginated.map((item) => {
-                  const script = resolveScriptName(item.instrument_token);
+                  const script = (item.script_name || resolveScriptName(item.instrument_token));
                   return (
                     <tr key={item.instrument_token}>
                       {/* Script Name */}
@@ -285,46 +264,17 @@ export function MarketPanel({
           </div>
         )}
 
-        {/* Table Footer with Pagination Controls */}
-        {filtered.length > 0 && (
-          <div className="flex flex-col items-center justify-between gap-3 border-t border-slate-700/30 dark:border-slate-800/80 p-4 text-xs sm:flex-row">
-            <div>
-              Showing{" "}
-              <strong>
-                {(currentPage - 1) * pageSize + 1}
-              </strong>{" "}
-              to{" "}
-              <strong>
-                {Math.min(currentPage * pageSize, filtered.length)}
-              </strong>{" "}
-              of <strong>{filtered.length}</strong> instruments
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                disabled={currentPage <= 1}
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                className="secondary-button py-1 px-2.5 text-xs disabled:opacity-40"
-              >
-                <ChevronLeft className="h-3.5 w-3.5" />
-                Previous
-              </button>
-
-              <span className="px-2 font-medium">
-                Page {currentPage} of {totalPages}
-              </span>
-
-              <button
-                disabled={currentPage >= totalPages}
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                className="secondary-button py-1 px-2.5 text-xs disabled:opacity-40"
-              >
-                Next
-                <ChevronRight className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-        )}
+        <Pager
+          total={filtered.length}
+          page={currentPage}
+          size={pageSize}
+          onPage={setPage}
+          onSize={(size) => {
+            setPageSize(size);
+            setPage(1);
+          }}
+          label="shares"
+        />
       </section>
     </section>
   );

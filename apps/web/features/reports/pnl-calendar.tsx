@@ -3,6 +3,7 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { Paged } from "../../components/paged";
 import { api, type BrokerTrade, type HistoryDay, type HistoryTrade } from "../../components/api";
 import { BrokerSelect } from "../orders/source-controls";
 import type { OrderSource } from "../orders/use-order-source";
@@ -309,55 +310,59 @@ function BrokerRowTable({ day, rows, figure }: { day: HistoryDay; rows: BrokerTr
     );
   }
   return (
-    <div className="table-scroll">
-      <table className="terminal-table">
-        <thead>
-          <tr>
-            <th>Stock</th>
-            <th>Qty</th>
-            <th>Entry</th>
-            <th>Exit</th>
-            <th>Target</th>
-            <th>Gross</th>
-            <th>Charges</th>
-            <th>Net</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr key={`${row.script_name}-${index}`}>
-              <td>
-                <strong className="block text-slate-900 dark:text-slate-100">{row.script_name}</strong>
-                <span className="text-[11px] opacity-75">
-                  {row.trade_type ? `${row.trade_type} · ` : ""}
-                  {row.broker}
-                </span>
-              </td>
-              <td className="numeric">{row.quantity ?? "—"}</td>
-              <td className="numeric">{rupees(row.buy_price)}</td>
-              <td className="numeric">{rupees(row.sell_price)}</td>
-              <td className="numeric opacity-50">—</td>
-              <td className={`numeric ${pnlTone(row.gross_pnl)}`}>{rupees(row.gross_pnl, { signed: true })}</td>
-              <td className="numeric opacity-50">—</td>
-              <td className="numeric opacity-50">—</td>
-            </tr>
-          ))}
-        </tbody>
-        <tfoot>
-          <tr className="border-t border-slate-300 dark:border-slate-700 font-semibold">
-            <td colSpan={5}>
-              Day total
-              <span className="block text-[11px] font-normal opacity-75">as {day.broker ?? "the broker"} reports it</span>
-            </td>
-            <td className={`numeric ${pnlTone(figure.gross)}`}>{rupees(figure.gross, { signed: true })}</td>
-            <td className="numeric">{day.broker_charges === null ? "—" : rupees(day.broker_charges)}</td>
-            <td className={`numeric ${pnlTone(figure.net)}`}>
-              {day.broker_net_pnl === null ? "—" : rupees(day.broker_net_pnl, { signed: true })}
-            </td>
-          </tr>
-        </tfoot>
-      </table>
-    </div>
+    <Paged rows={rows}>
+      {(visible) => (
+        <div className="table-scroll">
+          <table className="terminal-table">
+            <thead>
+              <tr>
+                <th>Stock</th>
+                <th>Qty</th>
+                <th>Entry</th>
+                <th>Exit</th>
+                <th>Target</th>
+                <th>Gross</th>
+                <th>Charges</th>
+                <th>Net</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((row, index) => (
+                <tr key={`${row.script_name}-${index}`}>
+                  <td>
+                    <strong className="block text-slate-900 dark:text-slate-100">{row.script_name}</strong>
+                    <span className="text-[11px] opacity-75">
+                      {row.trade_type ? `${row.trade_type} · ` : ""}
+                      {row.broker}
+                    </span>
+                  </td>
+                  <td className="numeric">{row.quantity ?? "—"}</td>
+                  <td className="numeric">{rupees(row.buy_price)}</td>
+                  <td className="numeric">{rupees(row.sell_price)}</td>
+                  <td className="numeric opacity-50">—</td>
+                  <td className={`numeric ${pnlTone(row.gross_pnl)}`}>{rupees(row.gross_pnl, { signed: true })}</td>
+                  <td className="numeric opacity-50">—</td>
+                  <td className="numeric opacity-50">—</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="border-t border-slate-300 dark:border-slate-700 font-semibold">
+                <td colSpan={5}>
+                  Day total
+                  <span className="block text-[11px] font-normal opacity-75">as {day.broker ?? "the broker"} reports it</span>
+                </td>
+                <td className={`numeric ${pnlTone(figure.gross)}`}>{rupees(figure.gross, { signed: true })}</td>
+                <td className="numeric">{day.broker_charges === null ? "—" : rupees(day.broker_charges)}</td>
+                <td className={`numeric ${pnlTone(figure.net)}`}>
+                  {day.broker_net_pnl === null ? "—" : rupees(day.broker_net_pnl, { signed: true })}
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+    </Paged>
   );
 }
 
@@ -473,83 +478,87 @@ function DayDetail({
       ) : day.reconstructed ? (
         <BrokerRowTable day={day} rows={brokerRows} figure={figure} />
       ) : trades.length ? (
-        <div className="table-scroll">
-          <table className="terminal-table">
-            <thead>
-              <tr>
-                <th>Stock</th>
-                <th>Qty</th>
-                <th>Entry</th>
-                <th>Exit</th>
-                <th>Target</th>
-                <th>Gross</th>
-                <th>Charges</th>
-                <th>Net</th>
-              </tr>
-            </thead>
-            <tbody>
-              {trades.map((trade) => (
-                <tr key={trade.position_id}>
-                  <td>
-                    <strong className="block text-slate-900 dark:text-slate-100">{trade.script_name}</strong>
-                    <span className="text-[11px] opacity-75">
-                      {trade.side} · {trade.execution_mode === "LIVE" ? "Live" : "Paper"}
-                      {trade.execution_mode === "LIVE" && trade.price_source === "MODEL" ? " · modelled fills" : ""}
-                      {trade.is_open ? " · still open" : ""}
-                    </span>
-                  </td>
-                  <td className="numeric">{trade.quantity}</td>
-                  <td className="numeric">{rupees(trade.entry_price)}</td>
-                  <td className="numeric">{rupees(trade.exit_price)}</td>
-                  <td className="numeric">{rupees(trade.target_price)}</td>
-                  <td className={`numeric ${pnlTone(trade.gross_pnl)}`}>
-                    {rupees(trade.gross_pnl, { signed: true })}
-                    {trade.slippage !== null && toNumber(trade.slippage) !== 0 && (
-                      <span className="text-[11px] opacity-75">
-                        {rupees(trade.slippage, { signed: true })} vs model
-                      </span>
-                    )}
-                  </td>
-                  <td className="numeric">{rupees(trade.charges)}</td>
-                  <td className={`numeric ${pnlTone(trade.net_pnl)}`}>{rupees(trade.net_pnl, { signed: true })}</td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              {/* The day's totals as the server computed them, not a sum of the
-                  rows above. Adding eight Decimals in a browser is how a total
-                  comes to disagree with the figure the same day shows on the
-                  History screen, and the one that disagrees is always this one.
+        <Paged rows={trades}>
+          {(visible) => (
+            <div className="table-scroll">
+              <table className="terminal-table">
+                <thead>
+                  <tr>
+                    <th>Stock</th>
+                    <th>Qty</th>
+                    <th>Entry</th>
+                    <th>Exit</th>
+                    <th>Target</th>
+                    <th>Gross</th>
+                    <th>Charges</th>
+                    <th>Net</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((trade) => (
+                    <tr key={trade.position_id}>
+                      <td>
+                        <strong className="block text-slate-900 dark:text-slate-100">{trade.script_name}</strong>
+                        <span className="text-[11px] opacity-75">
+                          {trade.side} · {trade.execution_mode === "LIVE" ? "Live" : "Paper"}
+                          {trade.execution_mode === "LIVE" && trade.price_source === "MODEL" ? " · modelled fills" : ""}
+                          {trade.is_open ? " · still open" : ""}
+                        </span>
+                      </td>
+                      <td className="numeric">{trade.quantity}</td>
+                      <td className="numeric">{rupees(trade.entry_price)}</td>
+                      <td className="numeric">{rupees(trade.exit_price)}</td>
+                      <td className="numeric">{rupees(trade.target_price)}</td>
+                      <td className={`numeric ${pnlTone(trade.gross_pnl)}`}>
+                        {rupees(trade.gross_pnl, { signed: true })}
+                        {trade.slippage !== null && toNumber(trade.slippage) !== 0 && (
+                          <span className="text-[11px] opacity-75">
+                            {rupees(trade.slippage, { signed: true })} vs model
+                          </span>
+                        )}
+                      </td>
+                      <td className="numeric">{rupees(trade.charges)}</td>
+                      <td className={`numeric ${pnlTone(trade.net_pnl)}`}>{rupees(trade.net_pnl, { signed: true })}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  {/* The day's totals as the server computed them, not a sum of the
+                      rows above. Adding eight Decimals in a browser is how a total
+                      comes to disagree with the figure the same day shows on the
+                      History screen, and the one that disagrees is always this one.
 
-                  Where the broker has settled the day, its statement is the
-                  total and ours is kept on the line beneath it. The per-trade
-                  columns stay ours in both cases: no broker reports charges per
-                  trade, so splitting the statement across the rows would be
-                  this screen inventing a breakdown nobody published. */}
-              <tr className="border-t border-slate-300 dark:border-slate-700 font-semibold">
-                <td colSpan={5}>
-                  Day total
+                      Where the broker has settled the day, its statement is the
+                      total and ours is kept on the line beneath it. The per-trade
+                      columns stay ours in both cases: no broker reports charges per
+                      trade, so splitting the statement across the rows would be
+                      this screen inventing a breakdown nobody published. */}
+                  <tr className="border-t border-slate-300 dark:border-slate-700 font-semibold">
+                    <td colSpan={5}>
+                      Day total
+                      {statement && (
+                        <span className="block text-[11px] font-normal opacity-75">
+                          as {day.broker ?? "the broker"} reports it
+                        </span>
+                      )}
+                    </td>
+                    <td className={`numeric ${pnlTone(figure.gross)}`}>{rupees(figure.gross, { signed: true })}</td>
+                    <td className="numeric">{rupees(figure.charges)}</td>
+                    <td className={`numeric ${pnlTone(figure.net)}`}>{rupees(figure.net, { signed: true })}</td>
+                  </tr>
                   {statement && (
-                    <span className="block text-[11px] font-normal opacity-75">
-                      as {day.broker ?? "the broker"} reports it
-                    </span>
+                    <tr className="text-slate-500 dark:text-slate-400">
+                      <td colSpan={5}>This system&apos;s own figures</td>
+                      <td className="numeric">{rupees(day.gross_pnl, { signed: true })}</td>
+                      <td className="numeric">{rupees(day.charges)}</td>
+                      <td className="numeric">{rupees(day.net_pnl, { signed: true })}</td>
+                    </tr>
                   )}
-                </td>
-                <td className={`numeric ${pnlTone(figure.gross)}`}>{rupees(figure.gross, { signed: true })}</td>
-                <td className="numeric">{rupees(figure.charges)}</td>
-                <td className={`numeric ${pnlTone(figure.net)}`}>{rupees(figure.net, { signed: true })}</td>
-              </tr>
-              {statement && (
-                <tr className="text-slate-500 dark:text-slate-400">
-                  <td colSpan={5}>This system&apos;s own figures</td>
-                  <td className="numeric">{rupees(day.gross_pnl, { signed: true })}</td>
-                  <td className="numeric">{rupees(day.charges)}</td>
-                  <td className="numeric">{rupees(day.net_pnl, { signed: true })}</td>
-                </tr>
-              )}
-            </tfoot>
-          </table>
-        </div>
+                </tfoot>
+              </table>
+            </div>
+          )}
+        </Paged>
       ) : (
         <p className="p-5 text-sm text-slate-500 dark:text-slate-400">
           The day has a record but no individual trades to list. A day whose only entry is still open, or one recorded

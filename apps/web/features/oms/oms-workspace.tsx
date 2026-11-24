@@ -3,6 +3,7 @@
 import { CheckCircle2, RefreshCw, Route } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { Paged } from "../../components/paged";
 import { api, type OmsOrder, type OmsReconciliation } from "../../components/api";
 import { formatIstTimestamp, formatPrice, titleCase } from "../../lib/formatting";
 import { resolveScriptName } from "../../lib/instruments";
@@ -92,65 +93,69 @@ export function OmsWorkspace({
           </div>
         </div>
         {orders.length ? (
-          <div className="table-scroll">
-            <table className="terminal-table">
-              <thead>
-                <tr>
-                  <th>Script</th>
-                  <th>Instrument</th>
-                  <th>Intent</th>
-                  <th>Venue</th>
-                  <th>Lifecycle</th>
-                  <th>Filled</th>
-                  <th>Updated</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orders.map((item) => {
-                  const script = resolveScriptName(item.instrument_token);
-                  return (
-                    <tr key={item.id}>
-                      <td>
-                        <span className="inline-block rounded bg-emerald-500/15 px-2.5 py-0.5 text-xs font-bold text-emerald-600 dark:text-emerald-300 border border-emerald-500/30">
-                          {script}
-                        </span>
-                      </td>
-                      <td>
-                        <strong className="block font-mono text-slate-900 dark:text-slate-100">
-                          {item.instrument_token}
-                        </strong>
-                        <span className="text-[11px] opacity-75">
-                          {item.side} · {item.quantity}
-                        </span>
-                      </td>
-                      <td className="muted-cell">{item.idempotency_key.slice(0, 28)}</td>
-                      <td>{item.venue}</td>
-                      <td>
-                        <span
-                          className={`status-pill ${
-                            item.status === "FILLED"
-                              ? "status-good"
-                              : item.status === "UNKNOWN"
-                              ? "status-watch"
-                              : "status-watch"
-                          }`}
-                        >
-                          {titleCase(item.status)}
-                        </span>
-                      </td>
-                      <td className="numeric">
-                        {item.filled_quantity}/{item.quantity}
-                        {item.average_fill_price !== null && (
-                          <span> · ₹{formatPrice(item.average_fill_price)}</span>
-                        )}
-                      </td>
-                      <td className="muted-cell">{formatIstTimestamp(item.updated_at)}</td>
+          <Paged rows={orders}>
+            {(visible) => (
+              <div className="table-scroll">
+                <table className="terminal-table">
+                  <thead>
+                    <tr>
+                      <th>Script</th>
+                      <th>Instrument</th>
+                      <th>Intent</th>
+                      <th>Venue</th>
+                      <th>Lifecycle</th>
+                      <th>Filled</th>
+                      <th>Updated</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                  </thead>
+                  <tbody>
+                    {visible.map((item) => {
+                      const script = resolveScriptName(item.instrument_token);
+                      return (
+                        <tr key={item.id}>
+                          <td>
+                            <span className="inline-block rounded bg-emerald-500/15 px-2.5 py-0.5 text-xs font-bold text-emerald-600 dark:text-emerald-300 border border-emerald-500/30">
+                              {script}
+                            </span>
+                          </td>
+                          <td>
+                            <strong className="block font-mono text-slate-900 dark:text-slate-100">
+                              {item.instrument_token}
+                            </strong>
+                            <span className="text-[11px] opacity-75">
+                              {item.side} · {item.quantity}
+                            </span>
+                          </td>
+                          <td className="muted-cell">{item.idempotency_key.slice(0, 28)}</td>
+                          <td>{item.venue}</td>
+                          <td>
+                            <span
+                              className={`status-pill ${
+                                item.status === "FILLED"
+                                  ? "status-good"
+                                  : item.status === "UNKNOWN"
+                                  ? "status-watch"
+                                  : "status-watch"
+                              }`}
+                            >
+                              {titleCase(item.status)}
+                            </span>
+                          </td>
+                          <td className="numeric">
+                            {item.filled_quantity}/{item.quantity}
+                            {item.average_fill_price !== null && (
+                              <span> · ₹{formatPrice(item.average_fill_price)}</span>
+                            )}
+                          </td>
+                          <td className="muted-cell">{formatIstTimestamp(item.updated_at)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Paged>
         ) : (
           <div className="empty-inset m-5 p-8 text-center text-sm text-slate-500 dark:text-slate-400">
             OMS entries appear automatically when the scanner queues a paper entry. They cannot be created for a broker.

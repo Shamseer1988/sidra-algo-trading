@@ -212,7 +212,7 @@ export function StrategyBuilder({
           })}
         </div>
         {catalog && catalog.strategies.length > 0 && (
-          <div className="mt-5 overflow-x-auto border-t border-slate-800 pt-4">
+          <div className="table-scroll mt-5 border-t border-slate-800 pt-4">
             <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Your strategies</p>
             <table className="w-full text-sm">
               <tbody>
