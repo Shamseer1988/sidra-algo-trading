@@ -3,6 +3,7 @@
 import { CloudDownload, Download, FileSpreadsheet, Info, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { Paged } from "../../components/paged";
 import {
   api,
   type HistoryDay,
@@ -320,82 +321,86 @@ function DaysTable({
   if (!days.length) return <p className="mt-6 text-sm text-slate-500">No trading in this range.</p>;
   return (
     <article className="panel mt-4 overflow-hidden">
-      <div className="table-scroll">
-        <table className="terminal-table">
-          <thead>
-            <tr>
-              <th>Session</th>
-              <th>Trades</th>
-              <th>W / L</th>
-              <th>Win rate</th>
-              <th>Gross</th>
-              <th>Charges</th>
-              <th>Net</th>
-              <th>Reconciliation</th>
-              <th>Broker</th>
-              <th>Day ended by</th>
-            </tr>
-          </thead>
-          <tbody>
-            {days.map((day) => (
-              <tr key={day.session_date} className="cursor-pointer" onClick={() => onOpenDay(day.session_date)}>
-                <td>
-                  <strong className="block text-slate-100">{day.session_date}</strong>
-                  {day.live_trades > 0 && <span className="text-[11px] text-amber-300">{day.live_trades} live</span>}
-                </td>
-                <td className="numeric">
-                  {day.trades}
-                  {day.open_trades > 0 && <span className="ml-1 text-[11px] text-slate-500">({day.open_trades} open)</span>}
-                </td>
-                <td className="numeric">
-                  {day.wins} / {day.losses}
-                  {day.scratches > 0 && <span className="ml-1 text-[11px] text-slate-500">+{day.scratches}s</span>}
-                </td>
-                <td className="numeric">{day.win_rate_percent ? percent(day.win_rate_percent) : "—"}</td>
-                <td>
-                  <Money value={day.gross_pnl} signed />
-                </td>
-                <td className="numeric text-slate-400">{rupees(day.charges)}</td>
-                <td>
-                  <strong>
-                    <Money value={day.net_pnl} signed />
-                  </strong>
-                  {day.broker_realized_pnl !== null && (
-                    // Both figures, never one replacing the other.
-                    <span className="block text-[11px] text-slate-500">
-                      {day.broker}: {rupees(day.broker_realized_pnl, { signed: true })} realised
-                    </span>
-                  )}
-                </td>
-                <td>
-                  <ReconciliationPill
-                    status={day.reconciliation}
-                    label={day.reconciliation_label}
-                    title={day.reconciliation_note}
-                  />
-                </td>
-                <td onClick={(event) => event.stopPropagation()}>
-                  {day.live_trades > 0 && canOperate ? (
-                    <button
-                      className="secondary-button whitespace-nowrap px-2 py-1 text-xs"
-                      disabled={fetching === day.session_date}
-                      onClick={() => onFetchBroker(day.session_date)}
-                    >
-                      <CloudDownload className={`h-3.5 w-3.5 ${fetching === day.session_date ? "animate-pulse" : ""}`} />
-                      {day.broker_fetched_at ? "Re-fetch" : "Fetch"}
-                    </button>
-                  ) : (
-                    // A paper day has nothing at a broker to ask about, so the
-                    // button would only ever return an empty report.
-                    <span className="muted-cell text-xs">—</span>
-                  )}
-                </td>
-                <td className="muted-cell text-xs">{day.halt_reason ?? "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <Paged rows={days}>
+        {(visible) => (
+          <div className="table-scroll">
+            <table className="terminal-table">
+              <thead>
+                <tr>
+                  <th>Session</th>
+                  <th>Trades</th>
+                  <th>W / L</th>
+                  <th>Win rate</th>
+                  <th>Gross</th>
+                  <th>Charges</th>
+                  <th>Net</th>
+                  <th>Reconciliation</th>
+                  <th>Broker</th>
+                  <th>Day ended by</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visible.map((day) => (
+                  <tr key={day.session_date} className="cursor-pointer" onClick={() => onOpenDay(day.session_date)}>
+                    <td>
+                      <strong className="block text-slate-100">{day.session_date}</strong>
+                      {day.live_trades > 0 && <span className="text-[11px] text-amber-300">{day.live_trades} live</span>}
+                    </td>
+                    <td className="numeric">
+                      {day.trades}
+                      {day.open_trades > 0 && <span className="ml-1 text-[11px] text-slate-500">({day.open_trades} open)</span>}
+                    </td>
+                    <td className="numeric">
+                      {day.wins} / {day.losses}
+                      {day.scratches > 0 && <span className="ml-1 text-[11px] text-slate-500">+{day.scratches}s</span>}
+                    </td>
+                    <td className="numeric">{day.win_rate_percent ? percent(day.win_rate_percent) : "—"}</td>
+                    <td>
+                      <Money value={day.gross_pnl} signed />
+                    </td>
+                    <td className="numeric text-slate-400">{rupees(day.charges)}</td>
+                    <td>
+                      <strong>
+                        <Money value={day.net_pnl} signed />
+                      </strong>
+                      {day.broker_realized_pnl !== null && (
+                        // Both figures, never one replacing the other.
+                        <span className="block text-[11px] text-slate-500">
+                          {day.broker}: {rupees(day.broker_realized_pnl, { signed: true })} realised
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      <ReconciliationPill
+                        status={day.reconciliation}
+                        label={day.reconciliation_label}
+                        title={day.reconciliation_note}
+                      />
+                    </td>
+                    <td onClick={(event) => event.stopPropagation()}>
+                      {day.live_trades > 0 && canOperate ? (
+                        <button
+                          className="secondary-button whitespace-nowrap px-2 py-1 text-xs"
+                          disabled={fetching === day.session_date}
+                          onClick={() => onFetchBroker(day.session_date)}
+                        >
+                          <CloudDownload className={`h-3.5 w-3.5 ${fetching === day.session_date ? "animate-pulse" : ""}`} />
+                          {day.broker_fetched_at ? "Re-fetch" : "Fetch"}
+                        </button>
+                      ) : (
+                        // A paper day has nothing at a broker to ask about, so the
+                        // button would only ever return an empty report.
+                        <span className="muted-cell text-xs">—</span>
+                      )}
+                    </td>
+                    <td className="muted-cell text-xs">{day.halt_reason ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Paged>
     </article>
   );
 }
@@ -413,68 +418,72 @@ function TradesTable({
   if (!trades.length) return <p className="mt-6 text-sm text-slate-500">No trades in this range.</p>;
   return (
     <article className="panel mt-4 overflow-hidden">
-      <div className="table-scroll">
-        <table className="terminal-table">
-          <thead>
-            <tr>
-              <th>Session</th>
-              <th>Instrument</th>
-              <th>Strategy</th>
-              <th>Qty</th>
-              <th>Entry → exit</th>
-              <th>Gross</th>
-              <th>Charges</th>
-              <th>Net</th>
-              <th>R</th>
-              <th>Reconciliation</th>
-            </tr>
-          </thead>
-          <tbody>
-            {trades.map((trade) => {
-              const r = toNumber(trade.r_multiple);
-              return (
-                <tr key={trade.position_id} className="cursor-pointer" onClick={() => onOpen(trade.position_id)}>
-                  <td>
-                    <strong className="block text-slate-100">{trade.session_date}</strong>
-                    <span className="text-[11px] text-slate-500">{formatIstTimestamp(trade.opened_at)}</span>
-                  </td>
-                  <td>
-                    <strong className="block text-slate-100">{trade.script_name}</strong>
-                    <span className="text-[11px] text-slate-500">
-                      {trade.side} · {trade.execution_mode === "LIVE" ? "Live" : "Paper"}
-                      {trade.is_open ? " · open" : ""}
-                    </span>
-                  </td>
-                  <td className="text-xs" title={trade.strategy_version}>{strategyLabel(trade.strategy_version)}</td>
-                  <td className="numeric">{trade.quantity}</td>
-                  <td className="numeric text-xs">
-                    {trade.entry_price ?? "—"} → {trade.exit_price ?? "—"}
-                  </td>
-                  <td>
-                    <Money value={trade.gross_pnl} signed />
-                  </td>
-                  <td className="numeric text-slate-400">{rupees(trade.charges)}</td>
-                  <td>
-                    <strong>
-                      <Money value={trade.net_pnl} signed />
-                    </strong>
-                  </td>
-                  <td className={`numeric ${r === null ? "text-slate-500" : r >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
-                    {r === null ? "open" : `${r.toFixed(2)}R`}
-                  </td>
-                  <td>
-                    <ReconciliationPill
-                      status={trade.reconciliation}
-                      label={trade.reconciliation_label}
-                      title={trade.reconciliation_note}
-                    />
-                  </td>
+      <Paged rows={trades}>
+        {(visible) => (
+          <div className="table-scroll">
+            <table className="terminal-table">
+              <thead>
+                <tr>
+                  <th>Session</th>
+                  <th>Instrument</th>
+                  <th>Strategy</th>
+                  <th>Qty</th>
+                  <th>Entry → exit</th>
+                  <th>Gross</th>
+                  <th>Charges</th>
+                  <th>Net</th>
+                  <th>R</th>
+                  <th>Reconciliation</th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+              </thead>
+              <tbody>
+                {visible.map((trade) => {
+                  const r = toNumber(trade.r_multiple);
+                  return (
+                    <tr key={trade.position_id} className="cursor-pointer" onClick={() => onOpen(trade.position_id)}>
+                      <td>
+                        <strong className="block text-slate-100">{trade.session_date}</strong>
+                        <span className="text-[11px] text-slate-500">{formatIstTimestamp(trade.opened_at)}</span>
+                      </td>
+                      <td>
+                        <strong className="block text-slate-100">{trade.script_name}</strong>
+                        <span className="text-[11px] text-slate-500">
+                          {trade.side} · {trade.execution_mode === "LIVE" ? "Live" : "Paper"}
+                          {trade.is_open ? " · open" : ""}
+                        </span>
+                      </td>
+                      <td className="text-xs" title={trade.strategy_version}>{strategyLabel(trade.strategy_version)}</td>
+                      <td className="numeric">{trade.quantity}</td>
+                      <td className="numeric text-xs">
+                        {trade.entry_price ?? "—"} → {trade.exit_price ?? "—"}
+                      </td>
+                      <td>
+                        <Money value={trade.gross_pnl} signed />
+                      </td>
+                      <td className="numeric text-slate-400">{rupees(trade.charges)}</td>
+                      <td>
+                        <strong>
+                          <Money value={trade.net_pnl} signed />
+                        </strong>
+                      </td>
+                      <td className={`numeric ${r === null ? "text-slate-500" : r >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+                        {r === null ? "open" : `${r.toFixed(2)}R`}
+                      </td>
+                      <td>
+                        <ReconciliationPill
+                          status={trade.reconciliation}
+                          label={trade.reconciliation_label}
+                          title={trade.reconciliation_note}
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Paged>
     </article>
   );
 }

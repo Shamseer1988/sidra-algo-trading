@@ -3,6 +3,7 @@
 import { Database, FlaskConical, Play, Plus, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { Paged } from "../../components/paged";
 import {
   api,
   type CorporateEvent,
@@ -348,74 +349,82 @@ export function SwingDataPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMes
               {coverage.minimum_sessions} sessions: a recently listed share the strategies cannot use yet.
             </p>
             {coverage.shares.length > 0 && (
-              <div className="table-scroll mt-3">
-                <table className="terminal-table">
-                  <thead>
-                    <tr>
-                      <th>Share</th>
-                      <th>Status</th>
-                      <th>Sessions</th>
-                      <th>First</th>
-                      <th>Missing days</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {coverage.shares.map((share) => (
-                      <tr key={share.instrument_token}>
-                        <td>{share.symbol}</td>
-                        <td>{share.status}</td>
-                        <td className="numeric">{share.sessions}</td>
-                        <td>{share.first ?? "—"}</td>
-                        <td className="numeric">{share.missing}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <Paged rows={coverage.shares}>
+                {(visible) => (
+                  <div className="table-scroll mt-3">
+                    <table className="terminal-table">
+                      <thead>
+                        <tr>
+                          <th>Share</th>
+                          <th>Status</th>
+                          <th>Sessions</th>
+                          <th>First</th>
+                          <th>Missing days</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {visible.map((share) => (
+                          <tr key={share.instrument_token}>
+                            <td>{share.symbol}</td>
+                            <td>{share.status}</td>
+                            <td className="numeric">{share.sessions}</td>
+                            <td>{share.first ?? "—"}</td>
+                            <td className="numeric">{share.missing}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Paged>
             )}
             <h4 className="mt-5 text-sm font-semibold text-white">Drops that look like a split, bonus or demerger</h4>
             {coverage.suspects.length === 0 ? (
               <p className="mt-1 text-sm text-slate-500">None found.</p>
             ) : (
-              <div className="table-scroll mt-2">
-                <table className="terminal-table">
-                  <thead>
-                    <tr>
-                      <th>Share</th>
-                      <th>Date</th>
-                      <th>Close → next open</th>
-                      <th>Drop</th>
-                      <th>Status</th>
-                      <th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {coverage.suspects.map((item) => (
-                      <tr key={`${item.instrument_token}-${item.ex_date}`} data-testid={`suspect-${item.symbol}`}>
-                        <td>{item.symbol}</td>
-                        <td>{item.ex_date}</td>
-                        <td className="numeric">
-                          {item.previous_close} → {item.open}
-                        </td>
-                        <td className="numeric">×{item.jump}</td>
-                        <td>{item.confirmed ? <span className="status-pill status-good">Recorded</span> : <span className="status-pill status-watch">Not checked</span>}</td>
-                        <td>
-                          {isAdmin && !item.confirmed && (
-                            <button
-                              className="secondary-button px-2 py-1 text-xs"
-                              onClick={() =>
-                                setForm({ symbol: item.symbol, event_type: "SPLIT", ex_date: item.ex_date, price_factor: String(item.jump), amount: "", note: "" })
-                              }
-                            >
-                              Review
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <Paged rows={coverage.suspects}>
+                {(visible) => (
+                  <div className="table-scroll mt-2">
+                    <table className="terminal-table">
+                      <thead>
+                        <tr>
+                          <th>Share</th>
+                          <th>Date</th>
+                          <th>Close → next open</th>
+                          <th>Drop</th>
+                          <th>Status</th>
+                          <th />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {visible.map((item) => (
+                          <tr key={`${item.instrument_token}-${item.ex_date}`} data-testid={`suspect-${item.symbol}`}>
+                            <td>{item.symbol}</td>
+                            <td>{item.ex_date}</td>
+                            <td className="numeric">
+                              {item.previous_close} → {item.open}
+                            </td>
+                            <td className="numeric">×{item.jump}</td>
+                            <td>{item.confirmed ? <span className="status-pill status-good">Recorded</span> : <span className="status-pill status-watch">Not checked</span>}</td>
+                            <td>
+                              {isAdmin && !item.confirmed && (
+                                <button
+                                  className="secondary-button px-2 py-1 text-xs"
+                                  onClick={() =>
+                                    setForm({ symbol: item.symbol, event_type: "SPLIT", ex_date: item.ex_date, price_factor: String(item.jump), amount: "", note: "" })
+                                  }
+                                >
+                                  Review
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Paged>
             )}
             <p className="mt-2 text-xs leading-5 text-slate-500">
               A suspected drop is a question, not an answer: it changes nothing until you check the company&apos;s announcement
@@ -480,38 +489,42 @@ export function SwingDataPanel({ isAdmin, onMessage }: { isAdmin: boolean; onMes
         {events.length === 0 ? (
           <p className="mt-4 text-sm text-slate-500">None recorded.</p>
         ) : (
-          <div className="table-scroll mt-4">
-            <table className="terminal-table">
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Share</th>
-                  <th>Type</th>
-                  <th>Factor / amount</th>
-                  <th>Note</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {events.map((item) => (
-                  <tr key={item.id}>
-                    <td>{item.ex_date}</td>
-                    <td>{item.symbol}</td>
-                    <td>{item.event_type}</td>
-                    <td className="numeric">{item.price_factor ? `÷${item.price_factor}` : item.amount ? `₹${item.amount}` : "—"}</td>
-                    <td>{item.note ?? ""}</td>
-                    <td>
-                      {isAdmin && (
-                        <button className="secondary-button px-2 py-1 text-xs" aria-label={`Remove ${item.symbol} ${item.event_type}`} onClick={() => void removeEvent(item)}>
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <Paged rows={events}>
+            {(visible) => (
+              <div className="table-scroll mt-4">
+                <table className="terminal-table">
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Share</th>
+                      <th>Type</th>
+                      <th>Factor / amount</th>
+                      <th>Note</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visible.map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.ex_date}</td>
+                        <td>{item.symbol}</td>
+                        <td>{item.event_type}</td>
+                        <td className="numeric">{item.price_factor ? `÷${item.price_factor}` : item.amount ? `₹${item.amount}` : "—"}</td>
+                        <td>{item.note ?? ""}</td>
+                        <td>
+                          {isAdmin && (
+                            <button className="secondary-button px-2 py-1 text-xs" aria-label={`Remove ${item.symbol} ${item.event_type}`} onClick={() => void removeEvent(item)}>
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Paged>
         )}
       </article>
     </div>

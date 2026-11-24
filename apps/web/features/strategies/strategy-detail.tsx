@@ -3,6 +3,7 @@
 import { AlertTriangle, ArrowLeft, Clock, FlaskConical, History, Target } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { Paged } from "../../components/paged";
 import { api, type StrategyDetail, type StrategyEvidence } from "../../components/api";
 import { formatIstTimestamp } from "../../lib/formatting";
 import { Money, rupees } from "../history/money";
@@ -240,28 +241,32 @@ function VersionHistory({ detail }: { detail: StrategyDetail }) {
       </div>
       <h3 className="mt-1 text-base font-semibold text-white">Version history</h3>
       {detail.version_history.length ? (
-        <div className="table-scroll mt-4">
-          <table className="terminal-table">
-            <thead>
-              <tr>
-                <th>Saved</th>
-                <th>Version</th>
-                <th>Changed</th>
-                <th>Loosened</th>
-              </tr>
-            </thead>
-            <tbody>
-              {detail.version_history.map((change) => (
-                <tr key={`${change.at}-${change.version}`}>
-                  <td className="muted-cell text-xs">{formatIstTimestamp(change.at)}</td>
-                  <td className="numeric">v{change.version}</td>
-                  <td className="text-xs">{change.changed_keys.join(", ")}</td>
-                  <td className="text-xs text-amber-300">{change.risk_increased.join(", ") || "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Paged rows={detail.version_history}>
+          {(visible) => (
+            <div className="table-scroll mt-4">
+              <table className="terminal-table">
+                <thead>
+                  <tr>
+                    <th>Saved</th>
+                    <th>Version</th>
+                    <th>Changed</th>
+                    <th>Loosened</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((change) => (
+                    <tr key={`${change.at}-${change.version}`}>
+                      <td className="muted-cell text-xs">{formatIstTimestamp(change.at)}</td>
+                      <td className="numeric">v{change.version}</td>
+                      <td className="text-xs">{change.changed_keys.join(", ")}</td>
+                      <td className="text-xs text-amber-300">{change.risk_increased.join(", ") || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Paged>
       ) : (
         <p className="mt-4 text-sm text-slate-500">
           No saved changes recorded yet. History starts from the first save made after versioning was added, so a
@@ -278,37 +283,41 @@ function RecentSignals({ detail }: { detail: StrategyDetail }) {
       <p className="eyebrow">What it has been finding</p>
       <h3 className="mt-1 text-base font-semibold text-white">Recent signals</h3>
       {detail.recent_signals.length ? (
-        <div className="table-scroll mt-4">
-          <table className="terminal-table">
-            <thead>
-              <tr>
-                <th>Session</th>
-                <th>Instrument</th>
-                <th>Side</th>
-                <th>Score</th>
-                <th>Entry → stop / target</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {detail.recent_signals.map((signal) => (
-                <tr key={signal.id}>
-                  <td>
-                    <strong className="block text-slate-100">{signal.session_date}</strong>
-                    <span className="text-[11px] text-slate-500">{formatIstTimestamp(signal.created_at)}</span>
-                  </td>
-                  <td className="muted-cell text-xs">{signal.instrument_token}</td>
-                  <td>{signal.side}</td>
-                  <td className="numeric">{signal.score}</td>
-                  <td className="numeric text-xs">
-                    {signal.entry_price} → {signal.stop_price} / {signal.target_price}
-                  </td>
-                  <td className="text-xs">{signal.status.replaceAll("_", " ").toLowerCase()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Paged rows={detail.recent_signals}>
+          {(visible) => (
+            <div className="table-scroll mt-4">
+              <table className="terminal-table">
+                <thead>
+                  <tr>
+                    <th>Session</th>
+                    <th>Instrument</th>
+                    <th>Side</th>
+                    <th>Score</th>
+                    <th>Entry → stop / target</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((signal) => (
+                    <tr key={signal.id}>
+                      <td>
+                        <strong className="block text-slate-100">{signal.session_date}</strong>
+                        <span className="text-[11px] text-slate-500">{formatIstTimestamp(signal.created_at)}</span>
+                      </td>
+                      <td className="muted-cell text-xs">{signal.instrument_token}</td>
+                      <td>{signal.side}</td>
+                      <td className="numeric">{signal.score}</td>
+                      <td className="numeric text-xs">
+                        {signal.entry_price} → {signal.stop_price} / {signal.target_price}
+                      </td>
+                      <td className="text-xs">{signal.status.replaceAll("_", " ").toLowerCase()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Paged>
       ) : (
         <p className="mt-4 text-sm text-slate-500">
           This version has produced no signals. A strategy that is enabled and silent is a different situation from

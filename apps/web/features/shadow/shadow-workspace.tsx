@@ -3,6 +3,7 @@
 import { Ghost, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { Paged } from "../../components/paged";
 import { api, type ShadowOrder, type ShadowSummary } from "../../components/api";
 import { formatIstTimestamp, formatPrice, titleCase } from "../../lib/formatting";
 import { resolveScriptName } from "../../lib/instruments";
@@ -68,56 +69,60 @@ export function ShadowWorkspace() {
           </div>
         </div>
         {orders.length ? (
-          <div className="table-scroll">
-            <table className="terminal-table">
-              <thead>
-                <tr>
-                  <th>Script</th>
-                  <th>Instrument</th>
-                  <th>Intended</th>
-                  <th>Paper fill</th>
-                  <th>Delta</th>
-                  <th>Status</th>
-                  <th>Observed</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orders.map((item) => {
-                  const script = resolveScriptName(item.instrument_token);
-                  return (
-                    <tr key={item.id}>
-                      <td>
-                        <span className="inline-block rounded bg-emerald-500/15 px-2.5 py-0.5 text-xs font-bold text-emerald-600 dark:text-emerald-300 border border-emerald-500/30">
-                          {script}
-                        </span>
-                      </td>
-                      <td>
-                        <strong className="block font-mono text-slate-900 dark:text-slate-100">
-                          {item.instrument_token}
-                        </strong>
-                        <span className="text-[11px] opacity-75">
-                          {item.side} · {item.intended_quantity}
-                        </span>
-                      </td>
-                      <td className="numeric">₹{formatPrice(item.intended_price)}</td>
-                      <td className="numeric">
-                        {item.paper_fill_price === null ? "—" : `₹${formatPrice(item.paper_fill_price)}`}
-                      </td>
-                      <td className="numeric">
-                        {item.price_delta === null ? "—" : `₹${formatPrice(item.price_delta)}`}
-                      </td>
-                      <td>
-                        <span className="status-pill status-watch">
-                          {titleCase(item.comparison_status)}
-                        </span>
-                      </td>
-                      <td className="muted-cell">{formatIstTimestamp(item.observed_at)}</td>
+          <Paged rows={orders}>
+            {(visible) => (
+              <div className="table-scroll">
+                <table className="terminal-table">
+                  <thead>
+                    <tr>
+                      <th>Script</th>
+                      <th>Instrument</th>
+                      <th>Intended</th>
+                      <th>Paper fill</th>
+                      <th>Delta</th>
+                      <th>Status</th>
+                      <th>Observed</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                  </thead>
+                  <tbody>
+                    {visible.map((item) => {
+                      const script = resolveScriptName(item.instrument_token);
+                      return (
+                        <tr key={item.id}>
+                          <td>
+                            <span className="inline-block rounded bg-emerald-500/15 px-2.5 py-0.5 text-xs font-bold text-emerald-600 dark:text-emerald-300 border border-emerald-500/30">
+                              {script}
+                            </span>
+                          </td>
+                          <td>
+                            <strong className="block font-mono text-slate-900 dark:text-slate-100">
+                              {item.instrument_token}
+                            </strong>
+                            <span className="text-[11px] opacity-75">
+                              {item.side} · {item.intended_quantity}
+                            </span>
+                          </td>
+                          <td className="numeric">₹{formatPrice(item.intended_price)}</td>
+                          <td className="numeric">
+                            {item.paper_fill_price === null ? "—" : `₹${formatPrice(item.paper_fill_price)}`}
+                          </td>
+                          <td className="numeric">
+                            {item.price_delta === null ? "—" : `₹${formatPrice(item.price_delta)}`}
+                          </td>
+                          <td>
+                            <span className="status-pill status-watch">
+                              {titleCase(item.comparison_status)}
+                            </span>
+                          </td>
+                          <td className="muted-cell">{formatIstTimestamp(item.observed_at)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Paged>
         ) : (
           <div className="empty-inset m-5 p-8 text-center text-sm text-slate-500 dark:text-slate-400">
             Shadow records appear automatically from real scanner inputs after the paper OMS queues an entry.

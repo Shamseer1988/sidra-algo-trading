@@ -1,11 +1,13 @@
 "use client";
 
-import { DatabaseZap, RefreshCw } from "lucide-react";
+import { RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { api, type UniverseEntry, type UniverseSummary } from "../../components/api";
+import { Paged } from "../../components/paged";
 import { formatIstTimestamp } from "../../lib/formatting";
 
+/** Which shares the scanner may trade, and why each of the others may not. */
 export function UniverseWorkspace({
   canOperate,
   onMessage,
@@ -15,29 +17,46 @@ export function UniverseWorkspace({
 }) {
   const [entries, setEntries] = useState<UniverseEntry[]>([]);
   const [summary, setSummary] = useState<UniverseSummary | null>(null);
+  const [earlier, setEarlier] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [show, setShow] = useState<"selected" | "spare" | "out">("selected");
+  const [search, setSearch] = useState("");
 
-  const load = useCallback(() => {
+  const load = useCallback(async () => {
     setLoading(true);
-    Promise.all([api.universe(), api.universeSummary()])
-      .then(([rows, meta]) => {
+    try {
+      const [rows, meta] = await Promise.all([api.universe(), api.universeSummary()]);
+      if (rows.length) {
         setEntries(rows);
         setSummary(meta);
-      })
-      .catch((error: unknown) => onMessage(error instanceof Error ? error.message : "Could not load the scan universe"))
-      .finally(() => setLoading(false));
+        setEarlier(false);
+        return;
+      }
+      // Nothing built today (a holiday, or before 9:16 AM): show the last scanned day's list instead of a blank.
+      const date = (await api.scannerDay().catch(() => null))?.sessions[0];
+      const [oldRows, oldMeta] = date
+        ? await Promise.all([api.universe(date), api.universeSummary(date)])
+        : [rows, meta];
+      setEntries(oldRows);
+      setSummary(oldMeta);
+      setEarlier(oldRows.length > 0);
+    } catch (error) {
+      onMessage(error instanceof Error ? error.message : "Could not load the scan universe");
+    } finally {
+      setLoading(false);
+    }
   }, [onMessage]);
 
   useEffect(() => {
-    load();
+    void load();
   }, [load]);
 
   const rebuild = async () => {
     setRefreshing(true);
     try {
-      setSummary(await api.refreshUniverse());
-      setEntries(await api.universe());
+      await api.refreshUniverse();
+      await load();
       onMessage("Scan universe rebuilt.");
     } catch (error) {
       onMessage(error instanceof Error ? error.message : "Could not rebuild the scan universe");
@@ -46,116 +65,196 @@ export function UniverseWorkspace({
     }
   };
 
-  const selected = entries.filter((entry) => entry.selected);
-  const rejected = entries.filter((entry) => !entry.eligible);
+  const groups = {
+    selected: entries.filter((entry) => entry.selected),
+    spare: entries.filter((entry) => entry.eligible && !entry.selected),
+    out: entries.filter((entry) => !entry.eligible),
+  };
+  const wanted = search.trim().toLowerCase();
+  const rows = groups[show].filter(
+    (entry) =>
+      !wanted || entry.script_name.toLowerCase().includes(wanted) || entry.instrument_token.toLowerCase().includes(wanted),
+  );
 
   return (
     <section>
       <div className="page-toolbar">
         <div>
-          <p className="eyebrow">Daily stock selection</p>
+          <p className="eyebrow">Which shares may trade</p>
           <h2 className="page-title">Scan universe</h2>
           <p className="page-copy">
-            A pre-open ranking of the streamed instruments by liquidity, volatility, gap and momentum. When the universe
-            is enabled the scanner only generates signals for the selected names.
+            Before the first entry each morning, the watchlist is ranked and the shares that fit your limits are chosen.
+            {summary && !summary.enabled
+              ? " The ranking is off, so this is for information and the whole watchlist is scanned."
+              : " Only the chosen shares can give a signal."}
           </p>
         </div>
-        {canOperate && (
-          <button className="secondary-button" onClick={() => void rebuild()} disabled={refreshing}>
-            <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-            Rebuild now
+        <div className="flex flex-wrap gap-2">
+          <button className="secondary-button" onClick={() => void load()} disabled={loading}>
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            Refresh
           </button>
-        )}
+          {canOperate && (
+            <button className="secondary-button" onClick={() => void rebuild()} disabled={refreshing}>
+              Rebuild now
+            </button>
+          )}
+        </div>
       </div>
 
-      {summary && (
-        <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <Stat label="Status" value={summary.enabled ? "Enabled" : "Advisory only"} />
-          <Stat label="Selected / size" value={`${summary.selected} / ${summary.universe_size}`} />
-          <Stat label="Eligible candidates" value={`${summary.eligible} / ${summary.total_candidates}`} />
-          <Stat
-            label="Last built"
-            value={summary.last_built_at ? formatIstTimestamp(summary.last_built_at) : "Not built today"}
-          />
-        </div>
+      {earlier && summary && (
+        <p role="status" className="glass-notice mt-5 rounded-md p-4 text-sm" style={{ color: "var(--text-body)" }}>
+          No list has been built today. This is the one from {summary.session_date}.
+        </p>
       )}
 
-      {loading ? (
-        <div className="panel mt-6 p-9 text-center text-sm text-slate-500">Loading the scan universe…</div>
+      {summary && (
+        <dl className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <Stat label="Chosen" value={`${summary.selected} of ${summary.universe_size}`} note="shares allowed to signal" />
+          <Stat label="Fit your limits" value={String(summary.eligible)} note={`of ${summary.total_candidates} on the watchlist`} />
+          <Stat label="Left out" value={String(groups.out.length)} note="the reason is listed for each" />
+          <Stat
+            label="Built"
+            value={summary.last_built_at ? formatIstTimestamp(summary.last_built_at) : "Not built yet"}
+            note={summary.enabled ? "ranking is on" : "ranking is off"}
+          />
+        </dl>
+      )}
+
+      {loading && !entries.length ? (
+        <div className="skeleton mt-6 h-40" />
       ) : !entries.length ? (
-        <article className="panel mt-6 p-9 text-center">
-          <DatabaseZap className="mx-auto h-7 w-7 text-slate-600" />
-          <h3 className="mt-4 font-medium text-white">No universe for this session yet</h3>
-          <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-500">
-            The universe is built after {summary ? "the configured pre-open time" : "market open"} once daily candle
-            history is available, or immediately with “Rebuild now”.
-          </p>
-        </article>
+        <p className="panel mt-6 p-8 text-center text-sm" style={{ color: "var(--muted)" }}>
+          No list has been built yet. It is built before the first entry of a trading day.
+        </p>
       ) : (
-        <>
-          <UniverseTable title={`Selected (${selected.length})`} rows={selected.length ? selected : entries.slice(0, 30)} />
-          {rejected.length > 0 && <UniverseTable title={`Screened out (${rejected.length})`} rows={rejected} muted />}
-        </>
+        <article className="panel mt-6 overflow-hidden">
+          <div className="flex flex-wrap items-center gap-3 px-5 py-4">
+            <div role="group" aria-label="Which shares" className="flex flex-wrap gap-2">
+              {([
+                ["selected", "Chosen"],
+                ["spare", "Fit, not chosen"],
+                ["out", "Left out"],
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={show === value}
+                  className={`${show === value ? "primary-button" : "secondary-button"} px-3 py-2 text-xs`}
+                  onClick={() => setShow(value)}
+                >
+                  {label} ({groups[value].length})
+                </button>
+              ))}
+            </div>
+            <label className="relative min-w-[12rem] flex-1 sm:max-w-xs">
+              <Search className="absolute left-3 top-3 h-4 w-4" style={{ color: "var(--muted)" }} />
+              <span className="sr-only">Find a share</span>
+              <input
+                className="field-input pl-9"
+                placeholder="Find a share"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </label>
+          </div>
+          {rows.length ? (
+            <Paged key={show} rows={rows} label="shares">
+              {(visible) => (
+                <div className="table-scroll">{show === "out" ? <LeftOut rows={visible} /> : <Ranked rows={visible} />}</div>
+              )}
+            </Paged>
+          ) : (
+            <p className="p-6 text-sm" style={{ color: "var(--muted)" }}>
+              No share here.
+            </p>
+          )}
+          {show !== "out" && (
+            <p className="px-5 py-3 text-xs" style={{ color: "var(--muted)" }}>
+              Each score is out of 100. Liquidity: daily turnover compared with the other shares. Movement: how close its
+              usual daily move is to the preferred range. Gap: the opening gap, small to medium scoring best. Trend: how
+              far it moved over the last five sessions, up or down.
+            </p>
+          )}
+        </article>
       )}
     </section>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({ label, value, note }: { label: string; value: string; note: string }) {
   return (
-    <article className="glass-inset rounded-md p-4">
-      <p className="text-[11px] font-semibold uppercase tracking-[.16em] text-slate-500">{label}</p>
-      <p className="mt-2 truncate text-lg font-semibold text-white">{value}</p>
-    </article>
+    <div className="panel p-5">
+      <dt className="text-xs" style={{ color: "var(--muted)" }}>
+        {label}
+      </dt>
+      <dd className="mt-1 text-xl font-semibold" style={{ color: "var(--foreground)" }}>
+        {value}
+      </dd>
+      <dd className="mt-1 text-xs" style={{ color: "var(--muted)" }}>
+        {note}
+      </dd>
+    </div>
   );
 }
 
-function UniverseTable({ title, rows, muted = false }: { title: string; rows: UniverseEntry[]; muted?: boolean }) {
+function Ranked({ rows }: { rows: UniverseEntry[] }) {
+  const percent = (value: number | undefined) => (value === undefined ? "—" : `${value.toFixed(2)}%`);
   return (
-    <article className="panel mt-6 overflow-hidden border border-slate-800">
-      <p className="border-b border-slate-800 px-4 py-3 text-xs font-semibold uppercase tracking-[.16em] text-slate-500">
-        {title}
-      </p>
-      <div className="table-scroll">
-        <table className="terminal-table">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Script</th>
-              <th>Instrument</th>
-              <th>Score</th>
-              <th>Liquidity</th>
-              <th>Volatility</th>
-              <th>Gap</th>
-              <th>Trend</th>
-              <th>{muted ? "Reason" : "ATR %"}</th>
-              <th>{muted ? "" : "Gap %"}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((entry) => (
-              <tr key={entry.instrument_token} className={muted ? "opacity-70" : ""}>
-                <td className="numeric">{entry.rank}</td>
-                <td>
-                  <span className="inline-block rounded bg-emerald-500/10 px-2 py-0.5 text-xs font-bold text-emerald-300 border border-emerald-500/20">
-                    {entry.script_name}
-                  </span>
-                </td>
-                <td className="font-mono text-slate-300">{entry.instrument_token}</td>
-                <td className="numeric font-mono">{muted ? "—" : entry.score.toFixed(1)}</td>
-                <td className="numeric">{muted ? "—" : entry.liquidity_score.toFixed(0)}</td>
-                <td className="numeric">{muted ? "—" : entry.volatility_score.toFixed(0)}</td>
-                <td className="numeric">{muted ? "—" : entry.gap_score.toFixed(0)}</td>
-                <td className="numeric">{muted ? "—" : entry.trend_score.toFixed(0)}</td>
-                <td className={muted ? "muted-cell" : "numeric"}>
-                  {muted ? entry.rejection_reason : (entry.metrics.atr_percent ?? 0).toFixed(2)}
-                </td>
-                <td className="numeric">{muted ? "" : (entry.metrics.gap_percent ?? 0).toFixed(2)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </article>
+    <table className="terminal-table" aria-label="Ranked shares">
+      <thead>
+        <tr>
+          <th>Rank</th>
+          <th>Share</th>
+          <th>Score</th>
+          <th>Liquidity</th>
+          <th>Movement</th>
+          <th>Gap</th>
+          <th>Trend</th>
+          <th>Usual daily move</th>
+          <th>Opening gap</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((entry) => (
+          <tr key={entry.instrument_token}>
+            <td className="numeric">{entry.rank}</td>
+            <td>
+              <strong title={entry.instrument_token}>{entry.script_name}</strong>
+            </td>
+            <td className="numeric">{entry.score.toFixed(1)}</td>
+            <td className="numeric">{entry.liquidity_score.toFixed(0)}</td>
+            <td className="numeric">{entry.volatility_score.toFixed(0)}</td>
+            <td className="numeric">{entry.gap_score.toFixed(0)}</td>
+            <td className="numeric">{entry.trend_score.toFixed(0)}</td>
+            <td className="numeric">{percent(entry.metrics.atr_percent)}</td>
+            <td className="numeric">{percent(entry.metrics.gap_percent)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function LeftOut({ rows }: { rows: UniverseEntry[] }) {
+  return (
+    <table className="terminal-table" aria-label="Shares left out">
+      <thead>
+        <tr>
+          <th>Share</th>
+          <th>Why it was left out</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((entry) => (
+          <tr key={entry.instrument_token}>
+            <td>
+              <strong title={entry.instrument_token}>{entry.script_name}</strong>
+            </td>
+            <td>{entry.rejection_reason ?? "No reason recorded"}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }

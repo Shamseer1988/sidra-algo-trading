@@ -3,6 +3,7 @@
 import { AlertTriangle, ClipboardList, PlugZap, RefreshCw, WalletCards } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
+import { Paged } from "../../components/paged";
 import { api, type BrokerBookOrder, type BrokerBookPosition, type BrokerSnapshot } from "../../components/api";
 import { formatIstTimestamp } from "../../lib/formatting";
 
@@ -222,67 +223,71 @@ function Orderbook({ rows, brokerLabel }: { rows: BrokerBookOrder[]; brokerLabel
         </div>
       </div>
       {rows.length ? (
-        <div className="table-scroll">
-          <table className="terminal-table">
-            <thead>
-              <tr>
-                <th>Symbol</th>
-                <th>Side</th>
-                <th>Order</th>
-                <th>Filled</th>
-                <th>Average price</th>
-                <th>Status</th>
-                <th>Placed by</th>
-                <th>Placed</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.broker_order_id}>
-                  <td>
-                    <strong className="block font-mono text-slate-900 dark:text-slate-100">{row.symbol}</strong>
-                    <span className="text-[11px] opacity-75">{row.broker_order_id}</span>
-                  </td>
-                  <td>
-                    {row.side ? (
-                      <span className={`status-pill ${row.side.startsWith("B") ? "status-good" : "status-bad"}`}>
-                        {row.side}
-                      </span>
-                    ) : (
-                      "—"
-                    )}
-                  </td>
-                  <td>
-                    {row.order_type ?? "—"}
-                    <span className="text-[11px] opacity-75">
-                      {row.quantity !== null && `${row.quantity} qty`}
-                      {/* The trigger is the whole of what a stop was asked to do.
-                          Average price says nothing about one that never filled. */}
-                      {row.trigger_price !== null && ` · trigger ${money(row.trigger_price)}`}
-                    </span>
-                  </td>
-                  <td className="numeric">
-                    {row.filled_quantity === null ? "—" : row.filled_quantity}
-                    {row.quantity !== null && `/${row.quantity}`}
-                  </td>
-                  <td className="numeric">{cell(row.average_price)}</td>
-                  <td>
-                    <span className={`status-pill ${statusPill(row.status)}`}>{row.status}</span>
-                    {/* The broker's own words about this order. Without them a
-                        refusal can only be diagnosed in the broker's own app,
-                        which is where an operator had to go to find out that a
-                        stop had been rejected for an invalid tick price. */}
-                    {row.status_message && <span className="text-[11px] opacity-75">{row.status_message}</span>}
-                  </td>
-                  <td>
-                    <PlacedBy ours={row.ours} />
-                  </td>
-                  <td className="muted-cell">{formatIstTimestamp(row.placed_at)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Paged rows={rows}>
+          {(visible) => (
+            <div className="table-scroll">
+              <table className="terminal-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th>Order</th>
+                    <th>Filled</th>
+                    <th>Average price</th>
+                    <th>Status</th>
+                    <th>Placed by</th>
+                    <th>Placed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((row) => (
+                    <tr key={row.broker_order_id}>
+                      <td>
+                        <strong className="block font-mono text-slate-900 dark:text-slate-100">{row.symbol}</strong>
+                        <span className="text-[11px] opacity-75">{row.broker_order_id}</span>
+                      </td>
+                      <td>
+                        {row.side ? (
+                          <span className={`status-pill ${row.side.startsWith("B") ? "status-good" : "status-bad"}`}>
+                            {row.side}
+                          </span>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td>
+                        {row.order_type ?? "—"}
+                        <span className="text-[11px] opacity-75">
+                          {row.quantity !== null && `${row.quantity} qty`}
+                          {/* The trigger is the whole of what a stop was asked to do.
+                              Average price says nothing about one that never filled. */}
+                          {row.trigger_price !== null && ` · trigger ${money(row.trigger_price)}`}
+                        </span>
+                      </td>
+                      <td className="numeric">
+                        {row.filled_quantity === null ? "—" : row.filled_quantity}
+                        {row.quantity !== null && `/${row.quantity}`}
+                      </td>
+                      <td className="numeric">{cell(row.average_price)}</td>
+                      <td>
+                        <span className={`status-pill ${statusPill(row.status)}`}>{row.status}</span>
+                        {/* The broker's own words about this order. Without them a
+                            refusal can only be diagnosed in the broker's own app,
+                            which is where an operator had to go to find out that a
+                            stop had been rejected for an invalid tick price. */}
+                        {row.status_message && <span className="text-[11px] opacity-75">{row.status_message}</span>}
+                      </td>
+                      <td>
+                        <PlacedBy ours={row.ours} />
+                      </td>
+                      <td className="muted-cell">{formatIstTimestamp(row.placed_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Paged>
       ) : (
         <Empty
           icon={<ClipboardList className="h-6 w-6" />}
@@ -304,47 +309,51 @@ function Positions({ rows, brokerLabel }: { rows: BrokerBookPosition[]; brokerLa
         </div>
       </div>
       {rows.length ? (
-        <div className="table-scroll">
-          <table className="terminal-table">
-            <thead>
-              <tr>
-                <th>Symbol</th>
-                <th>Net quantity</th>
-                <th>Average price</th>
-                <th>Last price</th>
-                <th>Realised</th>
-                <th>Unrealised</th>
-                <th>Day P&amp;L</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={`${row.symbol}-${row.instrument_token ?? ""}`}>
-                  <td>
-                    <strong className="block font-mono text-slate-900 dark:text-slate-100">{row.symbol}</strong>
-                    {row.instrument_token && row.instrument_token !== row.symbol && (
-                      <span className="text-[11px] opacity-75">{row.instrument_token}</span>
-                    )}
-                  </td>
-                  <td className="numeric">
-                    {row.net_quantity === null ? (
-                      "—"
-                    ) : row.net_quantity === 0 ? (
-                      <span className="status-pill status-watch">Squared off</span>
-                    ) : (
-                      row.net_quantity
-                    )}
-                  </td>
-                  <td className="numeric">{cell(row.average_price)}</td>
-                  <td className="numeric">{cell(row.last_price)}</td>
-                  <td className={`numeric ${tone(row.realised)}`}>{cell(row.realised)}</td>
-                  <td className={`numeric ${tone(row.unrealised)}`}>{cell(row.unrealised)}</td>
-                  <td className={`numeric ${tone(row.day_pnl)}`}>{cell(row.day_pnl)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Paged rows={rows}>
+          {(visible) => (
+            <div className="table-scroll">
+              <table className="terminal-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Net quantity</th>
+                    <th>Average price</th>
+                    <th>Last price</th>
+                    <th>Realised</th>
+                    <th>Unrealised</th>
+                    <th>Day P&amp;L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((row) => (
+                    <tr key={`${row.symbol}-${row.instrument_token ?? ""}`}>
+                      <td>
+                        <strong className="block font-mono text-slate-900 dark:text-slate-100">{row.symbol}</strong>
+                        {row.instrument_token && row.instrument_token !== row.symbol && (
+                          <span className="text-[11px] opacity-75">{row.instrument_token}</span>
+                        )}
+                      </td>
+                      <td className="numeric">
+                        {row.net_quantity === null ? (
+                          "—"
+                        ) : row.net_quantity === 0 ? (
+                          <span className="status-pill status-watch">Squared off</span>
+                        ) : (
+                          row.net_quantity
+                        )}
+                      </td>
+                      <td className="numeric">{cell(row.average_price)}</td>
+                      <td className="numeric">{cell(row.last_price)}</td>
+                      <td className={`numeric ${tone(row.realised)}`}>{cell(row.realised)}</td>
+                      <td className={`numeric ${tone(row.unrealised)}`}>{cell(row.unrealised)}</td>
+                      <td className={`numeric ${tone(row.day_pnl)}`}>{cell(row.day_pnl)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Paged>
       ) : (
         <Empty
           icon={<WalletCards className="h-6 w-6" />}

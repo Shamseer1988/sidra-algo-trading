@@ -3,13 +3,17 @@
 import { Download, Radio, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { Paged } from "../../components/paged";
 import { api, type MarketCandle, type PaperSignal } from "../../components/api";
 import { formatIstTimestamp, formatPrice, titleCase } from "../../lib/formatting";
 import { resolveScriptName } from "../../lib/instruments";
+import { istDate, strategyLabel } from "../../lib/strategy-names";
 
 export function SignalsPanel({ signals }: { signals: PaperSignal[] }) {
   const [query, setQuery] = useState("");
   const [side, setSide] = useState("ALL");
+  const [day, setDay] = useState("");
+  const days = useMemo(() => [...new Set(signals.map((signal) => signal.session_date))].sort().reverse(), [signals]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const filtered = useMemo(
@@ -20,21 +24,21 @@ export function SignalsPanel({ signals }: { signals: PaperSignal[] }) {
         const matchesQuery =
           script.includes(query.toLowerCase()) || token.includes(query.toLowerCase());
         const matchesSide = side === "ALL" || signal.side === side;
-        return matchesQuery && matchesSide;
+        return matchesQuery && matchesSide && (!day || signal.session_date === day);
       }),
-    [query, side, signals],
+    [query, side, day, signals],
   );
 
-  const selected = signals.find((signal) => signal.id === selectedId) ?? filtered[0];
+  const selected = filtered.find((signal) => signal.id === selectedId) ?? filtered[0];
 
   return (
     <section>
       <div className="page-toolbar">
         <div>
-          <p className="eyebrow">Paper scanner output</p>
+          <p className="eyebrow">Setups that passed every rule</p>
           <h2 className="page-title">Signals</h2>
           <p className="page-copy">
-            Completed-candle decisions only. Approval records intent; it never sends a broker order.
+            The newest 100 signals, from every strategy. A signal is not a trade: what was bought and sold is in History.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -49,6 +53,19 @@ export function SignalsPanel({ signals }: { signals: PaperSignal[] }) {
               onChange={(event) => setQuery(event.target.value)}
             />
           </label>
+          <select
+            aria-label="Signal day"
+            className="field-input w-36"
+            value={day}
+            onChange={(event) => setDay(event.target.value)}
+          >
+            <option value="">All days</option>
+            {days.map((date) => (
+              <option key={date} value={date}>
+                {date === istDate() ? `Today, ${date}` : date}
+              </option>
+            ))}
+          </select>
           <select
             data-testid="signals-side-select"
             aria-label="Signal direction"
@@ -73,7 +90,7 @@ export function SignalsPanel({ signals }: { signals: PaperSignal[] }) {
       </div>
 
       {!filtered.length ? (
-        <EmptySignals />
+        <EmptySignals any={signals.length > 0} />
       ) : (
         <div className="mt-6 grid gap-5 xl:grid-cols-[1.45fr_.75fr]">
           <SignalsTable
@@ -88,13 +105,13 @@ export function SignalsPanel({ signals }: { signals: PaperSignal[] }) {
   );
 }
 
-function EmptySignals() {
+function EmptySignals({ any }: { any: boolean }) {
   return (
     <article className="panel mt-6 p-9 text-center">
       <Radio className="mx-auto h-7 w-7 text-slate-600" />
-      <h3 className="mt-4 font-medium text-white">No paper signals yet</h3>
+      <h3 className="mt-4 font-medium text-white">{any ? "No signal matches" : "No signals yet"}</h3>
       <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-500">
-        This is expected until a selected market-data connector is configured, the scanner is running, and a completed candle qualifies.
+        {any ? "Clear the search, day or direction to see more." : "They appear once the scanner is running and a share passes every rule."}
       </p>
     </article>
   );
@@ -111,56 +128,62 @@ function SignalsTable({
 }) {
   return (
     <article className="panel overflow-hidden border border-slate-800 shadow-xl">
-      <div className="table-scroll">
-        <table className="terminal-table">
-          <thead>
-            <tr>
-              <th>Script / Symbol</th>
-              <th>Instrument Code</th>
-              <th>Side</th>
-              <th>Entry</th>
-              <th>Target</th>
-              <th>Score</th>
-              <th>Time</th>
-            </tr>
-          </thead>
-          <tbody>
-            {signals.map((signal) => {
-              const script = (signal.script_name || resolveScriptName(signal.instrument_token));
-              return (
-                <tr
-                  key={signal.id}
-                  onClick={() => onSelect(signal.id)}
-                  className={selectedId === signal.id ? "table-selected" : ""}
-                >
-                  <td>
-                    <span className="inline-block rounded bg-emerald-500/10 px-2.5 py-0.5 text-xs font-bold text-emerald-300 border border-emerald-500/20">
-                      {script}
-                    </span>
-                  </td>
-                  <td>
-                    <strong className="block font-mono text-slate-200">{signal.instrument_token}</strong>
-                    <span className="text-[11px] text-slate-400">{titleCase(signal.status)}</span>
-                  </td>
-                  <td>
-                    <span
-                      className={`status-pill ${
-                        signal.side === "LONG" ? "status-good" : "status-bad"
-                      }`}
-                    >
-                      {signal.side}
-                    </span>
-                  </td>
-                  <td className="numeric font-mono">₹{formatPrice(signal.entry_price)}</td>
-                  <td className="numeric font-mono">₹{formatPrice(signal.target_price)}</td>
-                  <td className="numeric font-mono">{signal.score}/100</td>
-                  <td className="muted-cell">{formatIstTimestamp(signal.created_at)}</td>
+      <Paged rows={signals}>
+        {(visible) => (
+          <div className="table-scroll">
+            <table className="terminal-table">
+              <thead>
+                <tr>
+                  <th>Share</th>
+                  <th>Strategy</th>
+                  <th>Side</th>
+                  <th>Entry</th>
+                  <th>Stop</th>
+                  <th>Target</th>
+                  <th>Score</th>
+                  <th>Time</th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+              </thead>
+              <tbody>
+                {visible.map((signal) => {
+                  const script = (signal.script_name || resolveScriptName(signal.instrument_token));
+                  return (
+                    <tr
+                      key={signal.id}
+                      onClick={() => onSelect(signal.id)}
+                      className={selectedId === signal.id ? "table-selected" : ""}
+                    >
+                      <td>
+                        <span className="inline-block rounded bg-emerald-500/10 px-2.5 py-0.5 text-xs font-bold text-emerald-300 border border-emerald-500/20">
+                          {script}
+                        </span>
+                      </td>
+                      <td>
+                        <strong>{signal.strategy_version ? strategyLabel(signal.strategy_version) : "—"}</strong>
+                        <span title={signal.instrument_token}>{titleCase(signal.status.toLowerCase())}</span>
+                      </td>
+                      <td>
+                        <span
+                          className={`status-pill ${
+                            signal.side === "LONG" ? "status-good" : "status-bad"
+                          }`}
+                        >
+                          {signal.side}
+                        </span>
+                      </td>
+                      <td className="numeric font-mono">₹{formatPrice(signal.entry_price)}</td>
+                      <td className="numeric font-mono">₹{formatPrice(signal.stop_price)}</td>
+                      <td className="numeric font-mono">₹{formatPrice(signal.target_price)}</td>
+                      <td className="numeric font-mono">{signal.score}/100</td>
+                      <td className="muted-cell">{formatIstTimestamp(signal.created_at)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Paged>
     </article>
   );
 }
@@ -235,7 +258,7 @@ function SignalDetail({ signal }: { signal: PaperSignal }) {
       </div>
 
       <p className="mt-6 text-xs leading-5 text-slate-500">
-        Paper tracking only. This record cannot submit or approve a broker order.
+        A record of what the scanner saw. Opening it changes nothing.
       </p>
     </aside>
   );

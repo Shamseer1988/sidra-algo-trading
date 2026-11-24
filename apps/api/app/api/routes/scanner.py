@@ -1,7 +1,8 @@
 import json
 from datetime import UTC, date, datetime
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -9,6 +10,7 @@ from sqlalchemy import select
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
 from app.db.models import AuditLog, PaperSignal, ScannerEvaluation, User, UserRole
 from app.db.session import SessionLocal
+from app.services import scanner_report
 from app.services.data_quality import DATA_QUALITY_PREFIX
 from app.services.safety import emergency_stop_state
 from app.services.trading_symbols import resolve_script_names, resolve_symbol
@@ -28,6 +30,7 @@ class ScannerStatus(BaseModel):
 
 class DataQualityResponse(BaseModel):
     instrument_token: str
+    script_name: str = ""
     state: str
     reason: str
     session_date: date
@@ -53,6 +56,7 @@ class PaperSignalResponse(BaseModel):
     session_date: str
     candle_opened_at: datetime
     side: str
+    strategy_version: str = ""
     status: str
     entry_price: float
     stop_price: float
@@ -152,6 +156,7 @@ async def latest_paper_signals(_: CurrentUser, session: DbSession) -> list[Paper
             session_date=row.session_date.isoformat(),
             candle_opened_at=row.candle_opened_at,
             side=row.side,
+            strategy_version=row.strategy_version,
             status=row.status,
             entry_price=float(row.entry_price),
             stop_price=float(row.stop_price),
@@ -220,6 +225,114 @@ async def latest_scanner_evaluations(
     return [_evaluation_response(row, names.get(row.instrument_token, "")) for row in rows]
 
 
+class Moment(BaseModel):
+    """One check worth reading: what was seen, when, and what was decided."""
+
+    id: str
+    instrument_token: str
+    script_name: str
+    at: datetime
+    strategy_name: str
+    side: str | None
+    score: int
+    reason: str
+
+
+class DayTotals(BaseModel):
+    checks: int
+    outside_hours: int
+    blocked_by_data: int
+    scored: int
+    accepted: int
+    shares: int
+    last_candle: datetime | None
+
+
+class StrategyDay(BaseModel):
+    strategy_id: str
+    strategy_name: str
+    checks: int
+    outside_hours: int
+    scored: int
+    accepted: int
+    best_score: int
+
+
+class ReasonCount(BaseModel):
+    reason: str
+    count: int
+
+
+class ShareDay(BaseModel):
+    instrument_token: str
+    script_name: str
+    last_close: float | None
+    accepted: int
+    scored: int
+    blocked: int
+    best: Moment | None
+
+
+class ScannerDay(BaseModel):
+    session_date: date
+    sessions: list[date]
+    totals: DayTotals
+    strategies: list[StrategyDay]
+    reasons: list[ReasonCount]
+    signals: list[Moment]
+    near: list[Moment]
+    shares: list[ShareDay]
+
+
+@router.get("/day", response_model=ScannerDay)
+async def scanner_day(_: CurrentUser, session: DbSession, session_date: date | None = None) -> ScannerDay:
+    """One session summed up. Without a date, the newest session that was scanned: on a holiday, the last one."""
+    sessions = await scanner_report.recent_sessions(session)
+    day = session_date or (sessions[0] if sessions else datetime.now(UTC).date())
+    return ScannerDay(sessions=sessions, **await scanner_report.cached(session, day))
+
+
+class EvaluationPage(BaseModel):
+    total: int
+    items: list[ScannerEvaluationResponse]
+
+
+@router.get("/evaluations/page", response_model=EvaluationPage)
+async def evaluation_page(
+    _: CurrentUser,
+    session: DbSession,
+    session_date: date,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    status: Literal["ACCEPTED", "WATCHING", "REJECTED"] | None = None,
+    strategy_id: str | None = None,
+    quality: str | None = None,
+    search: Annotated[str | None, Query(max_length=60)] = None,
+    scored_only: bool = False,
+    hide_outside: bool = False,
+    sort: Literal["time", "score"] = "time",
+) -> EvaluationPage:
+    total, rows = await scanner_report.page(
+        session,
+        scanner_report.Filters(
+            day=session_date,
+            status=status,
+            strategy_id=strategy_id,
+            quality=quality,
+            search=search,
+            scored_only=scored_only,
+            hide_outside=hide_outside,
+            by_score=sort == "score",
+        ),
+        limit,
+        offset,
+    )
+    names = await resolve_script_names(session, {row.instrument_token for row in rows})
+    return EvaluationPage(
+        total=total, items=[_evaluation_response(row, names.get(row.instrument_token, "")) for row in rows]
+    )
+
+
 @router.get("/evaluations/{evaluation_id}", response_model=ScannerEvaluationResponse)
 async def scanner_evaluation_detail(
     evaluation_id: str, _: CurrentUser, session: DbSession
@@ -234,7 +347,9 @@ async def scanner_evaluation_detail(
 
 
 @router.get("/data-quality", response_model=list[DataQualityResponse])
-async def current_data_quality(settings: AppSettings, _: CurrentUser) -> list[DataQualityResponse]:
+async def current_data_quality(
+    settings: AppSettings, _: CurrentUser, session: DbSession
+) -> list[DataQualityResponse]:
     redis = await _redis(settings)
     snapshots: list[DataQualityResponse] = []
     try:
@@ -248,7 +363,10 @@ async def current_data_quality(settings: AppSettings, _: CurrentUser) -> list[Da
                 continue
     finally:
         await redis.aclose()
-    return sorted(snapshots, key=lambda item: item.instrument_token)
+    names = await resolve_script_names(session, {item.instrument_token for item in snapshots})
+    for item in snapshots:
+        item.script_name = names.get(item.instrument_token, item.instrument_token)
+    return sorted(snapshots, key=lambda item: item.script_name)
 
 
 async def _set_state(state: str, user: User, settings: AppSettings) -> ScannerStatus:

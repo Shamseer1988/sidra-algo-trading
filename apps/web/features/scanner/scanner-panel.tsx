@@ -1,48 +1,59 @@
 "use client";
 
-import {
-  Activity,
-  Bookmark,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  ChevronUp,
-  Eye,
-  Radio,
-  RefreshCw,
-  Search,
-  Star,
-  TriangleAlert,
-} from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Activity, RefreshCw, Search, Star, TriangleAlert } from "lucide-react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import {
   api,
   type DataQuality,
-  type MarketCandle,
+  type EvaluationPage,
   type SafetyStatus,
+  type ScannerDay,
   type ScannerEvaluation,
+  type ScannerMoment,
+  type ScannerShareDay,
   type ScannerStatus,
 } from "../../components/api";
+import { Modal } from "../../components/modal";
+import { Paged, Pager } from "../../components/paged";
 import { formatIstTimestamp, formatPrice, statusTone, titleCase } from "../../lib/formatting";
-import { resolveScriptName } from "../../lib/instruments";
+import { istDate } from "../../lib/strategy-names";
+import { SetupInspector } from "./setup-inspector";
 
-type SortKey = "instrument" | "score" | "updated" | "quality";
-type SavedView = "ALL" | "ACCEPTED" | "ATTENTION" | "WATCHLIST";
+/**
+ * The scanner's day, as answers rather than a tape.
+ *
+ * It checks every share against every strategy each minute: about fifty
+ * thousand checks a day. Summary says what came of them, By share says where
+ * each share stood, and All checks is the full record, paged by the server.
+ */
 
-const valueAt = (source: Record<string, unknown>, path: string): string | number | undefined =>
-  path
-    .split(".")
-    .reduce<unknown>(
-      (value, key) =>
-        value && typeof value === "object"
-          ? (value as Record<string, unknown>)[key]
-          : undefined,
-      source,
-    ) as string | number | undefined;
+type View = "summary" | "shares" | "checks";
 
-const numberText = (value: string | number | undefined, suffix = "") =>
-  typeof value === "number" ? `${value.toFixed(2)}${suffix}` : "—";
+/** Events arrive many times a minute while scanning; the summary follows at this pace. */
+const FOLLOW_MS = 30_000;
+const STARS = "sidra.scanner.watchlist";
+
+const count = (value: number) => value.toLocaleString("en-IN");
+
+function timeOf(value: string): string {
+  return new Date(value).toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+function dayLabel(date: string): string {
+  const text = new Date(`${date}T00:00:00Z`).toLocaleDateString("en-IN", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    timeZone: "UTC",
+  });
+  return date === istDate() ? `Today, ${text}` : text;
+}
 
 export function ScannerPanel({
   scanner,
@@ -63,147 +74,89 @@ export function ScannerPanel({
   onStop: () => void;
   onRefresh: () => void;
 }) {
-  const [items, setItems] = useState<ScannerEvaluation[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState<View>("summary");
+  const [day, setDay] = useState<ScannerDay | null>(null);
+  const [chosen, setChosen] = useState("");
   const [error, setError] = useState("");
-  const [query, setQuery] = useState("");
-  const [state, setState] = useState<"ALL" | ScannerEvaluation["status"]>("ALL");
-  const [quality, setQuality] = useState("ALL");
-  const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({
-    key: "updated",
-    asc: false,
-  });
-  const [view, setView] = useState<SavedView>("ALL");
-  const [watchlist, setWatchlist] = useState<string[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [open, setOpen] = useState<ScannerEvaluation | null>(null);
+  const [inspectError, setInspectError] = useState("");
+  const latest = useRef(0);
+  const loadedAt = useRef(0);
 
-  // Pagination state
-  const [pageSize, setPageSize] = useState(10);
-  const [page, setPage] = useState(1);
-
-  const load = () => {
+  const load = useCallback(async () => {
+    const request = ++latest.current;
+    loadedAt.current = Date.now();
     setLoading(true);
-    void api
-      .evaluations(150)
-      .then(setItems)
-      .catch((loadError: unknown) =>
-        setError(
-          loadError instanceof Error
-            ? loadError.message
-            : "Could not load scanner evaluations",
-        ),
-      )
-      .finally(() => setLoading(false));
-  };
+    try {
+      const next = await api.scannerDay(chosen || undefined);
+      if (request !== latest.current) return;
+      setDay(next);
+      setError("");
+    } catch (caught) {
+      if (request === latest.current) {
+        setError(caught instanceof Error ? caught.message : "Could not load the scanner's day");
+      }
+    } finally {
+      if (request === latest.current) setLoading(false);
+    }
+  }, [chosen]);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("sidra.scanner.watchlist");
-    if (stored) {
-      try {
-        setWatchlist(JSON.parse(stored) as string[]);
-      } catch {
-        window.localStorage.removeItem("sidra.scanner.watchlist");
-      }
+    void load();
+  }, [load]);
+
+  // A chosen past day does not change, so only the newest one follows events.
+  useEffect(() => {
+    if (refreshKey && !chosen && Date.now() - loadedAt.current >= FOLLOW_MS) void load();
+  }, [refreshKey, chosen, load]);
+
+  const inspect = useCallback(async (id: string) => {
+    setInspectError("");
+    try {
+      setOpen(await api.scannerEvaluation(id));
+    } catch (caught) {
+      setInspectError(caught instanceof Error ? caught.message : "Could not open this check");
     }
   }, []);
-
-  useEffect(() => {
-    load();
-  }, [refreshKey]);
-
-  const persistWatchlist = (next: string[]) => {
-    setWatchlist(next);
-    window.localStorage.setItem("sidra.scanner.watchlist", JSON.stringify(next));
-  };
-
-  const toggleWatchlist = (instrument: string) =>
-    persistWatchlist(
-      watchlist.includes(instrument)
-        ? watchlist.filter((value) => value !== instrument)
-        : [...watchlist, instrument],
-    );
-
-  const filtered = useMemo(
-    () =>
-      items
-        .filter((item) => {
-          const script = (item.script_name || resolveScriptName(item.instrument_token)).toLowerCase();
-          const token = item.instrument_token.toLowerCase();
-          const strat = item.strategy_name.toLowerCase();
-          const q = query.toLowerCase();
-          const matchesQuery =
-            script.includes(q) || token.includes(q) || strat.includes(q);
-          const matchesState = state === "ALL" || item.status === state;
-          const matchesQuality = quality === "ALL" || item.data_quality_state === quality;
-          const matchesView =
-            view === "ALL" ||
-            (view === "ACCEPTED" && item.status === "ACCEPTED") ||
-            (view === "ATTENTION" &&
-              (item.status === "REJECTED" ||
-                ["INVALID", "STALE", "MISSING"].includes(item.data_quality_state))) ||
-            (view === "WATCHLIST" && watchlist.includes(item.instrument_token));
-          return matchesQuery && matchesState && matchesQuality && matchesView;
-        })
-        .sort((left, right) => {
-          const leftValue =
-            sort.key === "instrument"
-              ? left.instrument_token
-              : sort.key === "score"
-              ? left.score
-              : sort.key === "quality"
-              ? left.data_quality_state
-              : left.candle_opened_at;
-          const rightValue =
-            sort.key === "instrument"
-              ? right.instrument_token
-              : sort.key === "score"
-              ? right.score
-              : sort.key === "quality"
-              ? right.data_quality_state
-              : right.candle_opened_at;
-          return (
-            (leftValue > rightValue ? 1 : leftValue < rightValue ? -1 : 0) *
-            (sort.asc ? 1 : -1)
-          );
-        }),
-    [items, quality, query, sort, state, view, watchlist],
-  );
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const paginated = useMemo(() => {
-    const start = (currentPage - 1) * pageSize;
-    return filtered.slice(start, start + pageSize);
-  }, [filtered, currentPage, pageSize]);
-
-  const selected = filtered.find((item) => item.id === selectedId) ?? paginated[0];
-
-  const sortBy = (key: SortKey) =>
-    setSort((current) => ({
-      key,
-      asc: current.key === key ? !current.asc : key === "instrument" || key === "quality",
-    }));
 
   return (
     <section>
       <div className="page-toolbar">
         <div>
-          <p className="eyebrow">Scanner operations</p>
-          <h2 className="page-title">Scanner workspace</h2>
+          <p className="eyebrow">What the scanner saw</p>
+          <h2 className="page-title">Scanner</h2>
           <p className="page-copy">
-            Completed-candle strategy evaluations, including accepted, watching, and rejected setups. Live execution remains locked.
+            Every minute each share is checked against each strategy. This is what those checks came to.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="text-xs" style={{ color: "var(--muted)" }}>
+            Day
+            <select
+              aria-label="Scanner day"
+              className="field-input mt-1 block py-2 text-sm"
+              value={chosen}
+              onChange={(event) => setChosen(event.target.value)}
+            >
+              <option value="">Latest{day?.sessions[0] ? ` (${dayLabel(day.sessions[0])})` : ""}</option>
+              {(day?.sessions ?? []).map((date) => (
+                <option key={date} value={date}>
+                  {dayLabel(date)}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             className="secondary-button"
             onClick={() => {
               onRefresh();
-              load();
+              void load();
             }}
+            disabled={loading}
           >
-            <RefreshCw className="h-4 w-4" />
-            Refresh scanner
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            Refresh
           </button>
           {canOperate && (
             <button
@@ -216,11 +169,7 @@ export function ScannerPanel({
             </button>
           )}
           {canOperate && (
-            <button
-              className="secondary-button"
-              disabled={scanner.status === "STOPPED"}
-              onClick={onStop}
-            >
+            <button className="secondary-button" disabled={scanner.status === "STOPPED"} onClick={onStop}>
               <TriangleAlert className="h-4 w-4" />
               Stop
             </button>
@@ -228,112 +177,58 @@ export function ScannerPanel({
         </div>
       </div>
 
-      <ScannerStatusStrip
-        scanner={scanner}
-        safety={safety}
-        dataQuality={dataQuality}
-      />
+      <StatusStrip scanner={scanner} safety={safety} dataQuality={dataQuality} />
 
-      <div className="scanner-filter-bar">
-        <label className="relative min-w-[12rem] flex-1">
-          <Search className="absolute left-3 top-3 h-4 w-4 text-slate-400" />
-          <span className="sr-only">Search scanner evaluations</span>
-          <input
-            className="field-input pl-9"
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value);
-              setPage(1);
-            }}
-            placeholder="Search symbol, script, or strategy"
-          />
-        </label>
-        <select
-          className="field-input w-auto"
-          aria-label="Evaluation state"
-          value={state}
-          onChange={(event) => {
-            setState(event.target.value as typeof state);
-            setPage(1);
-          }}
-        >
-          <option value="ALL">All states</option>
-          <option value="ACCEPTED">Accepted</option>
-          <option value="WATCHING">Watching</option>
-          <option value="REJECTED">Rejected</option>
-        </select>
-        <select
-          className="field-input w-auto"
-          aria-label="Data quality"
-          value={quality}
-          onChange={(event) => {
-            setQuality(event.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="ALL">All quality</option>
-          <option value="GOOD">Good</option>
-          <option value="DEGRADED">Degraded</option>
-          <option value="STALE">Stale</option>
-          <option value="INVALID">Invalid</option>
-          <option value="MISSING">Missing</option>
-        </select>
-        <label className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-          <Bookmark className="h-4 w-4" />
-          <select
-            className="field-input w-auto"
-            aria-label="Saved scanner view"
-            value={view}
-            onChange={(event) => {
-              setView(event.target.value as SavedView);
-              setPage(1);
-            }}
-          >
-            <option value="ALL">All evaluations</option>
-            <option value="ACCEPTED">Accepted setups</option>
-            <option value="ATTENTION">Needs attention</option>
-            <option value="WATCHLIST">My watchlist</option>
-          </select>
-        </label>
-      </div>
-
-      {error && (
-        <div className="glass-notice mt-4 rounded-md p-4 text-sm text-rose-300">
-          {error}
-        </div>
+      {(error || inspectError) && (
+        <p role="alert" className="glass-notice mt-4 rounded-md p-4 text-sm" style={{ color: "var(--negative)" }}>
+          {error || inspectError}
+        </p>
       )}
 
-      <div className="mt-4 grid gap-5 2xl:grid-cols-[minmax(0,1.8fr)_minmax(21rem,.8fr)]">
-        <ScannerTable
-          items={paginated}
-          totalCount={filtered.length}
-          loading={loading}
-          selectedId={selected?.id}
-          sort={sort}
-          pageSize={pageSize}
-          currentPage={currentPage}
-          totalPages={totalPages}
-          onPageChange={setPage}
-          onPageSizeChange={(size) => {
-            setPageSize(size);
-            setPage(1);
-          }}
-          onSort={sortBy}
-          onSelect={setSelectedId}
-          watchlist={watchlist}
-          onWatchlist={toggleWatchlist}
-        />
-        {selected ? (
-          <SetupInspector evaluation={selected} />
-        ) : (
-          <EmptyInspector />
-        )}
+      <div role="group" aria-label="Scanner view" className="mt-5 flex flex-wrap gap-2">
+        {([
+          ["summary", "Summary"],
+          ["shares", "By share"],
+          ["checks", "All checks"],
+        ] as const).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            aria-pressed={view === value}
+            className={`${view === value ? "primary-button" : "secondary-button"} px-4 py-2 text-xs`}
+            onClick={() => setView(value)}
+          >
+            {label}
+          </button>
+        ))}
       </div>
+
+      {!day ? (
+        loading && (
+          <div className="mt-5 space-y-2">
+            {[0, 1, 2, 3].map((item) => (
+              <div key={item} className="skeleton h-20" />
+            ))}
+          </div>
+        )
+      ) : view === "summary" ? (
+        <Summary day={day} onInspect={inspect} />
+      ) : view === "shares" ? (
+        <Shares day={day} onInspect={inspect} />
+      ) : (
+        <Checks key={day.session_date} day={day} onOpen={setOpen} />
+      )}
+
+      {open && (
+        <Modal title="Why this check was decided this way" onClose={() => setOpen(null)} wide>
+          <SetupInspector evaluation={open} />
+        </Modal>
+      )}
     </section>
   );
 }
 
-function ScannerStatusStrip({
+function StatusStrip({
   scanner,
   safety,
   dataQuality,
@@ -343,555 +238,551 @@ function ScannerStatusStrip({
   dataQuality: DataQuality[];
 }) {
   const good = dataQuality.filter((item) => item.allows_signals).length;
+  const cells: [string, string, string][] = [
+    ["Scanner now", titleCase(scanner.status.toLowerCase()), scanner.detail],
+    [
+      "Data feed now",
+      dataQuality.length ? `${good} of ${dataQuality.length} shares ready` : "No live data",
+      dataQuality.length
+        ? "A share can signal only while its candles are complete and fresh."
+        : "Normal outside market hours and on holidays.",
+    ],
+    [
+      "Orders now",
+      safety.emergency_stop_active
+        ? "Emergency stop is on"
+        : safety.live_execution_available
+          ? "Live orders can be sent"
+          : "No live order can be sent",
+      safety.emergency_stop_active
+        ? (safety.emergency_stop_reason ?? "Nothing new is opened.")
+        : safety.live_execution_available
+          ? "Only for strategies set to Live; the rest stay on paper."
+          : "A live gate is holding. Paper scanning is not affected.",
+    ],
+  ];
   return (
-    <div className="mt-5 grid gap-3 sm:grid-cols-3">
-      <article className="glass-inset rounded-md p-4">
-        <p className="text-[10px] font-bold uppercase tracking-[.15em] text-slate-500 dark:text-slate-400">
-          Worker
-        </p>
-        <p className="mt-2 flex items-center gap-2 text-sm font-semibold">
-          <Radio className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
-          {titleCase(scanner.status)}
-        </p>
-        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-          {scanner.worker_restart_count
-            ? `${scanner.worker_restart_count} supervised restart(s)`
-            : "No restarts reported"}
-        </p>
-      </article>
-      <article className="glass-inset rounded-md p-4">
-        <p className="text-[10px] font-bold uppercase tracking-[.15em] text-slate-500 dark:text-slate-400">
-          Data quality
-        </p>
-        <p className="mt-2 text-sm font-semibold">
-          {good}/{dataQuality.length} signal eligible
-        </p>
-        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Only valid, fresh snapshots can qualify.</p>
-      </article>
-      <article className="glass-inset rounded-md p-4">
-        <p className="text-[10px] font-bold uppercase tracking-[.15em] text-slate-500 dark:text-slate-400">
-          Safety gate
-        </p>
-        <p
-          className={`mt-2 text-sm font-semibold ${
-            safety.emergency_stop_active
-              ? "text-rose-600 dark:text-rose-400"
-              : "text-emerald-600 dark:text-emerald-400"
-          }`}
-        >
-          {safety.emergency_stop_active ? "Emergency stop active" : "Paper scan permitted"}
-        </p>
-        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">Live execution is locked; nothing here can reach a broker.</p>
-      </article>
-    </div>
+    <dl className="panel mt-5 grid gap-px sm:grid-cols-3">
+      {cells.map(([label, value, note]) => (
+        <div key={label} className="px-5 py-3.5">
+          <dt className="text-xs" style={{ color: "var(--muted)" }}>
+            {label}
+          </dt>
+          <dd className="mt-1 font-semibold" style={{ color: "var(--foreground)" }}>
+            {value}
+          </dd>
+          <dd className="mt-0.5 text-xs" style={{ color: "var(--muted)" }}>
+            {note}
+          </dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
-function ScannerTable({
-  items,
-  totalCount,
-  loading,
-  selectedId,
-  sort,
-  pageSize,
-  currentPage,
-  totalPages,
-  onPageChange,
-  onPageSizeChange,
-  onSort,
-  onSelect,
-  watchlist,
-  onWatchlist,
-}: {
-  items: ScannerEvaluation[];
-  totalCount: number;
-  loading: boolean;
-  selectedId?: string;
-  sort: { key: SortKey; asc: boolean };
-  pageSize: number;
-  currentPage: number;
-  totalPages: number;
-  onPageChange: (page: number) => void;
-  onPageSizeChange: (size: number) => void;
-  onSort: (key: SortKey) => void;
-  onSelect: (id: string) => void;
-  watchlist: string[];
-  onWatchlist: (instrument: string) => void;
-}) {
-  const header = (label: string, key?: SortKey) => (
-    <th key={label} className="py-3 px-3">
-      <button className="scanner-sort text-xs font-semibold" onClick={() => key && onSort(key)}>
-        {label}
-        {key &&
-          (sort.key === key ? (
-            sort.asc ? (
-              <ChevronUp className="h-3 w-3 text-emerald-500" />
-            ) : (
-              <ChevronDown className="h-3 w-3 text-emerald-500" />
-            )
-          ) : null)}
-      </button>
-    </th>
-  );
-
+function Panel({ title, note, children }: { title: string; note: string; children: ReactNode }) {
   return (
-    <article className="panel overflow-hidden flex flex-col">
-      {/* Table Header Controls */}
-      <div className="flex flex-col gap-3 border-b border-slate-700/30 dark:border-slate-800/80 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="eyebrow">Evaluation tape</p>
-          <h3 className="mt-0.5 text-base font-semibold">
-            {loading ? "Loading scanner data..." : `${totalCount} visible evaluations`}
-          </h3>
-        </div>
-
-        {/* Rows per page selector */}
-        <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-          <span>Show:</span>
-          <select
-            aria-label="Rows per page"
-            value={pageSize}
-            onChange={(e) => onPageSizeChange(Number(e.target.value))}
-            className="field-input w-20 py-1 text-xs"
-          >
-            <option value={10}>10</option>
-            <option value={25}>25</option>
-            <option value={50}>50</option>
-            <option value={100}>100</option>
-            <option value={150}>150</option>
-          </select>
-        </div>
+    <article className="panel overflow-hidden">
+      <div className="px-5 py-4" style={{ borderBottom: "1px solid var(--glass-border)" }}>
+        <h3 className="font-semibold" style={{ color: "var(--foreground)" }}>
+          {title}
+        </h3>
+        <p className="mt-1 text-xs" style={{ color: "var(--muted)" }}>
+          {note}
+        </p>
       </div>
-
-      {loading ? (
-        <div className="space-y-2 p-5">
-          {Array.from({ length: 8 }, (_, index) => (
-            <div key={index} className="skeleton h-12" />
-          ))}
-        </div>
-      ) : items.length ? (
-        <div className="table-scroll max-h-[580px] overflow-auto">
-          <table className="terminal-table scanner-table w-full text-xs">
-            <thead className="sticky top-0 z-10">
-              <tr>
-                {header("Symbol / Script", "instrument")}
-                {header("Last close")}
-                {header("Change")}
-                {header("Volume")}
-                {header("RVOL")}
-                {header("VWAP")}
-                {header("EMA")}
-                {header("Rel. str.")}
-                {header("Regime")}
-                {header("Setup")}
-                {header("Direction")}
-                {header("Score", "score")}
-                {header("Quality", "quality")}
-                {header("Updated", "updated")}
-                {header("Action")}
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item) => (
-                <ScannerRow
-                  key={item.id}
-                  item={item}
-                  selected={selectedId === item.id}
-                  watched={watchlist.includes(item.instrument_token)}
-                  onSelect={onSelect}
-                  onWatchlist={onWatchlist}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <div className="empty-inset m-5 text-sm">
-          No evaluations match the current filters. The tape fills only after the scanner processes completed candles.
-        </div>
-      )}
-
-      {/* Table Pagination Footer */}
-      {totalCount > 0 && (
-        <div className="flex flex-col items-center justify-between gap-3 border-t border-slate-700/30 dark:border-slate-800/80 p-3.5 text-xs sm:flex-row mt-auto">
-          <div className="text-slate-500 dark:text-slate-400">
-            Showing{" "}
-            <strong>
-              {(currentPage - 1) * pageSize + 1}
-            </strong>{" "}
-            to{" "}
-            <strong>
-              {Math.min(currentPage * pageSize, totalCount)}
-            </strong>{" "}
-            of <strong>{totalCount}</strong> evaluations
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              disabled={currentPage <= 1}
-              onClick={() => onPageChange(Math.max(1, currentPage - 1))}
-              className="secondary-button py-1 px-2.5 text-xs disabled:opacity-40"
-            >
-              <ChevronLeft className="h-3.5 w-3.5" />
-              Previous
-            </button>
-
-            <span className="px-2 font-medium">
-              Page {currentPage} of {totalPages}
-            </span>
-
-            <button
-              disabled={currentPage >= totalPages}
-              onClick={() => onPageChange(Math.min(totalPages, currentPage + 1))}
-              className="secondary-button py-1 px-2.5 text-xs disabled:opacity-40"
-            >
-              Next
-              <ChevronRight className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        </div>
-      )}
+      {children}
     </article>
   );
 }
 
-function ScannerRow({
-  item,
-  selected,
-  watched,
-  onSelect,
-  onWatchlist,
-}: {
-  item: ScannerEvaluation;
-  selected: boolean;
-  watched: boolean;
-  onSelect: (id: string) => void;
-  onWatchlist: (instrument: string) => void;
-}) {
-  const script = (item.script_name || resolveScriptName(item.instrument_token));
-  const snapshot = item.indicator_snapshot;
-  const volume = valueAt(snapshot, "volume.relative_volume");
-  const relative = valueAt(snapshot, "relative_strength.relative_strength_percent");
-  const regime = valueAt(snapshot, "nifty_regime.regime");
-
+function Empty({ children }: { children: ReactNode }) {
   return (
-    <tr
-      className={selected ? "table-selected" : ""}
-      onClick={() => onSelect(item.id)}
-    >
-      <td className="py-3 px-3">
-        <div className="flex items-center gap-1.5">
-          <span className="rounded bg-emerald-500/15 px-2 py-0.5 text-xs font-bold text-emerald-600 dark:text-emerald-300 border border-emerald-500/25">
-            {script}
-          </span>
-        </div>
-        <strong className="block font-mono text-[11px] opacity-80">{item.instrument_token}</strong>
-        <span className="text-[10px] opacity-70">
-          {item.strategy_name} v{item.strategy_version}
-        </span>
-      </td>
-      <td className="numeric font-mono py-3 px-3">₹{formatPrice(item.candle_close)}</td>
-      <td className="muted-cell py-3 px-3">—</td>
-      <td className="numeric font-mono py-3 px-3">{item.candle_volume.toLocaleString("en-IN")}</td>
-      <td className="numeric font-mono py-3 px-3">{numberText(volume)}</td>
-      <td className="numeric font-mono py-3 px-3">{numberText(valueAt(snapshot, "vwap"))}</td>
-      <td className="numeric font-mono py-3 px-3">{numberText(valueAt(snapshot, "ema_fast"))}</td>
-      <td className="numeric font-mono py-3 px-3">{numberText(relative, "%")}</td>
-      <td className="py-3 px-3">{typeof regime === "string" ? titleCase(regime) : "—"}</td>
-      <td className="py-3 px-3">
-        <strong>{titleCase(item.decision_state)}</strong>
-        <span className="text-[11px] opacity-70 block">{item.reason}</span>
-      </td>
-      <td className="py-3 px-3">
-        {item.side ? (
-          <span
-            className={`status-pill ${
-              item.side === "LONG" ? "status-good" : "status-bad"
-            }`}
-          >
-            {item.side}
-          </span>
-        ) : (
-          "—"
-        )}
-      </td>
-      <td className="numeric font-mono py-3 px-3 font-semibold">{item.score}/100</td>
-      <td className="py-3 px-3">
-        <span className={`status-pill ${statusTone(item.data_quality_state)}`}>
-          {item.data_quality_state}
-        </span>
-      </td>
-      <td className="muted-cell py-3 px-3">{formatIstTimestamp(item.candle_opened_at)}</td>
-      <td className="py-3 px-3">
-        <div className="flex gap-1">
-          <button
-            className="icon-button"
-            title="Inspect setup"
-            aria-label={`Inspect ${item.instrument_token}`}
-            onClick={(event) => {
-              event.stopPropagation();
-              onSelect(item.id);
-            }}
-          >
-            <Eye className="h-3.5 w-3.5" />
-          </button>
-          <button
-            className={`icon-button ${
-              watched ? "text-amber-500 dark:text-amber-300" : "text-slate-400"
-            }`}
-            title="Toggle watchlist"
-            aria-label={`Toggle ${item.instrument_token} watchlist`}
-            onClick={(event) => {
-              event.stopPropagation();
-              onWatchlist(item.instrument_token);
-            }}
-          >
-            <Star className="h-3.5 w-3.5" fill={watched ? "currentColor" : "none"} />
-          </button>
-        </div>
-      </td>
-    </tr>
+    <p className="p-6 text-sm" style={{ color: "var(--muted)" }}>
+      {children}
+    </p>
   );
 }
 
-function SetupInspector({ evaluation }: { evaluation: ScannerEvaluation }) {
-  const script = (evaluation.script_name || resolveScriptName(evaluation.instrument_token));
-  const [candles, setCandles] = useState<MarketCandle[]>([]);
+function Side({ side }: { side: "LONG" | "SHORT" | null }) {
+  return side ? <span className={`status-pill ${side === "LONG" ? "status-good" : "status-bad"}`}>{side}</span> : <>—</>;
+}
 
-  useEffect(() => {
-    void api
-      .candles(evaluation.instrument_token, evaluation.session_date)
-      .then(setCandles)
-      .catch(() => setCandles([]));
-  }, [evaluation.instrument_token, evaluation.session_date]);
-
-  const risk =
-    evaluation.entry_price !== null && evaluation.stop_price !== null
-      ? Math.abs(evaluation.entry_price - evaluation.stop_price)
-      : null;
-  const reward =
-    evaluation.entry_price !== null && evaluation.target_price !== null
-      ? Math.abs(evaluation.target_price - evaluation.entry_price)
-      : null;
-
+function Summary({ day, onInspect }: { day: ScannerDay; onInspect: (id: string) => void }) {
+  const { totals } = day;
+  if (!totals.checks) {
+    return (
+      <article className="panel mt-5">
+        <Empty>Nothing was scanned on {dayLabel(day.session_date)}.</Empty>
+      </article>
+    );
+  }
+  const most = Math.max(1, ...day.reasons.map((item) => item.count));
   return (
-    <aside className="panel h-fit p-5">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="eyebrow">Setup inspector</p>
-          <div className="mt-1 flex items-center gap-2">
-            <span className="rounded bg-emerald-500/15 px-2.5 py-1 text-sm font-bold text-emerald-600 dark:text-emerald-300 border border-emerald-500/25">
-              {script}
-            </span>
-            <h3 className="text-sm font-mono opacity-80">{evaluation.instrument_token}</h3>
-          </div>
-          <p className="mt-1 text-xs opacity-70">
-            {evaluation.strategy_name} · v{evaluation.strategy_version}
-          </p>
-        </div>
-        <span className={`status-pill ${statusTone(evaluation.status)}`}>
-          {titleCase(evaluation.status)}
-        </span>
-      </div>
-
-      <p className="mt-5 text-sm leading-6 opacity-90">{evaluation.reason}</p>
-
-      <CandleChart candles={candles} evaluation={evaluation} />
-
-      <section className="mt-6">
-        <p className="text-[11px] font-bold uppercase tracking-[.15em] text-slate-500 dark:text-slate-400">
-          Score explanation
-        </p>
-        <div className="mt-3 space-y-3">
-          {Object.entries(evaluation.score_breakdown).length ? (
-            Object.entries(evaluation.score_breakdown).map(([label, score]) => (
-              <div key={label}>
-                <div className="mb-1 flex justify-between text-xs">
-                  <span className="opacity-80">{label.replaceAll("_", " ")}</span>
-                  <span className="numeric font-medium">{score}/20</span>
-                </div>
-                <div className="score-track">
-                  <div
-                    className="score-fill"
-                    style={{ width: `${Math.min(score * 5, 100)}%` }}
-                  />
-                </div>
-              </div>
-            ))
-          ) : (
-            <p className="empty-inset text-xs">
-              No score breakdown was produced because the evaluation was blocked before strategy scoring.
-            </p>
-          )}
-        </div>
-      </section>
-
-      <InspectorConditions evaluation={evaluation} />
-
-      <dl className="data-list mt-6">
-        <div>
-          <dt>Entry</dt>
-          <dd className="numeric">
-            {evaluation.entry_price === null ? "—" : `₹${formatPrice(evaluation.entry_price)}`}
-          </dd>
-        </div>
-        <div>
-          <dt>Stop</dt>
-          <dd className="numeric">
-            {evaluation.stop_price === null ? "—" : `₹${formatPrice(evaluation.stop_price)}`}
-          </dd>
-        </div>
-        <div>
-          <dt>Target</dt>
-          <dd className="numeric">
-            {evaluation.target_price === null ? "—" : `₹${formatPrice(evaluation.target_price)}`}
-          </dd>
-        </div>
-        <div>
-          <dt>Quantity</dt>
-          <dd className="numeric">{evaluation.quantity ?? "—"}</dd>
-        </div>
-        <div>
-          <dt>Paper risk</dt>
-          <dd className="numeric">
-            {evaluation.risk_amount === null ? "—" : `₹${formatPrice(evaluation.risk_amount)}`}
-          </dd>
-        </div>
-        <div>
-          <dt>Reward : risk</dt>
-          <dd className="numeric">{risk && reward ? `${(reward / risk).toFixed(2)}R` : "—"}</dd>
-        </div>
+    <div className="mt-5 space-y-5">
+      <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Figure label="Shares watched" value={count(totals.shares)} note={dayLabel(day.session_date)} />
+        <Figure
+          label="Checks made"
+          value={count(totals.checks)}
+          note={`${count(totals.outside_hours)} were outside a strategy's trading hours`}
+        />
+        <Figure
+          label="Setups scored"
+          value={count(totals.scored)}
+          note="Came close enough for the strategy to give a score"
+        />
+        <Figure
+          label="Signals"
+          value={count(totals.accepted)}
+          note={
+            totals.blocked_by_data
+              ? `${count(totals.blocked_by_data)} checks skipped for missing candles`
+              : "No check was skipped for missing candles"
+          }
+        />
       </dl>
 
-      <p className="mt-5 text-xs leading-5 text-slate-500 dark:text-slate-400">
-        This is a strategy evaluation record, not a broker instruction or an open position.
-      </p>
-    </aside>
-  );
-}
+      <Panel title="Signals taken" note="Passed every rule of the strategy. Whether an order followed is in History.">
+        {day.signals.length ? (
+          <Moments rows={day.signals} label="signals" onInspect={onInspect} />
+        ) : (
+          <Empty>No signal this day.</Empty>
+        )}
+      </Panel>
 
-function InspectorConditions({ evaluation }: { evaluation: ScannerEvaluation }) {
-  const snapshot = evaluation.indicator_snapshot;
-  const conditions = [
-    ["Breakout / retest", evaluation.decision_state.replaceAll("_", " ")],
-    ["Volume confirmation", `RVOL ${numberText(valueAt(snapshot, "volume.relative_volume"))}`],
-    ["VWAP", numberText(valueAt(snapshot, "vwap"))],
-    ["EMA", `${numberText(valueAt(snapshot, "ema_fast"))} / ${numberText(valueAt(snapshot, "ema_slow"))}`],
-    ["Market confirmation", String(valueAt(snapshot, "nifty_regime.regime") ?? "—")],
-    [
-      "Relative strength",
-      numberText(valueAt(snapshot, "relative_strength.relative_strength_percent"), "%"),
-    ],
-  ];
-
-  return (
-    <section className="mt-6">
-      <p className="text-[11px] font-bold uppercase tracking-[.15em] text-slate-500 dark:text-slate-400">
-        Conditions
-      </p>
-      <div className="data-list mt-3">
-        {conditions.map(([label, value]) => (
-          <div key={label}>
-            <dt>{label}</dt>
-            <dd>{value}</dd>
+      <div className="grid gap-5 xl:grid-cols-2">
+        <Panel title="Which strategy found setups" note="No scores means it found no setup, not that the score limit refused one.">
+          <div className="table-scroll">
+            <table className="terminal-table" aria-label="Strategies this day">
+              <thead>
+                <tr>
+                  <th>Strategy</th>
+                  <th>In hours</th>
+                  <th>Scored</th>
+                  <th>Signals</th>
+                  <th>Best score</th>
+                </tr>
+              </thead>
+              <tbody>
+                {day.strategies.map((row) => (
+                  <tr key={row.strategy_id}>
+                    <td>
+                      <strong>{row.strategy_name}</strong>
+                    </td>
+                    <td className="numeric">{count(row.checks - row.outside_hours)}</td>
+                    <td className="numeric">{count(row.scored)}</td>
+                    <td className="numeric">{row.accepted}</td>
+                    <td className="numeric">{row.best_score || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        ))}
+        </Panel>
+
+        <Panel title="What stopped the rest" note="Most common first, counted only inside trading hours.">
+          {day.reasons.length ? (
+            <ol className="max-h-[420px] space-y-3 overflow-auto p-5">
+              {day.reasons.map((item) => (
+                <li key={item.reason}>
+                  <div className="flex items-baseline justify-between gap-4 text-sm" style={{ color: "var(--text-body)" }}>
+                    <span>{item.reason}</span>
+                    <span className="numeric font-semibold">{count(item.count)}</span>
+                  </div>
+                  <div className="mt-1 h-1.5 rounded-full" style={{ background: "var(--glass-muted)" }} aria-hidden>
+                    <div
+                      className="h-1.5 rounded-full"
+                      style={{ width: `${(item.count / most) * 100}%`, background: "var(--info)" }}
+                    />
+                  </div>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <Empty>Nothing was turned away inside trading hours.</Empty>
+          )}
+        </Panel>
       </div>
-      {evaluation.failed_conditions.length > 0 && (
-        <div className="mt-4 rounded-md border border-rose-900/40 bg-rose-950/20 p-4">
-          <p className="text-[10px] font-bold uppercase tracking-[.15em] text-rose-600 dark:text-rose-300">
-            Failed conditions
-          </p>
-          <ul className="mt-2 space-y-1 text-xs leading-5 text-rose-700 dark:text-rose-200">
-            {evaluation.failed_conditions.map((condition) => (
-              <li key={condition}>• {condition}</li>
+
+      <Panel title="Closest misses" note="Scored but not taken, best score first.">
+        {day.near.length ? (
+          <Moments rows={day.near} label="misses" onInspect={onInspect} />
+        ) : (
+          <Empty>No setup came close enough to be scored.</Empty>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+function Figure({ label, value, note }: { label: string; value: string; note: string }) {
+  return (
+    <div className="panel p-5">
+      <dt className="text-xs" style={{ color: "var(--muted)" }}>
+        {label}
+      </dt>
+      <dd className="mt-1 text-2xl font-semibold" style={{ color: "var(--foreground)" }}>
+        {value}
+      </dd>
+      <dd className="mt-1 text-xs" style={{ color: "var(--muted)" }}>
+        {note}
+      </dd>
+    </div>
+  );
+}
+
+function Moments({ rows, label, onInspect }: { rows: ScannerMoment[]; label: string; onInspect: (id: string) => void }) {
+  return (
+    <Paged rows={rows} label={label} initial={10}>
+      {(visible) => (
+        <div className="table-scroll">
+          <table className="terminal-table" aria-label={label}>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Share</th>
+                <th>Strategy</th>
+                <th>Side</th>
+                <th>Score</th>
+                <th>Why</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((row) => (
+                <tr key={row.id} onClick={() => onInspect(row.id)}>
+                  <td className="numeric">{timeOf(row.at)}</td>
+                  <td>
+                    <strong title={row.instrument_token}>{row.script_name}</strong>
+                  </td>
+                  <td>{row.strategy_name}</td>
+                  <td>
+                    <Side side={row.side} />
+                  </td>
+                  <td className="numeric">{row.score}</td>
+                  <td>{row.reason}</td>
+                  <td>
+                    <Details name={row.script_name} onClick={() => onInspect(row.id)} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Paged>
+  );
+}
+
+function Details({ name, onClick }: { name: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="secondary-button px-2.5 py-1 text-xs"
+      aria-label={`Inspect ${name}`}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
+    >
+      Details
+    </button>
+  );
+}
+
+function Shares({ day, onInspect }: { day: ScannerDay; onInspect: (id: string) => void }) {
+  const [search, setSearch] = useState("");
+  const [onlyStarred, setOnlyStarred] = useState(false);
+  const [stars, setStars] = useState<string[]>([]);
+
+  useEffect(() => {
+    try {
+      const stored: unknown = JSON.parse(window.localStorage.getItem(STARS) ?? "[]");
+      if (Array.isArray(stored)) setStars(stored.map(String));
+    } catch {
+      /* stars simply start empty */
+    }
+  }, []);
+
+  const toggle = (token: string) => {
+    const next = stars.includes(token) ? stars.filter((item) => item !== token) : [...stars, token];
+    setStars(next);
+    try {
+      window.localStorage.setItem(STARS, JSON.stringify(next));
+    } catch {
+      /* starred until the page reloads */
+    }
+  };
+
+  const wanted = search.trim().toLowerCase();
+  const rows = day.shares.filter(
+    (row: ScannerShareDay) =>
+      (!wanted || row.script_name.toLowerCase().includes(wanted) || row.instrument_token.toLowerCase().includes(wanted)) &&
+      (!onlyStarred || stars.includes(row.instrument_token)),
+  );
+
+  return (
+    <div className="mt-5">
+      <Panel title="Where each share stood" note="The best moment any strategy saw in it that day. Stars are kept in this browser only.">
+        <div className="flex flex-wrap items-center gap-3 px-5 py-3">
+          <SearchBox value={search} onChange={setSearch} label="Find a share" />
+          <label className="flex items-center gap-2 text-xs" style={{ color: "var(--muted)" }}>
+            <input type="checkbox" checked={onlyStarred} onChange={(event) => setOnlyStarred(event.target.checked)} />
+            Starred only
+          </label>
+        </div>
+        {rows.length ? (
+          <Paged rows={rows} label="shares">
+            {(visible) => (
+              <div className="table-scroll">
+                <table className="terminal-table" aria-label="Shares this day">
+                  <thead>
+                    <tr>
+                      <th>Share</th>
+                      <th>Last price</th>
+                      <th>Signals</th>
+                      <th>Scored</th>
+                      <th>Best score</th>
+                      <th>Strategy and time</th>
+                      <th>Outcome of that moment</th>
+                      <th>Skipped (data)</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visible.map((row) => {
+                      const starred = stars.includes(row.instrument_token);
+                      return (
+                        <tr key={row.instrument_token} onClick={() => row.best && onInspect(row.best.id)}>
+                          <td>
+                            <strong title={row.instrument_token}>{row.script_name}</strong>
+                          </td>
+                          <td className="numeric">{row.last_close === null ? "—" : `₹${formatPrice(row.last_close)}`}</td>
+                          <td className="numeric">{row.accepted || "—"}</td>
+                          <td className="numeric">{row.scored || "—"}</td>
+                          <td className="numeric">{row.best?.score ?? "—"}</td>
+                          <td>{row.best ? `${row.best.strategy_name}, ${timeOf(row.best.at)}` : "No setup"}</td>
+                          <td>{row.best?.reason ?? "—"}</td>
+                          <td className="numeric">{row.blocked || "—"}</td>
+                          <td>
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                className="icon-button"
+                                aria-pressed={starred}
+                                aria-label={`Star ${row.script_name}`}
+                                style={{ color: starred ? "var(--warning)" : "var(--muted)" }}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  toggle(row.instrument_token);
+                                }}
+                              >
+                                <Star className="h-3.5 w-3.5" fill={starred ? "currentColor" : "none"} />
+                              </button>
+                              {row.best && <Details name={row.script_name} onClick={() => onInspect(row.best!.id)} />}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Paged>
+        ) : (
+          <Empty>No share matches.</Empty>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+function SearchBox({ value, onChange, label }: { value: string; onChange: (next: string) => void; label: string }) {
+  return (
+    <label className="relative min-w-[12rem] flex-1 sm:max-w-xs">
+      <Search className="absolute left-3 top-3 h-4 w-4" style={{ color: "var(--muted)" }} />
+      <span className="sr-only">{label}</span>
+      <input
+        className="field-input pl-9"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={label}
+        maxLength={60}
+      />
+    </label>
+  );
+}
+
+function Checks({ day, onOpen }: { day: ScannerDay; onOpen: (row: ScannerEvaluation) => void }) {
+  const [status, setStatus] = useState("");
+  const [strategy, setStrategy] = useState("");
+  const [search, setSearch] = useState("");
+  const [typed, setTyped] = useState("");
+  const [hideOutside, setHideOutside] = useState(true);
+  const [sort, setSort] = useState<"time" | "score">("time");
+  const [page, setPage] = useState(1);
+  const [size, setSize] = useState(25);
+  const [result, setResult] = useState<EvaluationPage | null>(null);
+  const [error, setError] = useState("");
+  const latest = useRef(0);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setSearch(typed.trim());
+      setPage(1);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [typed]);
+
+  useEffect(() => {
+    const request = ++latest.current;
+    void api
+      .evaluationPage({
+        session_date: day.session_date,
+        status: status || undefined,
+        strategy_id: strategy || undefined,
+        search: search || undefined,
+        hide_outside: hideOutside ? "true" : undefined,
+        sort,
+        limit: String(size),
+        offset: String((page - 1) * size),
+      })
+      .then((next) => {
+        if (request !== latest.current) return;
+        setResult(next);
+        setError("");
+      })
+      .catch((caught: unknown) => {
+        if (request === latest.current) setError(caught instanceof Error ? caught.message : "Could not load the checks");
+      });
+  }, [day.session_date, status, strategy, search, hideOutside, sort, page, size]);
+
+  const first = <T,>(set: (value: T) => void) => (value: T) => {
+    set(value);
+    setPage(1);
+  };
+
+  return (
+    <div className="mt-5">
+      <Panel title="Every check" note="One row is one share looked at by one strategy on one candle.">
+        <div className="flex flex-wrap items-center gap-3 px-5 py-3">
+          <SearchBox value={typed} onChange={setTyped} label="Find a share" />
+          <select
+            aria-label="Evaluation state"
+            className="field-input w-auto py-2"
+            value={status}
+            onChange={(event) => first(setStatus)(event.target.value)}
+          >
+            <option value="">Any result</option>
+            <option value="ACCEPTED">Signal</option>
+            <option value="WATCHING">Watching</option>
+            <option value="REJECTED">Rejected</option>
+          </select>
+          <select
+            aria-label="Strategy"
+            className="field-input w-auto py-2"
+            value={strategy}
+            onChange={(event) => first(setStrategy)(event.target.value)}
+          >
+            <option value="">All strategies</option>
+            {day.strategies.map((item) => (
+              <option key={item.strategy_id} value={item.strategy_id}>
+                {item.strategy_name}
+              </option>
             ))}
-          </ul>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function CandleChart({
-  candles,
-  evaluation,
-}: {
-  candles: MarketCandle[];
-  evaluation: ScannerEvaluation;
-}) {
-  const range = useMemo(
-    () => ({
-      low: Math.min(
-        ...candles.map((item) => item.low),
-        evaluation.stop_price ?? evaluation.candle_close,
-      ),
-      high: Math.max(
-        ...candles.map((item) => item.high),
-        evaluation.target_price ?? evaluation.candle_close,
-      ),
-    }),
-    [candles, evaluation.candle_close, evaluation.stop_price, evaluation.target_price],
-  );
-
-  const width = 320;
-  const height = 120;
-  const spread = Math.max(range.high - range.low, 0.01);
-  const y = (price: number) => height - ((price - range.low) / spread) * height;
-  const points = candles
-    .map(
-      (item, index) =>
-        `${(index / Math.max(candles.length - 1, 1)) * width},${y(item.close)}`,
-    )
-    .join(" ");
-
-  return (
-    <section className="mt-6">
-      <div className="mb-3 flex justify-between text-[11px] font-semibold uppercase tracking-[.14em] text-slate-500 dark:text-slate-400">
-        <span>Completed-candle chart</span>
-        <span>{candles.length} candles</span>
-      </div>
-      {candles.length ? (
-        <svg viewBox={`0 0 ${width} ${height}`} className="signal-chart">
-          <polyline points={points} fill="none" stroke="var(--foreground)" strokeWidth="2" />
-          {evaluation.entry_price !== null && (
-            <line
-              x1="0"
-              x2={width}
-              y1={y(evaluation.entry_price)}
-              y2={y(evaluation.entry_price)}
-              stroke="var(--positive)"
-              strokeDasharray="4 3"
+            <option value="data-quality">Skipped for missing candles</option>
+          </select>
+          <select
+            aria-label="Order"
+            className="field-input w-auto py-2"
+            value={sort}
+            onChange={(event) => first(setSort)(event.target.value as "time" | "score")}
+          >
+            <option value="time">Newest first</option>
+            <option value="score">Best score first</option>
+          </select>
+          <label className="flex items-center gap-2 text-xs" style={{ color: "var(--muted)" }}>
+            <input
+              type="checkbox"
+              checked={hideOutside}
+              onChange={(event) => first(setHideOutside)(event.target.checked)}
             />
-          )}
-          {evaluation.stop_price !== null && (
-            <line
-              x1="0"
-              x2={width}
-              y1={y(evaluation.stop_price)}
-              y2={y(evaluation.stop_price)}
-              stroke="var(--negative)"
-              strokeDasharray="4 3"
-            />
-          )}
-        </svg>
-      ) : (
-        <div className="empty-inset text-xs">
-          No completed candles are retained for this evaluation’s session.
+            Hide checks outside trading hours
+          </label>
         </div>
-      )}
-    </section>
-  );
-}
-
-function EmptyInspector() {
-  return (
-    <aside className="panel p-6">
-      <p className="eyebrow">Setup inspector</p>
-      <h3 className="mt-1 text-lg font-semibold">Select an evaluation</h3>
-      <p className="mt-3 text-sm leading-6 opacity-70">
-        When the scanner processes a completed candle, its strategy state, score, and rejection reasons can be inspected here.
-      </p>
-    </aside>
+        {error ? (
+          <Empty>{error}</Empty>
+        ) : !result ? (
+          <Empty>Loading…</Empty>
+        ) : result.items.length ? (
+          <div className="table-scroll">
+            <table className="terminal-table" aria-label="Every check">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Share</th>
+                  <th>Strategy</th>
+                  <th>Result</th>
+                  <th>Why</th>
+                  <th>Side</th>
+                  <th>Score</th>
+                  <th>Price</th>
+                  <th>Volume</th>
+                  <th>Data</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {result.items.map((row) => (
+                  <tr key={row.id} onClick={() => onOpen(row)}>
+                    <td className="muted-cell">{formatIstTimestamp(row.candle_opened_at)}</td>
+                    <td>
+                      <strong title={row.instrument_token}>{row.script_name ?? row.instrument_token}</strong>
+                    </td>
+                    <td>{row.strategy_name}</td>
+                    <td>
+                      <span
+                        className={`status-pill ${
+                          row.status === "ACCEPTED" ? "status-good" : row.status === "REJECTED" ? "status-bad" : "status-watch"
+                        }`}
+                      >
+                        {row.status === "ACCEPTED" ? "Signal" : titleCase(row.status.toLowerCase())}
+                      </span>
+                    </td>
+                    <td>{row.reason}</td>
+                    <td>
+                      <Side side={row.side} />
+                    </td>
+                    <td className="numeric">{row.score || "—"}</td>
+                    <td className="numeric">₹{formatPrice(row.candle_close)}</td>
+                    <td className="numeric">{count(row.candle_volume)}</td>
+                    <td>
+                      <span className={`status-pill ${statusTone(row.data_quality_state)}`}>{row.data_quality_state}</span>
+                    </td>
+                    <td>
+                      <Details name={row.script_name ?? row.instrument_token} onClick={() => onOpen(row)} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <Empty>No check matches.</Empty>
+        )}
+        {result && !error && (
+          <Pager
+            total={result.total}
+            page={page}
+            size={size}
+            onPage={setPage}
+            onSize={(next) => first(setSize)(next)}
+            label="checks"
+          />
+        )}
+      </Panel>
+    </div>
   );
 }

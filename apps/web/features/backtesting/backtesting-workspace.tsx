@@ -3,6 +3,7 @@
 import { FlaskConical, Play, RefreshCw, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { Paged } from "../../components/paged";
 import { api, type BacktestRun, type BacktestSweep, type PaperStrategy } from "../../components/api";
 import { formatIstTimestamp, formatPrice } from "../../lib/formatting";
 
@@ -151,26 +152,30 @@ function ParameterSweep({ isAdmin, strategies, onMessage }: { isAdmin: boolean; 
 function SweepResults({ sweep, isAdmin, onPromote }: { sweep: BacktestSweep; isAdmin: boolean; onPromote: (index: number) => void }) {
   const ordered = [...sweep.combinations].sort((a, b) => b.validation.return_percent - a.validation.return_percent);
   return (
-    <div className="mt-6 table-scroll">
-      <table className="terminal-table">
-        <thead>
-          <tr><th>#</th><th>Parameters</th><th>In-sample</th><th>Validation</th><th></th></tr>
-        </thead>
-        <tbody>
-          {ordered.map((combo) => (
-            <tr key={combo.index} className={combo.index === sweep.best_index ? "table-selected" : ""}>
-              <td className="numeric">{combo.index}{combo.index === sweep.best_index ? " ★" : ""}{combo.index === sweep.promoted_index ? " ✓" : ""}</td>
-              <td className="text-xs font-mono">{Object.entries(combo.parameters).map(([k, v]) => `${k}=${v}`).join(", ")}</td>
-              <td className="numeric text-xs">{combo.in_sample.return_percent}% · {combo.in_sample.trades}t · {combo.in_sample.win_rate_percent}%</td>
-              <td className={`numeric text-xs ${combo.validation.return_percent > 0 ? "text-emerald-300" : combo.validation.return_percent < 0 ? "text-rose-300" : ""}`}>
-                {combo.validation.return_percent}% · {combo.validation.trades}t · {combo.validation.win_rate_percent}%{combo.proven ? "" : " (unproven)"}
-              </td>
-              <td>{isAdmin && <button className="secondary-button h-7 py-0 text-xs" onClick={() => onPromote(combo.index)}>Promote</button>}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <Paged rows={ordered}>
+      {(visible) => (
+        <div className="mt-6 table-scroll">
+          <table className="terminal-table">
+            <thead>
+              <tr><th>#</th><th>Parameters</th><th>In-sample</th><th>Validation</th><th></th></tr>
+            </thead>
+            <tbody>
+              {visible.map((combo) => (
+                <tr key={combo.index} className={combo.index === sweep.best_index ? "table-selected" : ""}>
+                  <td className="numeric">{combo.index}{combo.index === sweep.best_index ? " ★" : ""}{combo.index === sweep.promoted_index ? " ✓" : ""}</td>
+                  <td className="text-xs font-mono">{Object.entries(combo.parameters).map(([k, v]) => `${k}=${v}`).join(", ")}</td>
+                  <td className="numeric text-xs">{combo.in_sample.return_percent}% · {combo.in_sample.trades}t · {combo.in_sample.win_rate_percent}%</td>
+                  <td className={`numeric text-xs ${combo.validation.return_percent > 0 ? "text-emerald-300" : combo.validation.return_percent < 0 ? "text-rose-300" : ""}`}>
+                    {combo.validation.return_percent}% · {combo.validation.trades}t · {combo.validation.win_rate_percent}%{combo.proven ? "" : " (unproven)"}
+                  </td>
+                  <td>{isAdmin && <button className="secondary-button h-7 py-0 text-xs" onClick={() => onPromote(combo.index)}>Promote</button>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Paged>
   );
 }
 
@@ -190,4 +195,4 @@ function EquityCurve({ points }: { points: { equity: number }[] }) {
 
 function Metric({ label, value, tone = "text-white" }: { label: string; value: string; tone?: string }) { return <article className="glass-inset rounded-md p-4"><p className="eyebrow">{label}</p><p className={`mt-2 numeric text-2xl font-semibold ${tone}`}>{value}</p></article>; }
 
-function Runs({ rows, loading }: { rows: BacktestRun[]; loading: boolean }) { return <article className="panel mt-6 overflow-hidden"><div className="border-b border-slate-800 px-5 py-4"><p className="eyebrow">Research ledger</p><h3 className="font-semibold text-white">Persisted backtest runs</h3></div>{loading ? <div className="space-y-2 p-5">{Array.from({ length: 3 }, (_, index) => <div key={index} className="skeleton h-12" />)}</div> : rows.length ? <div className="table-scroll"><table className="terminal-table"><thead><tr><th>Period</th><th>Instruments</th><th>Trades</th><th>Net P&amp;L</th><th>Drawdown</th><th>Created</th></tr></thead><tbody>{rows.map((run) => <tr key={run.id}><td><strong>{run.start_date} → {run.end_date}</strong><span>{run.status}</span></td><td>{run.instrument_tokens.join(", ")}</td><td className="numeric">{run.summary.trades}</td><td className={`numeric ${(run.net_pnl ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}`}>₹{formatPrice(run.net_pnl ?? 0)}</td><td className="numeric">₹{formatPrice(run.max_drawdown ?? 0)}</td><td className="muted-cell">{formatIstTimestamp(run.created_at)}</td></tr>)}</tbody></table></div> : <div className="p-5 text-sm text-slate-500">No stored historical research runs.</div>}</article>; }
+function Runs({ rows, loading }: { rows: BacktestRun[]; loading: boolean }) { return <article className="panel mt-6 overflow-hidden"><div className="border-b border-slate-800 px-5 py-4"><p className="eyebrow">Research ledger</p><h3 className="font-semibold text-white">Persisted backtest runs</h3></div>{loading ? <div className="space-y-2 p-5">{Array.from({ length: 3 }, (_, index) => <div key={index} className="skeleton h-12" />)}</div> : rows.length ? <Paged rows={rows}>{(visible) => <div className="table-scroll"><table className="terminal-table"><thead><tr><th>Period</th><th>Instruments</th><th>Trades</th><th>Net P&amp;L</th><th>Drawdown</th><th>Created</th></tr></thead><tbody>{visible.map((run) => <tr key={run.id}><td><strong>{run.start_date} → {run.end_date}</strong><span>{run.status}</span></td><td>{run.instrument_tokens.join(", ")}</td><td className="numeric">{run.summary.trades}</td><td className={`numeric ${(run.net_pnl ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300"}`}>₹{formatPrice(run.net_pnl ?? 0)}</td><td className="numeric">₹{formatPrice(run.max_drawdown ?? 0)}</td><td className="muted-cell">{formatIstTimestamp(run.created_at)}</td></tr>)}</tbody></table></div>}</Paged> : <div className="p-5 text-sm text-slate-500">No stored historical research runs.</div>}</article>; }

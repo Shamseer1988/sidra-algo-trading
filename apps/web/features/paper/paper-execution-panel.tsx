@@ -3,6 +3,7 @@
 import { CalendarRange, RefreshCw } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
+import { Paged } from "../../components/paged";
 import { api, type PaperDay, type PaperDayOrder, type PaperDayPosition } from "../../components/api";
 import { formatIstTimestamp, formatPrice, titleCase } from "../../lib/formatting";
 import { strategyLabel } from "../../lib/strategy-names";
@@ -191,7 +192,7 @@ function Frame({ title, empty, children }: { title: string; empty: string | null
       {empty ? (
         <p className="p-8 text-center text-sm text-slate-500 dark:text-slate-400">{empty}</p>
       ) : (
-        <div className="table-scroll">{children}</div>
+        children
       )}
     </article>
   );
@@ -200,6 +201,9 @@ function Frame({ title, empty, children }: { title: string; empty: string | null
 function Orderbook({ rows }: { rows: PaperDayOrder[] }) {
   return (
     <Frame title="Simulated orderbook" empty={rows.length ? null : "No paper orders today."}>
+      <Paged rows={rows}>
+        {(visible) => (
+      <div className="table-scroll">
       <table className="terminal-table">
         <thead>
           <tr>
@@ -214,7 +218,7 @@ function Orderbook({ rows }: { rows: PaperDayOrder[] }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => (
+          {visible.map((row) => (
             <tr key={row.id}>
               <td className="muted-cell">{formatIstTimestamp(row.created_at)}</td>
               <td>
@@ -249,6 +253,9 @@ function Orderbook({ rows }: { rows: PaperDayOrder[] }) {
           ))}
         </tbody>
       </table>
+      </div>
+        )}
+      </Paged>
     </Frame>
   );
 }
@@ -256,6 +263,9 @@ function Orderbook({ rows }: { rows: PaperDayOrder[] }) {
 function Positions({ rows }: { rows: PaperDayPosition[] }) {
   return (
     <Frame title="Simulated positions" empty={rows.length ? null : "No paper positions today."}>
+      <Paged rows={rows}>
+        {(visible) => (
+      <div className="table-scroll">
       <table className="terminal-table">
         <thead>
           <tr>
@@ -273,7 +283,7 @@ function Positions({ rows }: { rows: PaperDayPosition[] }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => {
+          {visible.map((row) => {
             const closed = row.status === "CLOSED";
             // One figure is always zero: realised while open, unrealised once closed.
             return (
@@ -315,6 +325,9 @@ function Positions({ rows }: { rows: PaperDayPosition[] }) {
           })}
         </tbody>
       </table>
+      </div>
+        )}
+      </Paged>
     </Frame>
   );
 }

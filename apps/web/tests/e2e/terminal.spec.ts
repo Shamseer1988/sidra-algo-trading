@@ -452,6 +452,20 @@ const MOCK_STRATEGY_RESULTS = [
 const MOCK_RISK_SUMMARY = { session_date: "2026-08-31", daily_risk_limit: 1000, daily_risk_allocated: 500, daily_risk_available: 500, maximum_open_positions: 3, active_reservations: 1, open_positions: 1, exposure_limit: 100000, current_exposure: 91232, exposure_available: 8768, rejected_reservations: 0 };
 const MOCK_BACKTESTS = [{ id: "backtest-1", status: "COMPLETED", start_date: "2026-08-24", end_date: "2026-08-31", timeframe_seconds: 60, instrument_tokens: ["NSE:RELIANCE"], source_candle_count: 1875, data_fingerprint: "a1b2c3d4e5f67890", initial_capital: 100000, final_equity: 101250, net_pnl: 1250, max_drawdown: 420, failure_detail: null, created_at: new Date().toISOString(), summary: { trades: 4, winners: 3, losers: 1, win_rate: 75, net_pnl: 1250, profit_factor: 2.5, initial_capital: 100000, final_equity: 101250, return_percent: 1.25, max_drawdown: 420, equity_curve: [{ at: null, equity: 100000, drawdown: 0 }, { at: new Date().toISOString(), equity: 101250, drawdown: 0 }], strategy_comparison: [{ strategy_id: "orb-default", strategy_name: "ORB Retest — Default", strategy_version: 1, trades: 4, winners: 3, losers: 1, win_rate: 75, net_pnl: 1250, profit_factor: 2.5 }] } }];
 
+const MOCK_SCANNER_DAY = {
+  session_date: "2026-08-31",
+  sessions: ["2026-08-31", "2026-08-28"],
+  totals: { checks: 51186, outside_hours: 29028, blocked_by_data: 201, scored: 454, accepted: 1, shares: 33, last_candle: new Date().toISOString() },
+  strategies: [{ strategy_id: "orb-default", strategy_name: "ORB Retest — Default", checks: 10197, outside_hours: 5800, scored: 120, accepted: 1, best_score: 95 }],
+  reasons: [{ reason: "Awaiting a pullback to VWAP", count: 1495 }, { reason: "EMA spread indicates choppy market", count: 40 }],
+  signals: [{ id: "eval-001", instrument_token: "NSE:RELIANCE", script_name: "RELIANCE", at: "2026-08-31T04:16:00Z", strategy_name: "ORB Retest — Default", side: "LONG", score: 95, reason: "Paper signal confirmed" }],
+  near: [{ id: "eval-002", instrument_token: "NSE:INFY", script_name: "INFY", at: "2026-08-31T04:30:00Z", strategy_name: "ORB Retest — Default", side: null, score: 70, reason: "EMA spread indicates choppy market" }],
+  shares: Array.from({ length: 33 }, (_, index) => ({
+    instrument_token: `NSE:${index}`, script_name: `SHARE${String(index + 1).padStart(2, "0")}`, last_close: 100 + index, accepted: index === 0 ? 1 : 0, scored: 3, blocked: 0,
+    best: { id: "eval-002", instrument_token: `NSE:${index}`, script_name: `SHARE${index + 1}`, at: "2026-08-31T04:30:00Z", strategy_name: "ORB Retest — Default", side: null, score: 70 - index, reason: "Retest failed score threshold" },
+  })),
+};
+
 const MOCK_SIGNALS = [
   {
     id: "sig-001",
@@ -595,6 +609,19 @@ export async function setupMockRoutes(page: Page, userRole: "ADMIN" | "VIEWER" =
 
   await page.route("**/api/v1/scanner/evaluations*", async (route: Route) => {
     await route.fulfill({ json: MOCK_EVALUATIONS });
+  });
+  await page.route("**/api/v1/scanner/evaluations/**", async (route: Route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/page")) {
+      const status = url.searchParams.get("status");
+      const items = MOCK_EVALUATIONS.filter((row) => !status || row.status === status);
+      await route.fulfill({ json: { total: status ? items.length : 51186, items } });
+    } else {
+      await route.fulfill({ json: MOCK_EVALUATIONS.find((row) => url.pathname.endsWith(row.id)) });
+    }
+  });
+  await page.route("**/api/v1/scanner/day*", async (route: Route) => {
+    await route.fulfill({ json: MOCK_SCANNER_DAY });
   });
 
   await page.route("**/api/v1/safety/status", async (route: Route) => {
@@ -1172,44 +1199,94 @@ test.describe("Phase 9 Release Gate 1: Browser E2E Tests", () => {
     await expect(page.getByRole("heading", { name: "Signals" })).toBeVisible();
 
     // Verify both mock signals render in table
-    await expect(page.getByRole("cell", { name: /NSE:RELIANCE/ })).toBeVisible();
-    await expect(page.getByRole("cell", { name: /NSE:INFY/ })).toBeVisible();
+    await expect(page.getByRole("cell", { name: "RELIANCE", exact: true })).toBeVisible();
+    await expect(page.getByRole("cell", { name: "INFY", exact: true })).toBeVisible();
 
     // Filter by search query
     const searchInput = page.locator('[data-testid="signals-search"]');
     await searchInput.fill("RELIANCE");
-    await expect(page.getByRole("cell", { name: /NSE:RELIANCE/ })).toBeVisible();
-    await expect(page.getByRole("cell", { name: /NSE:INFY/ })).toHaveCount(0);
+    await expect(page.getByRole("cell", { name: "RELIANCE", exact: true })).toBeVisible();
+    await expect(page.getByRole("cell", { name: "INFY", exact: true })).toHaveCount(0);
 
     // Clear search and filter by Side dropdown
     await searchInput.fill("");
     const sideSelect = page.locator('[data-testid="signals-side-select"]');
     await sideSelect.selectOption("SHORT");
-    await expect(page.getByRole("cell", { name: /NSE:INFY/ })).toBeVisible();
-    await expect(page.getByRole("cell", { name: /NSE:RELIANCE/ })).toHaveCount(0);
+    await expect(page.getByRole("cell", { name: "INFY", exact: true })).toBeVisible();
+    await expect(page.getByRole("cell", { name: "RELIANCE", exact: true })).toHaveCount(0);
 
     // Reset filter and inspect chart & score breakdown
     await sideSelect.selectOption("ALL");
-    await page.click('td:has-text("NSE:RELIANCE")');
+    await page.click('td:has-text("RELIANCE")');
     await expect(page.getByText("Score breakdown")).toBeVisible();
     await expect(page.getByText("Completed-candle chart")).toBeVisible();
     await expect(page.locator('[data-testid="candle-chart"] svg polyline')).toBeVisible();
   });
 
-  test("4b. Scanner workspace: filters rejected evaluations and opens the setup inspector", async ({ page }) => {
+  test("4b. Scanner: the summary answers the day, and a row opens the full reasoning", async ({ page }) => {
     await setupMockRoutes(page, "ADMIN");
     await page.goto("/");
-
     await go(page, "Scanner & Universe", "Scanner");
-    await expect(page.getByRole("heading", { name: "Scanner workspace" })).toBeVisible();
-    await expect(page.getByText("NSE:RELIANCE", { exact: true }).first()).toBeVisible();
-
-    await page.getByLabel("Evaluation state").selectOption("REJECTED");
-    await expect(page.getByText("NSE:INFY", { exact: true }).first()).toBeVisible();
-    await expect(page.getByText("NSE:RELIANCE", { exact: true })).toHaveCount(0);
-    await page.getByRole("button", { name: "Inspect NSE:INFY" }).click();
+    await expect(page.getByRole("heading", { name: "Scanner", exact: true })).toBeVisible();
+    await expect(page.getByText("51,186", { exact: true })).toBeVisible();
+    await expect(page.getByText("Awaiting a pullback to VWAP")).toBeVisible();
+    await expect(page.getByRole("table", { name: "signals" })).toContainText("9:46 am");
+    await page.getByRole("table", { name: "misses" }).getByRole("button", { name: "Inspect INFY" }).click();
     await expect(page.getByText("Failed conditions")).toBeVisible();
     await expect(page.locator("aside ul li").filter({ hasText: "EMA spread indicates choppy market" })).toBeVisible();
+  });
+
+  test("4c. Scanner: every check is paged and filtered by the server", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await go(page, "Scanner & Universe", "Scanner");
+    await page.getByRole("button", { name: "All checks" }).click();
+    await expect(page.getByText("1 to 25 of 51,186 checks")).toBeVisible();
+    const asked = page.waitForRequest(/evaluations\/page\?.*offset=25/);
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    expect((await asked).url()).toContain("hide_outside=true");
+    // A new filter starts again at the first page.
+    const filtered = page.waitForRequest(/evaluations\/page\?.*status=REJECTED.*offset=0/);
+    await page.getByLabel("Evaluation state").selectOption("REJECTED");
+    await filtered;
+    const table = page.getByRole("table", { name: "Every check" });
+    await expect(table).toContainText("INFY");
+    await expect(table).not.toContainText("RELIANCE");
+  });
+
+  test("4d. Scanner: shares turn pages, and the table scrolls under a fixed heading", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    await page.goto("/");
+    await go(page, "Scanner & Universe", "Scanner");
+    await page.getByRole("button", { name: "By share" }).click();
+    const table = page.getByRole("table", { name: "Shares this day" });
+    await expect(table.getByRole("row")).toHaveCount(26);
+    const box = page.locator(".table-scroll").filter({ has: table });
+    const before = await table.getByRole("columnheader").first().boundingBox();
+    await box.evaluate((node) => { node.scrollTop = 200; });
+    expect(await box.evaluate((node) => node.scrollTop)).toBe(200);
+    const after = await table.getByRole("columnheader").first().boundingBox();
+    expect(Math.abs((after?.y ?? 0) - (before?.y ?? 0))).toBeLessThan(2);
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(page.getByText("26 to 33 of 33 shares")).toBeVisible();
+    await expect(table).toContainText("SHARE33");
+    await page.getByLabel("Find a share").fill("share02");
+    await expect(table.getByRole("row")).toHaveCount(2);
+    await expect(table).toContainText("SHARE02");
+  });
+
+  test("4e. Universe: with nothing built today, the last scanned day is shown and said to be", async ({ page }) => {
+    await setupMockRoutes(page, "ADMIN");
+    const entry = (name: string, selected: boolean, eligible: boolean) => ({ instrument_token: `NSE:${name}`, script_name: name, session_date: "2026-08-31", rank: 1, score: 80, selected, eligible, rejection_reason: eligible ? null : "Share price above the limit", liquidity_score: 80, volatility_score: 70, gap_score: 60, trend_score: 50, metrics: { atr_percent: 1.2, gap_percent: 0.3 } });
+    const summary = { session_date: "2026-08-31", enabled: true, universe_size: 33, total_candidates: 2, eligible: 1, selected: 1, last_built_at: null };
+    await page.route(/\/api\/v1\/universe(\?.*)?$/, async (route) => route.fulfill({ json: route.request().url().includes("session_date=2026-08-31") ? [entry("INFY", true, true), entry("HINDUNILVR", false, false)] : [] }));
+    await page.route(/\/api\/v1\/universe\/summary/, async (route) => route.fulfill({ json: summary }));
+    await page.goto("/");
+    await go(page, "Scanner & Universe", "Universe");
+    await expect(page.getByText("This is the one from 2026-08-31")).toBeVisible();
+    await expect(page.getByRole("table", { name: "Ranked shares" })).toContainText("INFY");
+    await page.getByRole("button", { name: "Left out (1)" }).click();
+    await expect(page.getByRole("table", { name: "Shares left out" })).toContainText("Share price above the limit");
   });
 
   test("5. Settings & Risk Controls: Form modification and submission", async ({ page }) => {
@@ -3575,6 +3652,9 @@ function luminance(css: string): number {
 const THEME_SCREENS: [string, string | undefined][] = [
   ["Dashboard", undefined],
   ["Orders & Positions", undefined],
+  ["Scanner & Universe", "Scanner"],
+  ["Scanner & Universe", "Signals"],
+  ["Scanner & Universe", "Market"],
   ["Reports", undefined],
   ["Settings", "General"],
   ["Settings", "Intraday trading"],

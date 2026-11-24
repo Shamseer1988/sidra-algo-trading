@@ -3,6 +3,7 @@
 import { CalendarClock, History, Layers, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { Paged } from "../../components/paged";
 import { api, type SwingPosition, type SwingSummary } from "../../components/api";
 import { SwingBacktestPanel, SwingDataPanel } from "./swing-tools";
 
@@ -200,53 +201,57 @@ function PortfolioTable({ rows, limit }: { rows: SwingPosition[]; limit: number 
   return (
     <Panel icon={Layers} eyebrow={`${rows.length} of ${limit} positions`} title="Open paper positions">
       {rows.length ? (
-        <div className="table-scroll">
-          <table className="terminal-table" data-testid="swing-portfolio">
-            <thead>
-              <tr>
-                <th>Share</th>
-                <th>Strategy</th>
-                <th>Qty</th>
-                <th>Bought</th>
-                <th>Last close</th>
-                <th>P&L</th>
-                <th>R now</th>
-                <th>Stop</th>
-                <th>Target</th>
-                <th>Held</th>
-                <th>Next</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.id}>
-                  <ShareCell row={row} />
-                  <td>{STRATEGY_LABELS[row.strategy] ?? row.strategy}</td>
-                  <td className="numeric">{row.quantity}</td>
-                  <td className="numeric">
-                    {price(row.entry_price)}
-                    <span className="block text-[11px] opacity-75">{row.entry_date}</span>
-                  </td>
-                  <td className="numeric">
-                    {price(row.last_close)}
-                    <span className="block text-[11px] opacity-75">{row.last_close_date}</span>
-                  </td>
-                  <td className={`numeric ${tone(row.unrealised)}`}>{rupees(row.unrealised)}</td>
-                  <td className={`numeric ${tone(row.r_now)}`}>{row.r_now === null ? "—" : `${row.r_now.toFixed(1)}R`}</td>
-                  <td className="numeric">
-                    {price(row.stop)}
-                    {row.partial_done && <span className="block text-[11px] text-emerald-500">half sold, stop at entry</span>}
-                  </td>
-                  <td className="numeric">{row.partial_done ? "taken" : price(row.target)}</td>
-                  <td className="numeric">
-                    {row.holding_days} / {row.max_holding_days} d
-                  </td>
-                  <td className="text-xs">{row.next_action}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Paged rows={rows}>
+          {(visible) => (
+            <div className="table-scroll">
+              <table className="terminal-table" data-testid="swing-portfolio">
+                <thead>
+                  <tr>
+                    <th>Share</th>
+                    <th>Strategy</th>
+                    <th>Qty</th>
+                    <th>Bought</th>
+                    <th>Last close</th>
+                    <th>P&L</th>
+                    <th>R now</th>
+                    <th>Stop</th>
+                    <th>Target</th>
+                    <th>Held</th>
+                    <th>Next</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((row) => (
+                    <tr key={row.id}>
+                      <ShareCell row={row} />
+                      <td>{STRATEGY_LABELS[row.strategy] ?? row.strategy}</td>
+                      <td className="numeric">{row.quantity}</td>
+                      <td className="numeric">
+                        {price(row.entry_price)}
+                        <span className="block text-[11px] opacity-75">{row.entry_date}</span>
+                      </td>
+                      <td className="numeric">
+                        {price(row.last_close)}
+                        <span className="block text-[11px] opacity-75">{row.last_close_date}</span>
+                      </td>
+                      <td className={`numeric ${tone(row.unrealised)}`}>{rupees(row.unrealised)}</td>
+                      <td className={`numeric ${tone(row.r_now)}`}>{row.r_now === null ? "—" : `${row.r_now.toFixed(1)}R`}</td>
+                      <td className="numeric">
+                        {price(row.stop)}
+                        {row.partial_done && <span className="block text-[11px] text-emerald-500">half sold, stop at entry</span>}
+                      </td>
+                      <td className="numeric">{row.partial_done ? "taken" : price(row.target)}</td>
+                      <td className="numeric">
+                        {row.holding_days} / {row.max_holding_days} d
+                      </td>
+                      <td className="text-xs">{row.next_action}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Paged>
       ) : (
         <Empty text="No paper position is open. Plans are made each evening after the close." />
       )}
@@ -258,46 +263,50 @@ function PlanTable({ rows }: { rows: SwingPosition[] }) {
   return (
     <Panel icon={CalendarClock} eyebrow="Made after the last close" title="Tomorrow's paper plan">
       {rows.length ? (
-        <div className="table-scroll">
-          <table className="terminal-table" data-testid="swing-plan">
-            <thead>
-              <tr>
-                <th>Share</th>
-                <th>Strategy</th>
-                <th>Buy if price reaches</th>
-                <th>Stop</th>
-                <th>Take half at</th>
-                <th>Qty</th>
-                <th>Risk</th>
-                <th>Why</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.id}>
-                  <ShareCell row={row} />
-                  <td>{STRATEGY_LABELS[row.strategy] ?? row.strategy}</td>
-                  <td className="numeric">{price(row.entry_trigger)}</td>
-                  <td className="numeric">{price(row.initial_stop)}</td>
-                  <td className="numeric">{price(row.target)}</td>
-                  <td className="numeric">{row.quantity}</td>
-                  <td className="numeric">{rupees(row.risk)}</td>
-                  <td className="text-xs">
-                    {Object.entries(row.reasons).map(([key, value]) => (
-                      <span key={key} className="mr-1 inline-block rounded bg-slate-500/15 px-1.5 py-0.5">
-                        {reasonText(key, value)}
-                      </span>
-                    ))}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <p className="px-5 py-3 text-xs text-slate-500">
-            Each plan is valid for the next session only. It is skipped if the share opens more than 2% above the buy
-            level.
-          </p>
-        </div>
+        <Paged rows={rows}>
+          {(visible) => (
+            <div className="table-scroll">
+              <table className="terminal-table" data-testid="swing-plan">
+                <thead>
+                  <tr>
+                    <th>Share</th>
+                    <th>Strategy</th>
+                    <th>Buy if price reaches</th>
+                    <th>Stop</th>
+                    <th>Take half at</th>
+                    <th>Qty</th>
+                    <th>Risk</th>
+                    <th>Why</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((row) => (
+                    <tr key={row.id}>
+                      <ShareCell row={row} />
+                      <td>{STRATEGY_LABELS[row.strategy] ?? row.strategy}</td>
+                      <td className="numeric">{price(row.entry_trigger)}</td>
+                      <td className="numeric">{price(row.initial_stop)}</td>
+                      <td className="numeric">{price(row.target)}</td>
+                      <td className="numeric">{row.quantity}</td>
+                      <td className="numeric">{rupees(row.risk)}</td>
+                      <td className="text-xs">
+                        {Object.entries(row.reasons).map(([key, value]) => (
+                          <span key={key} className="mr-1 inline-block rounded bg-slate-500/15 px-1.5 py-0.5">
+                            {reasonText(key, value)}
+                          </span>
+                        ))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="px-5 py-3 text-xs text-slate-500">
+                Each plan is valid for the next session only. It is skipped if the share opens more than 2% above the buy
+                level.
+              </p>
+            </div>
+          )}
+        </Paged>
       ) : (
         <Empty text="No plan for the next session. Either no setup was found, the limits are full, or NIFTY is below its 50-day average." />
       )}
@@ -309,40 +318,44 @@ function HistoryTable({ rows }: { rows: SwingPosition[] }) {
   return (
     <Panel icon={History} eyebrow="Closed and skipped" title="Paper history">
       {rows.length ? (
-        <div className="table-scroll">
-          <table className="terminal-table" data-testid="swing-history">
-            <thead>
-              <tr>
-                <th>Share</th>
-                <th>Strategy</th>
-                <th>Outcome</th>
-                <th>Bought</th>
-                <th>Closed</th>
-                <th>Net P&L</th>
-                <th>Charges</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.id}>
-                  <ShareCell row={row} />
-                  <td>{STRATEGY_LABELS[row.strategy] ?? row.strategy}</td>
-                  <td className="text-xs">
-                    {row.status === "CANCELLED" ? "Not bought: " : ""}
-                    {REASON_LABELS[row.exit_reason ?? ""] ?? row.exit_reason}
-                  </td>
-                  <td className="numeric">
-                    {price(row.entry_price)}
-                    <span className="block text-[11px] opacity-75">{row.entry_date ?? row.plan_date}</span>
-                  </td>
-                  <td className="numeric">{row.exit_date ?? "—"}</td>
-                  <td className={`numeric ${tone(row.net_pnl)}`}>{rupees(row.net_pnl, 2)}</td>
-                  <td className="numeric">{rupees(row.charges, 2)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Paged rows={rows}>
+          {(visible) => (
+            <div className="table-scroll">
+              <table className="terminal-table" data-testid="swing-history">
+                <thead>
+                  <tr>
+                    <th>Share</th>
+                    <th>Strategy</th>
+                    <th>Outcome</th>
+                    <th>Bought</th>
+                    <th>Closed</th>
+                    <th>Net P&L</th>
+                    <th>Charges</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((row) => (
+                    <tr key={row.id}>
+                      <ShareCell row={row} />
+                      <td>{STRATEGY_LABELS[row.strategy] ?? row.strategy}</td>
+                      <td className="text-xs">
+                        {row.status === "CANCELLED" ? "Not bought: " : ""}
+                        {REASON_LABELS[row.exit_reason ?? ""] ?? row.exit_reason}
+                      </td>
+                      <td className="numeric">
+                        {price(row.entry_price)}
+                        <span className="block text-[11px] opacity-75">{row.entry_date ?? row.plan_date}</span>
+                      </td>
+                      <td className="numeric">{row.exit_date ?? "—"}</td>
+                      <td className={`numeric ${tone(row.net_pnl)}`}>{rupees(row.net_pnl, 2)}</td>
+                      <td className="numeric">{rupees(row.charges, 2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Paged>
       ) : (
         <Empty text="Nothing closed yet." />
       )}
