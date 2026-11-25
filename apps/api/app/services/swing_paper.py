@@ -357,6 +357,49 @@ def days_to_process(available: Sequence[date], last: date | None) -> list[date]:
     return [day for day in days if day > last]
 
 
+# An evening runs once and is never redone, so it waits for the data to be in.
+# The intraday scanner stores daily candles for its own shares and the index
+# too: on 25 Nov 2026 the index arrived that way, and the evening ran on 34 of
+# 201 candles. Not every share, because one can be suspended or newly listed.
+COMPLETE_PERCENT = 95
+RECENT_SESSIONS = 10
+
+
+def missing_for_day(
+    day: date,
+    index_days: Sequence[date],
+    traded: dict[str, set[date]],
+    needed: Sequence[str] = (),
+) -> tuple[int, int, list[str]]:
+    """(candles in, candles expected, held shares without one) for ``day``.
+
+    Expected is every share that traded in the sessions just before: several
+    sessions, so one badly filled day cannot lower the bar for the next.
+    """
+    recent = set(sorted(d for d in index_days if d < day)[-RECENT_SESSIONS:])
+    expected = {token for token, days in traded.items() if day in days or days & recent}
+    present = {token for token in expected if day in traded[token]}
+    return len(present), len(expected), [token for token in needed if day not in traded.get(token, set())]
+
+
+def day_is_complete(
+    day: date,
+    index_days: Sequence[date],
+    traded: dict[str, set[date]],
+    needed: Sequence[str] = (),
+) -> bool:
+    """Whether ``day`` can be processed: the universe is in, and so is every share held or planned.
+
+    A held share stops being waited for once a later session exists, so a
+    suspended one cannot hold up the desk for ever. The universe is always
+    waited for: without it there is nothing to choose from.
+    """
+    present, expected, absent = missing_for_day(day, index_days, traded, needed)
+    if not expected or present * 100 < expected * COMPLETE_PERCENT:
+        return False
+    return not absent or any(later > day for later in index_days)
+
+
 def summary_message(report: EveningReport) -> str:
     """The evening's Telegram message: what changed, and tomorrow's plan."""
     lines = [f"📒 <b>SWING DESK — PAPER ONLY</b> ({report.day:%d %b %Y})", "No real order is placed by this desk."]

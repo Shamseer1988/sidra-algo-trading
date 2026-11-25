@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import delete, select
 
+from app import swing_worker
 from app.db.models import ApplicationSetting, MarketCandle, SwingPaperPosition
 from app.db.session import SessionLocal
 from app.services.market_calculations import CompletedCandle
@@ -25,6 +26,7 @@ from app.services.swing_paper import (
     OPEN,
     PLANNED,
     PROGRESS_KEY,
+    day_is_complete,
     days_to_process,
     results_due,
     run_evening,
@@ -353,3 +355,110 @@ def test_the_paper_desk_runs_trend_pullback_only_and_the_worker_says_so():
     # ...and the limits from Settings > Swing trading, also read once per run.
     assert "rules = await swing_rules(session, strategies)" in source
     assert "rules=rules," in source
+
+
+# --- an evening waits for its candles ------------------------------------------------
+
+DAYS = [day(n) for n in range(6)]
+
+
+def traded(full: int, short: int = 0) -> dict[str, set[date]]:
+    """``full`` shares with every day; ``short`` more without the last one."""
+    rows = {f"F{n}": set(DAYS) for n in range(full)}
+    rows.update({f"S{n}": set(DAYS[:-1]) for n in range(short)})
+    return rows
+
+
+def test_the_index_and_a_few_shares_do_not_make_a_day():
+    """25 Nov 2026: the scanner had stored 33 shares and the index; 167 were still to come."""
+    assert not day_is_complete(DAYS[-1], DAYS, traded(33, 167))
+    assert day_is_complete(DAYS[-1], DAYS, traded(200))
+    # A few shares that never come (suspended, delisted) do not hold it up.
+    assert day_is_complete(DAYS[-1], DAYS, traded(190, 10))
+    assert not day_is_complete(DAYS[-1], DAYS, traded(189, 11))
+
+
+def test_one_badly_filled_day_does_not_lower_the_bar_for_the_next():
+    rows = {f"F{n}": set(DAYS) for n in range(33)}
+    rows.update({f"S{n}": set(DAYS[:-2]) for n in range(167)})
+    assert not day_is_complete(DAYS[-1], DAYS, rows)
+
+
+def test_no_candles_at_all_is_never_a_complete_day():
+    assert not day_is_complete(DAYS[-1], DAYS, {})
+    assert not day_is_complete(DAYS[-1], DAYS, {"A": set()})
+
+
+def test_a_held_share_is_waited_for_but_not_for_ever():
+    rows = traded(199, 1)
+    assert not day_is_complete(DAYS[-1], DAYS, rows, ["S0"])
+    assert day_is_complete(DAYS[-1], DAYS, rows, ["F0"])
+    # Once a later session exists, a share that still has no candle is not coming.
+    assert day_is_complete(DAYS[-1], [*DAYS, day(6)], rows, ["S0"])
+
+
+@pytest.fixture
+def worker(monkeypatch):
+    """``swing_worker.process`` on these candles instead of the database's."""
+    bars: dict[str, list[CompletedCandle]] = {"NIFTY": INDEX[:6]}
+    members = [SimpleNamespace(instrument_token=f"T{n}", industry=f"I{n}", symbol=f"T{n}") for n in range(20)]
+
+    async def load(_session, token, *, from_date):  # noqa: ARG001
+        return bars.get(token, [])
+
+    monkeypatch.setattr(swing_worker, "load_adjusted_daily", load)
+    monkeypatch.setattr(swing_worker, "nifty200", lambda: members)
+    for member in members:
+        bars[member.instrument_token] = series_for(member.instrument_token, 6, {})
+    return bars
+
+
+async def run_worker():
+    now = datetime.combine(day(5), time(20, 0), tzinfo=MARKET_TIMEZONE)
+    return await swing_worker.process(SimpleNamespace(upstox_nifty_benchmark_key="NIFTY"), now)
+
+
+async def progress() -> str | None:
+    async with SessionLocal() as session:
+        row = await session.get(ApplicationSetting, PROGRESS_KEY)
+        return row.value["last_day"] if row else None
+
+
+async def test_the_worker_leaves_an_incomplete_day_unmarked_and_runs_it_when_the_candles_come(worker):
+    full = {token: list(bars) for token, bars in worker.items()}
+    for n in range(10):
+        worker[f"T{n}"] = worker[f"T{n}"][:-1]
+    with pytest.raises(swing_worker.NotReady) as waiting:
+        await run_worker()
+    assert waiting.value.detail["candles"] == 10
+    assert waiting.value.detail["expected"] == 20
+    assert await progress() is None
+
+    worker.update(full)
+    reports = await run_worker()
+    assert [report.day for report in reports] == [day(5)]
+    assert await progress() == day(5).isoformat()
+
+
+async def test_a_day_that_is_not_ready_stops_the_days_after_it(worker):
+    async with SessionLocal() as session:
+        session.add(ApplicationSetting(key=PROGRESS_KEY, value={"last_day": day(2).isoformat()}))
+        await session.commit()
+    # Day 4 is the hole; day 3 is ready, and so is day 5.
+    for n in range(10):
+        worker[f"T{n}"] = [bar for bar in worker[f"T{n}"] if bar.session_date != day(4)]
+    with pytest.raises(swing_worker.NotReady) as waiting:
+        await run_worker()
+    assert [report.day for report in waiting.value.reports] == [day(3)]
+    assert await progress() == day(3).isoformat()
+
+
+async def test_without_a_token_nothing_counts_as_a_fetch(monkeypatch):
+    from app.services import upstox_oauth
+
+    async def none(_settings):
+        return None
+
+    monkeypatch.setattr(upstox_oauth, "load_access_token", none)
+    logger = SimpleNamespace(warning=lambda *_a, **_k: None, info=lambda *_a, **_k: None)
+    assert await swing_worker.refresh(SimpleNamespace(), logger, datetime.now(MARKET_TIMEZONE)) is False
