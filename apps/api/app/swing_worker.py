@@ -16,7 +16,9 @@ Otherwise, every 15 minutes it:
    candle fetched too soon after the close may not be final -- and the backfill
    never overwrites a day it has stored;
 2. processes every trading day with an index candle that it has not processed
-   yet, oldest first, through ``swing_paper.run_evening`` (paper only);
+   yet, oldest first, through ``swing_paper.run_evening`` (paper only), and only
+   once the universe's candles for that day are in: the scanner also stores the
+   index's, so the index alone does not mean the day is ready;
 3. sends that evening's summary to Telegram, marked PAPER ONLY.
 
 It can place no order. It builds no order request, and the live risk engine
@@ -39,9 +41,11 @@ from app.services.market_calculations import MARKET_TIMEZONE
 from app.services.swing_data import backfill_daily_range, load_adjusted_daily
 from app.services.swing_paper import (
     EveningReport,
+    day_is_complete,
     days_to_process,
     last_processed,
     mark_processed,
+    missing_for_day,
     paper_strategies,
     run_evening,
     summary_message,
@@ -81,17 +85,28 @@ async def positions_held() -> bool:
     return found is not None
 
 
-async def refresh(settings, logger, now: datetime) -> None:  # noqa: ANN001
+async def refresh(settings, logger, now: datetime) -> bool:  # noqa: ANN001
+    """Fetch recent daily candles. False when there was no token to fetch them with."""
     from app.services.upstox_oauth import load_access_token
 
     token = await load_access_token(settings)
     if not token:
         logger.warning("swing.refresh_skipped_no_token")
-        return
+        return False
     to_date = last_final_day(now)
     tokens = [settings.upstox_nifty_benchmark_key] + [member.instrument_token for member in nifty200()]
     report = await backfill_daily_range(tokens, to_date - timedelta(days=10), to_date, access_token=token)
     logger.info("swing.refreshed", stored=report.total_stored, failures=len(report.failures))
+    return True
+
+
+class NotReady(Exception):
+    """A day's candles are not all in. Carries what ran before it."""
+
+    def __init__(self, reports: list[EveningReport], detail: dict) -> None:
+        super().__init__(str(detail))
+        self.reports = reports
+        self.detail = detail
 
 
 async def process(settings, now: datetime, *, new_entries: bool = True) -> list[EveningReport]:  # noqa: ANN001
@@ -126,8 +141,27 @@ async def process(settings, now: datetime, *, new_entries: bool = True) -> list[
                 )
             ).all()
         )
+    traded = {token: {bar.session_date for bar in bars} for token, bars in universe.items()}
+    index_days = [bar.session_date for bar in benchmark]
     reports = []
     for day in days:
+        # Asked again for each day, because the day before may have opened one.
+        async with SessionLocal() as session:
+            needed = list(
+                (
+                    await session.scalars(
+                        select(SwingPaperPosition.instrument_token).where(
+                            SwingPaperPosition.status.in_(("OPEN", "PLANNED"))
+                        )
+                    )
+                ).all()
+            )
+        if not day_is_complete(day, index_days, traded, needed):
+            # Stop here rather than skip it: a later day run first would be run without this one.
+            present, expected, absent = missing_for_day(day, index_days, traded, needed)
+            raise NotReady(
+                reports, {"day": day.isoformat(), "candles": present, "expected": expected, "held_missing": len(absent)}
+            )
         # Each evening sees only what was known that evening.
         seen = {token: [bar for bar in bars if bar.session_date <= day] for token, bars in universe.items()}
         index = [bar for bar in benchmark if bar.session_date <= day]
@@ -166,7 +200,7 @@ async def run() -> None:
     configure_logging(settings.log_level)
     logger = structlog.get_logger("swing")
     logger.info("swing.worker_started", paper_only=True)
-    last_fetch = 0.0
+    last_fetch: float | None = None  # None: fetch at the next look
     loop = asyncio.get_running_loop()
     while True:
         try:
@@ -175,10 +209,17 @@ async def run() -> None:
             # Off stops new plans, never the positions already held: those are
             # still managed to their exits, and waiting plans are cancelled.
             if not market_quiet(now) and (enabled or await positions_held()):
-                if loop.time() - last_fetch >= FETCH_EVERY_SECONDS:
-                    await refresh(settings, logger, now)
+                due = last_fetch is None or loop.time() - last_fetch >= FETCH_EVERY_SECONDS
+                # Only a fetch that happened starts the hour: with no token yet,
+                # the next look is in fifteen minutes.
+                if due and await refresh(settings, logger, now):
                     last_fetch = loop.time()
-                for report in await process(settings, now, new_entries=enabled):
+                waiting = None
+                try:
+                    reports = await process(settings, now, new_entries=enabled)
+                except NotReady as not_ready:
+                    reports, waiting = not_ready.reports, not_ready.detail
+                for report in reports:
                     logger.info(
                         "swing.evening_processed",
                         day=report.day.isoformat(),
@@ -188,6 +229,10 @@ async def run() -> None:
                         regime_ok=report.regime_ok,
                     )
                     await announce(settings, report, logger)
+                if waiting:
+                    logger.warning("swing.waiting_for_candles", **waiting)
+                    # The day exists at the broker: look again next time round, not in an hour.
+                    last_fetch = None
         except Exception:
             logger.exception("swing.worker_cycle_failed")
         await asyncio.sleep(POLL_SECONDS)
