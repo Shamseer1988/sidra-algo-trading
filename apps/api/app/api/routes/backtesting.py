@@ -10,7 +10,14 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 
 from app.api.deps import AppSettings, CurrentUser, DbSession, require_roles
-from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
+from app.api.routes.settings import (
+    DEFAULT_TRADING_CONTROLS,
+    TRADING_KEY,
+    TradingControls,
+    _persist_strategies,
+    _stored_strategies,
+    strategy_mode,
+)
 from app.db.models import (
     ApplicationSetting,
     AuditLog,
@@ -22,7 +29,7 @@ from app.db.models import (
     UserRole,
 )
 from app.services import watchlist_store
-from app.services.backtest_sweep import SWEEPABLE, run_parameter_sweep
+from app.services.backtest_sweep import STRATEGY_PARAMS, SWEEPABLE, run_parameter_sweep
 from app.services.backtesting import run_completed_candle_backtest
 from app.services.indicator_settings import effective as effective_settings
 from app.services.market_calculations import CompletedCandle
@@ -548,62 +555,112 @@ async def create_sweep(
     return _sweep_response(sweep)
 
 
+# The only strategy fields a sweep result may write. A combination is stored
+# JSON, so it is filtered against what a sweep can actually vary rather than
+# against every field on the model: a stored row carrying ``enabled``,
+# ``live_orders`` or ``id`` must never switch a strategy on, make it live, or
+# move its rules onto another strategy.
+PROMOTABLE_FIELDS = frozenset(STRATEGY_PARAMS)
+
+LIVE_PROMOTION_REFUSED = (
+    "This strategy is LIVE and trades real money. A sweep result cannot change a live strategy. "
+    "Switch it to Paper first, or make the change in Strategies > Builder, which asks for "
+    "confirmation and a reason."
+)
+
+
+def promotion_refusal(strategy: StrategyConfiguration | None) -> str | None:
+    """Why a sweep result may not be written to this strategy, or None if it may.
+
+    A LIVE strategy is refused outright. Promotion is a one-click write from a
+    research screen, and what it writes reaches real orders on the next candle.
+    The Strategy Builder is the path that asks for confirmation and a reason
+    before touching a live strategy; promotion asks for neither.
+    """
+    if strategy is None:
+        return "The strategy this sweep was run on no longer exists."
+    if strategy_mode(strategy) == "LIVE":
+        return LIVE_PROMOTION_REFUSED
+    return None
+
+
 @router.post("/sweeps/{sweep_id}/promote", response_model=list[StrategyConfiguration])
 async def promote_sweep_combination(
     sweep_id: UUID,
     session: DbSession,
     combination_index: int = Query(ge=0),
+    reason: str | None = Query(default=None, max_length=300),
     user: User = Depends(require_roles(UserRole.ADMIN)),
 ) -> list[StrategyConfiguration]:
+    """Write one sweep combination to an Off or Paper strategy, never a Live one.
+
+    Goes through ``_persist_strategies``, the same write path as every other
+    strategy change, so the save is versioned, recorded in setting_revisions
+    and audited. It used to write ``paper_strategies`` directly, which skipped
+    both the revision and the live-strategy confirmation.
+    """
     sweep = await session.get(BacktestSweep, sweep_id)
     if sweep is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backtest sweep not found")
-    combination = next((item for item in sweep.combinations if item["index"] == combination_index), None)
+    combination = next(
+        (
+            item
+            for item in (sweep.combinations or [])
+            if isinstance(item, dict) and item.get("index") == combination_index
+        ),
+        None,
+    )
     if combination is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Combination index is out of range")
+    parameters = combination.get("parameters")
+    if not isinstance(parameters, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="This combination has no readable parameters."
+        )
 
-    strategy_fields = set(StrategyConfiguration.model_fields)
-    overrides = {key: value for key, value in combination["parameters"].items() if key in strategy_fields}
+    overrides = {key: value for key, value in parameters.items() if key in PROMOTABLE_FIELDS}
     if not overrides:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="This combination only varies trading-control or indicator parameters, which are not "
-            "part of a strategy configuration and cannot be promoted here.",
+            detail="This combination only varies trading-control, indicator or exit parameters, which "
+            "cannot be promoted here.",
         )
 
-    strategies = await _load_strategies(session)
-    updated: list[StrategyConfiguration] = []
-    changed = False
-    for item in strategies:
-        if item.id != sweep.strategy_id:
-            updated.append(item)
-            continue
-        candidate = item.model_copy(update=overrides)
-        if candidate.model_dump(exclude={"version"}) != item.model_dump(exclude={"version"}):
-            candidate = candidate.model_copy(update={"version": item.version + 1})
-            changed = True
-        updated.append(candidate)
+    previous = await _stored_strategies(session)
+    current = previous.get(sweep.strategy_id)
+    refusal = promotion_refusal(current)
+    if refusal is not None:
+        code = status.HTTP_404_NOT_FOUND if current is None else status.HTTP_409_CONFLICT
+        raise HTTPException(status_code=code, detail=refusal)
 
-    if not changed:
+    try:
+        candidate = StrategyConfiguration.model_validate({**current.model_dump(), **overrides})
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    # Whatever the stored combination held, the mode stays what it was. A
+    # promotion changes rules; it never switches Off, Paper or Live.
+    candidate = candidate.model_copy(update={"enabled": current.enabled, "live_orders": current.live_orders})
+    if candidate.model_dump(exclude={"version"}) == current.model_dump(exclude={"version"}):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="This combination matches the strategy's current parameters"
         )
-    value = [item.model_dump() for item in updated]
-    setting = await session.get(ApplicationSetting, STRATEGIES_KEY)
-    if setting is None:
-        session.add(ApplicationSetting(key=STRATEGIES_KEY, value=value, updated_by_user_id=user.id))
-    else:
-        setting.value, setting.updated_by_user_id = value, user.id
+
     sweep.promoted_index = combination_index
-    session.add(
-        AuditLog(
-            user_id=user.id,
-            event_type="backtest.sweep_promoted",
-            metadata_json={"sweep_id": str(sweep.id), "combination_index": combination_index},
-        )
+    return await _persist_strategies(
+        session,
+        [candidate if item.id == current.id else item for item in previous.values()],
+        previous,
+        user,
+        "backtest.sweep_promoted",
+        {
+            "sweep_id": str(sweep.id),
+            "combination_index": combination_index,
+            "strategy_id": current.id,
+            "mode": strategy_mode(current),
+            "parameters": overrides,
+            "reason": (reason or "").strip() or None,
+        },
     )
-    await session.commit()
-    return updated
 
 
 @router.get("/{run_id}", response_model=BacktestRunDetail)

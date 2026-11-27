@@ -26,6 +26,9 @@ ENV NODE_ENV=production PORT=3000 HOSTNAME="0.0.0.0"
 COPY --from=builder --chown=node:node /app/apps/web/.next/standalone ./
 COPY --from=builder --chown=node:node /app/apps/web/.next/static ./apps/web/.next/static
 COPY --from=builder --chown=node:node /app/apps/web/public ./apps/web/public
+# The commit this image was built from; see infra/docker/api.Dockerfile.
+ARG SIDRA_BUILD_COMMIT=unknown
+ENV SIDRA_BUILD_COMMIT=$SIDRA_BUILD_COMMIT
 USER node
 EXPOSE 3000
 CMD ["node", "apps/web/server.js"]

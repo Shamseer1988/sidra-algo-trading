@@ -34,10 +34,16 @@ services:
       retries: 10
     networks: [internal]
 
+  # The four application services below are one deployment: rebuild them
+  # together, from one commit, every time --
+  #   SIDRA_BUILD_COMMIT=$(git rev-parse HEAD) docker compose up -d --build api scanner-worker swing-worker web
+  # and check the result with scripts/verify-deployment.sh.
   api:
     build:
       context: .
       dockerfile: infra/docker/api.Dockerfile
+      args:
+        SIDRA_BUILD_COMMIT: ${SIDRA_BUILD_COMMIT:-unknown}
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
@@ -62,6 +68,8 @@ services:
     build:
       context: .
       dockerfile: infra/docker/api.Dockerfile
+      args:
+        SIDRA_BUILD_COMMIT: ${SIDRA_BUILD_COMMIT:-unknown}
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
@@ -84,6 +92,8 @@ services:
     build:
       context: .
       dockerfile: infra/docker/api.Dockerfile
+      args:
+        SIDRA_BUILD_COMMIT: ${SIDRA_BUILD_COMMIT:-unknown}
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
@@ -106,6 +116,7 @@ services:
       args:
         NEXT_PUBLIC_API_BASE_URL: /api
         API_UPSTREAM: http://api:8000
+        SIDRA_BUILD_COMMIT: ${SIDRA_BUILD_COMMIT:-unknown}
     restart: unless-stopped
     init: true
     stop_grace_period: 20s

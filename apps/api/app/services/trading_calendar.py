@@ -37,6 +37,34 @@ NSE_2026_HOLIDAYS: dict[date, str] = {
     date(2026, 12, 25): "Christmas",
 }
 
+# Every year whose official NSE holiday circular has been transcribed here.
+# A year is added only from the exchange's own circular, never from a
+# third-party list: those disagree with each other by a day on moving
+# festivals, and one wrong date is a day traded on a closed exchange or a
+# day missed on an open one.
+BUILT_IN_HOLIDAYS: dict[int, dict[date, str]] = {2026: NSE_2026_HOLIDAYS}
+
+# How long before 1 January the operator is warned that next year is not
+# confirmed. NSE usually publishes the next year's circular in mid-December
+# (the 2026 one is dated 12 December 2025), so 45 days starts the warning
+# before the circular is due and leaves about two weeks after it.
+CALENDAR_WARNING_DAYS = 45
+
+
+class CalendarCoverageState(StrEnum):
+    OK = "OK"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
+
+
+@dataclass(frozen=True)
+class CalendarCoverage:
+    state: CalendarCoverageState
+    detail: str
+    current_year: int
+    next_year: int
+    days_until_next_year: int
+
 
 class MarketPhase(StrEnum):
     CLOSED = "CLOSED"
@@ -117,9 +145,67 @@ class TradingCalendar:
         special_sessions: dict[date, TradingSession] | None = None,
     ) -> None:
         self._confirmed_years = confirmed_years or {2026}
-        self._holidays = dict(NSE_2026_HOLIDAYS)
+        self._holidays: dict[date, str] = {}
+        for table in BUILT_IN_HOLIDAYS.values():
+            self._holidays.update(table)
+        self._override_years = {item.year for item in holiday_overrides or set()}
         self._holidays.update({item: "Operator-configured exchange holiday" for item in holiday_overrides or set()})
         self._special_sessions = special_sessions or {}
+
+    def has_holiday_list(self, year: int) -> bool:
+        """Whether any holiday list is known for ``year``, built in or supplied.
+
+        NSE has never had a year without a holiday. A year confirmed with no
+        list at all is a year where somebody added it to
+        NSE_CALENDAR_CONFIRMED_YEARS and forgot the dates -- and would then
+        trade every weekday, Republic Day included.
+        """
+        return year in BUILT_IN_HOLIDAYS or year in self._override_years
+
+    def year_is_usable(self, year: int) -> bool:
+        """Confirmed by the operator *and* backed by a holiday list."""
+        return year in self._confirmed_years and self.has_holiday_list(year)
+
+    def coverage(self, today: date, *, warning_days: int = CALENDAR_WARNING_DAYS) -> CalendarCoverage:
+        """Whether this year and the next can be traded, for the operator to read.
+
+        CRITICAL: this year is not usable, so every day is failing closed now.
+        WARNING: next year is not usable and starts within ``warning_days``.
+        OK otherwise. Never changes what the calendar decides; it only says it.
+        """
+        next_year = today.year + 1
+        days_left = (date(next_year, 1, 1) - today).days
+        if not self.year_is_usable(today.year):
+            why = (
+                "has no holiday list"
+                if today.year in self._confirmed_years
+                else "is not in NSE_CALENDAR_CONFIRMED_YEARS"
+            )
+            return CalendarCoverage(
+                CalendarCoverageState.CRITICAL,
+                f"NSE calendar for {today.year} {why}; every session is failing closed and nothing will trade.",
+                today.year,
+                next_year,
+                days_left,
+            )
+        if days_left <= warning_days and not self.year_is_usable(next_year):
+            return CalendarCoverage(
+                CalendarCoverageState.WARNING,
+                f"NSE calendar for {next_year} is not confirmed. Trading stops on 1 January {next_year} "
+                f"({days_left} days) unless the official NSE holiday circular for {next_year} is added "
+                "and the year confirmed.",
+                today.year,
+                next_year,
+                days_left,
+            )
+        return CalendarCoverage(
+            CalendarCoverageState.OK,
+            f"NSE calendar confirmed for {today.year}"
+            + (f" and {next_year}." if self.year_is_usable(next_year) else "."),
+            today.year,
+            next_year,
+            days_left,
+        )
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "TradingCalendar":
@@ -138,7 +224,7 @@ class TradingCalendar:
         special = self._special_sessions.get(trading_date)
         if special is not None:
             return special
-        if trading_date.year not in self._confirmed_years:
+        if not self.year_is_usable(trading_date.year):
             return None
         if trading_date.weekday() >= 5 or trading_date in self._holidays:
             return None
@@ -149,6 +235,8 @@ class TradingCalendar:
             return "Special trading session"
         if trading_date.year not in self._confirmed_years:
             return f"NSE calendar for {trading_date.year} is not confirmed; failing closed"
+        if not self.has_holiday_list(trading_date.year):
+            return f"NSE calendar for {trading_date.year} is confirmed but has no holiday list; failing closed"
         if trading_date in self._holidays:
             return self._holidays[trading_date]
         if trading_date.weekday() >= 5:

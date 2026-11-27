@@ -464,12 +464,33 @@ def _make_settlement_catchup_job(settings: Settings):
     return _job
 
 
-async def send_session_open_alert(settings: Settings, result) -> None:
+def calendar_note(calendar: TradingCalendar, now: datetime | None = None) -> str | None:
+    """The calendar warning to add to the morning message, or None when there is none.
+
+    Only WARNING produces a note. CRITICAL needs none here: on those days the
+    open itself refuses at the calendar step, and that refusal is already the
+    message the operator receives.
+    """
+    from app.services.trading_calendar import CalendarCoverageState
+
+    today = (now or datetime.now(UTC)).astimezone(MARKET_TIMEZONE).date()
+    coverage = calendar.coverage(today)
+    if coverage.state == CalendarCoverageState.WARNING:
+        return coverage.detail
+    return None
+
+
+async def send_session_open_alert(settings: Settings, result, *, calendar_warning: str | None = None) -> None:
     """Tell the operator what the scheduled open did, especially when it did nothing.
 
     A refusal is the message that matters most: an unattended system that
     declined to arm looks exactly like one that armed fine, right up until the
     day ends with no trades and nobody knows why.
+
+    ``calendar_warning`` is appended when next year's NSE calendar is missing
+    and the year end is near. It is sent even when session-open alerts are
+    muted: it is the one notice that stands between the operator and a silent
+    stop on 1 January.
     """
     try:
         from app.services.telegram import TelegramNotificationService
@@ -488,7 +509,7 @@ async def send_session_open_alert(settings: Settings, result) -> None:
             from app.services.notification_settings import wants
 
             async with SessionLocal() as session:
-                if not await wants(session, "session_open_alerts"):
+                if not await wants(session, "session_open_alerts") and not calendar_warning:
                     return
             expiry = (
                 result.expires_at.astimezone(MARKET_TIMEZONE).strftime("%I:%M %p") if result.expires_at else "unknown"
@@ -510,6 +531,8 @@ async def send_session_open_alert(settings: Settings, result) -> None:
                 "<i>Nothing is armed and the scanner was not started. "
                 "No orders can be placed until this is resolved.</i>"
             )
+        if calendar_warning:
+            text += f"\n\n\U0001f4c5 <b>Calendar:</b> {calendar_warning}"
         await TelegramNotificationService(effective).send_message(text, parse_mode="HTML")
     except Exception as exc:
         logger.warning("scheduler.session_open_alert_failed", error=str(exc))
@@ -543,7 +566,12 @@ def _make_session_open_job(settings: Settings, calendar: TradingCalendar):
         # A runtime that is not live refuses on every weekday by design; alerting
         # on that would train the operator to ignore this channel.
         if result.step != "runtime":
-            await send_session_open_alert(settings, result)
+            try:
+                warning = calendar_note(calendar)
+            except Exception as exc:  # noqa: BLE001 - a note must never stop the morning alert
+                logger.warning("scheduler.calendar_note_failed", error=str(exc))
+                warning = None
+            await send_session_open_alert(settings, result, calendar_warning=warning)
 
     return _job
 

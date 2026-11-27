@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from functools import lru_cache
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -9,10 +10,41 @@ from app.api.deps import CurrentUser
 from app.api.routes.scanner import get_scanner_status
 from app.core.config import get_settings
 from app.db.session import engine
+from app.services import build_info as build
 from app.services.firstock.market_data import CONNECTION_STATE_KEY
-from app.services.trading_calendar import TradingCalendar
+from app.services.trading_calendar import MARKET_TIMEZONE, CalendarCoverageState, TradingCalendar
 
 router = APIRouter(prefix="/system", tags=["System"])
+
+
+@lru_cache(maxsize=1)
+def _this_build() -> dict[str, str]:
+    """Computed once per process: the code on disk does not change while it runs."""
+    return build.build_info()
+
+
+class BuildStatus(BaseModel):
+    commit: str
+    source_fingerprint: str
+
+
+_CALENDAR_STATUS = {
+    CalendarCoverageState.OK: "healthy",
+    CalendarCoverageState.WARNING: "warning",
+    CalendarCoverageState.CRITICAL: "offline",
+}
+
+
+def calendar_status(checked_at: datetime) -> "ServiceStatus":
+    """The NSE calendar's coverage, in the shape every other service card uses."""
+    try:
+        calendar = TradingCalendar.from_settings(get_settings())
+        coverage = calendar.coverage(checked_at.astimezone(MARKET_TIMEZONE).date())
+    except Exception as exc:  # noqa: BLE001 - a status card must not take the overview down
+        return ServiceStatus(
+            status="unknown", detail=f"Calendar unreadable: {type(exc).__name__}", checked_at=checked_at
+        )
+    return ServiceStatus(status=_CALENDAR_STATUS[coverage.state], detail=coverage.detail, checked_at=checked_at)
 
 
 class VersionResponse(BaseModel):
@@ -38,6 +70,9 @@ class SystemOverview(BaseModel):
     market_data: ServiceStatus
     firstock: ServiceStatus
     telegram: ServiceStatus
+    # Defaulted so a client or test that builds an overview without them keeps working.
+    calendar: ServiceStatus | None = None
+    build: BuildStatus | None = None
 
 
 class MarketSessionStatus(BaseModel):
@@ -130,4 +165,6 @@ async def overview(_: CurrentUser) -> SystemOverview:
             ),
             checked_at=checked_at,
         ),
+        calendar=calendar_status(checked_at),
+        build=BuildStatus(**_this_build()),
     )
