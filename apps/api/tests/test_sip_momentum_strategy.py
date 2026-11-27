@@ -13,6 +13,8 @@ from app.services.exit_rules import ExitRules
 from app.services.extra_strategies import (
     AWAITING,
     SIGNALLED,
+    SIP_CANDIDATE_LONG,
+    SIP_CANDIDATE_SHORT,
     SIP_DONE,
     SIP_MOMENTUM_VERSION,
     evaluate_sip_momentum,
@@ -106,27 +108,64 @@ def test_session_relative_volume_without_a_baseline_is_unknown() -> None:
     assert session_relative_volume([bar(3, 45, "100")], None) is None
 
 
-# --- the decision -----------------------------------------------------------
+# --- the decision ---------------------------------------------------------
 
 
-def test_a_share_in_play_above_vwap_is_bought_at_10_10_with_a_half_atr_stop() -> None:
+def selected(**extra) -> dict:  # noqa: ANN003
+    candidate = {"rank": 6.0, "session_rvol": 3.0, "move_percent": 2.0, "side": "LONG"}
+    return {"sip_selected": True, "sip_position": 1, "sip_candidates": 2, "sip_top": 3,
+            "sip_candidate": candidate, **extra}
+
+
+def enter(candle: CompletedCandle, values: dict, state: str = SIP_CANDIDATE_LONG, **selection):  # noqa: ANN003, ANN201
+    return evaluate_sip_momentum(candle, values, {}, {**controls(), **selection}, state)
+
+
+NEXT = (4, 40)  # 10:10-10:11 AM IST, the candle after the decision
+
+
+def test_a_share_in_play_above_vwap_becomes_a_long_candidate_with_its_rank() -> None:
     decision = decide(bar(*DECISION, "102"), indicators())
-    assert decision.next_state == SIGNALLED
-    assert decision.side == "LONG"
+    assert decision.next_state == SIP_CANDIDATE_LONG
+    assert decision.side is None and decision.entry_price is None
+    assert decision.details["rank"] == 6.0 and decision.details["side"] == "LONG"
+    assert decision.reason.startswith("Awaiting the 10:10 AM ranking")
+
+
+def test_a_selected_candidate_is_bought_on_the_next_candle_with_a_half_atr_stop() -> None:
+    decision = enter(bar(*NEXT, "102"), indicators(), **selected())
+    assert decision.next_state == SIGNALLED and decision.side == "LONG"
     assert decision.entry_price == Decimal("102")
-    # Half the daily ATR of 2.0; the template's 0.3% floor does not widen it.
+    # Half the daily ATR of 2.0; neither 2.1 x the 1-minute ATR nor 0.3% is wider.
     assert decision.stop_price == Decimal("101")
     # target_rr 10: far enough that the 3 PM square-off is the real exit.
     assert decision.target_price == Decimal("112")
     assert decision.quantity == 250
-    assert "rank 6.00" in decision.reason
+    assert decision.details["rank"] == 6.0 and decision.details["position"] == 1
+    assert "#1 of 2" in decision.reason
 
 
-def test_a_share_in_play_below_vwap_is_sold() -> None:
-    decision = decide(bar(*DECISION, "98"), indicators(vwap=99.0))
+def test_a_candidate_outside_the_top_three_is_not_entered() -> None:
+    decision = enter(bar(*NEXT, "102"), indicators(), **selected(sip_selected=False, sip_position=4, sip_candidates=5))
+    assert decision.next_state == SIP_DONE and decision.side is None
+    assert "Not in today's top 3" in decision.reason and "#4 of 5" in decision.reason
+
+
+def test_without_a_ranking_a_candidate_is_entered_as_a_backtest_needs() -> None:
+    decision = enter(bar(*NEXT, "102"), indicators())
     assert decision.next_state == SIGNALLED
-    assert decision.side == "SHORT"
-    assert decision.stop_price == Decimal("99")
+
+
+def test_a_selected_candidate_with_no_candle_until_after_10_15_is_not_chased() -> None:
+    decision = enter(bar(4, 46, "102"), indicators(), **selected())
+    assert decision.next_state == SIP_DONE and "Selection window closed" in decision.reason
+
+
+def test_a_share_in_play_below_vwap_becomes_a_short_candidate() -> None:
+    decision = decide(bar(*DECISION, "98"), indicators(vwap=99.0))
+    assert decision.next_state == SIP_CANDIDATE_SHORT
+    short = enter(bar(*NEXT, "98"), indicators(vwap=99.0), SIP_CANDIDATE_SHORT, **selected())
+    assert short.side == "SHORT" and short.stop_price == Decimal("99")
 
 
 def test_before_10_10_it_waits_and_after_it_never_looks_again() -> None:
@@ -135,6 +174,13 @@ def test_before_10_10_it_waits_and_after_it_never_looks_again() -> None:
     # A share whose 10:09 candle never arrived does not trade at 10:20.
     late = decide(bar(4, 50, "102"), indicators())
     assert late.next_state == SIP_DONE and late.side is None
+
+
+def test_only_one_minute_candles_are_evaluated() -> None:
+    five = CompletedCandle(**{**bar(4, 35, "102").__dict__, "timeframe_seconds": 300,
+                              "closed_at": datetime(2026, 11, 30, 4, 40, tzinfo=UTC)})
+    decision = decide(five, indicators())
+    assert decision.next_state == AWAITING and "1-minute candles only" in decision.reason
 
 
 def test_an_ordinary_volume_morning_is_not_in_play() -> None:
@@ -161,7 +207,7 @@ def test_missing_history_is_named_not_guessed() -> None:
 def test_thresholds_can_be_set_per_strategy() -> None:
     values = indicators(rvol=2.0)
     assert decide(bar(*DECISION, "102"), values).next_state == SIP_DONE
-    assert decide(bar(*DECISION, "102"), values, sip_min_session_rvol=1.5).next_state == SIGNALLED
+    assert decide(bar(*DECISION, "102"), values, sip_min_session_rvol=1.5).next_state == SIP_CANDIDATE_LONG
 
 
 def test_already_signalled_stays_signalled() -> None:
@@ -175,12 +221,23 @@ def test_rank_is_volume_times_move() -> None:
 # --- wiring -----------------------------------------------------------------
 
 
-def test_registered_and_paper_only_from_the_builder_template() -> None:
+def test_registered_with_a_template_that_pins_its_own_stop() -> None:
     assert StrategyRegistry.definition(SIP_MOMENTUM_VERSION).metadata.name == "Stocks-in-Play Momentum"
     template = configuration()
-    assert template.exit_rules == ExitRules(target_rr=10, square_off_time="15:00", min_stop_distance_percent=0.3)
+    assert template.exit_rules == ExitRules(
+        target_rr=10, square_off_time="15:00", min_stop_distance_percent=0.3, stop_atr_multiple=2.1
+    )
+    assert template.live_orders is False
+    # Pinned, so an account whose own control is the 1.1 default still gets 2.1.
+    assert template.effective_controls({**BASE_CONTROLS, "stop_atr_multiple": 1.1})["stop_atr_multiple"] == 2.1
     assert template.minimum_score == 0 and template.max_trades_per_day == 3
     decision = StrategyRegistry.evaluate(
         template, bar(*DECISION, "102"), indicators(), {}, template.effective_controls(BASE_CONTROLS), AWAITING
     )
-    assert decision.next_state == SIGNALLED
+    assert decision.next_state == SIP_CANDIDATE_LONG
+
+
+def test_the_stop_is_the_widest_of_the_three() -> None:
+    # 2.1 x a 1-minute ATR of 1.0 = 2.1, wider than half the daily ATR (1.0).
+    decision = enter(bar(*NEXT, "102"), {**indicators(), "atr": 1.0}, **selected())
+    assert decision.stop_price == Decimal("99.9")

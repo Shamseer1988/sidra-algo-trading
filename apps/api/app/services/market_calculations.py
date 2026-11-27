@@ -475,7 +475,10 @@ def indicator_snapshot(
     bands = vwap_bands(active)
     opening = opening_range(active, opening_range_minutes)
 
-    daily = daily_candles or []
+    # Only days before this session, whoever loaded them -- the same rule
+    # ``cpr_levels`` applies. Previous close, gap and daily ATR are all
+    # "yesterday and before" quantities.
+    daily = [c for c in (daily_candles or []) if not active or c.session_date < active[-1].session_date]
     prior = prior_day_levels(daily)
     prior_close = Decimal(str(prior["close"])) if prior["close"] is not None else None
     session_open = active[0].open if active else None

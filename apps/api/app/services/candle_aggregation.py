@@ -299,12 +299,16 @@ class MarketCalculationPersistenceService:
                 return False
         return True
 
-    async def _daily_candles(self, session, instrument_token: str) -> list[CompletedCandle]:
+    async def _daily_candles(self, session, instrument_token: str, session_date: date) -> list[CompletedCandle]:
+        # Strictly before the session: a daily row for today -- a backfill run
+        # mid-session, or Upstox's in-progress daily candle -- would put today's
+        # high, low and close into yesterday's levels and today's daily ATR.
         rows = await session.scalars(
             select(MarketCandle)
             .where(
                 MarketCandle.instrument_token == instrument_token,
                 MarketCandle.timeframe_seconds == DAILY_TIMEFRAME_SECONDS,
+                MarketCandle.session_date < session_date,
             )
             .order_by(MarketCandle.opened_at.desc())
             .limit(self._settings.daily_history_sessions)
@@ -407,7 +411,7 @@ class MarketCalculationPersistenceService:
                         )
                     ).all()
                 )
-            daily_candles = await self._daily_candles(session, candle.instrument_token)
+            daily_candles = await self._daily_candles(session, candle.instrument_token, candle.session_date)
             time_of_day_baseline = await self._time_of_day_baseline(
                 session, candle.instrument_token, candle.session_date
             )

@@ -34,6 +34,9 @@ class StrategyDecision:
     score: int = 0
     score_breakdown: dict[str, int] | None = None
     reason: str | None = None
+    # Structured facts a strategy wants recorded with its decision beyond the
+    # score -- the SIP rank, for one. None for every strategy that has none.
+    details: dict | None = None
 
 
 def _number(values: dict, key: str) -> Decimal | None:

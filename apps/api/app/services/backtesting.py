@@ -13,9 +13,9 @@ from decimal import Decimal
 from hashlib import sha256
 
 from app.core.config import Settings
-from app.services.exit_rules import ExitRules, trail_to
+from app.services.exit_rules import ExitRules, time_exit_due, trail_to
 from app.services.exit_rules import from_controls as exit_rules_from
-from app.services.market_calculations import CompletedCandle, indicator_snapshot
+from app.services.market_calculations import MARKET_TIMEZONE, CompletedCandle, indicator_snapshot
 from app.services.paper_execution import (
     PaperExecutionControls,
     _money,
@@ -156,13 +156,23 @@ def _exit_trade(
     # From the signal, like the paper engine, and fixed for the trade.
     risk_per_unit = abs(_decimal(decision.entry_price) - _decimal(decision.stop_price))
     trailed = False
-    for candle in candles[entry_index + 1 :]:
+    opened_at = candles[entry_index].opened_at
+    after = candles[entry_index + 1 :]
+    for position, candle in enumerate(after):
         stop_hit = candle.low <= stop if side == "LONG" else candle.high >= stop
         target_hit = candle.high >= target if side == "LONG" else candle.low <= target
         if stop_hit or target_hit:
             reason = ("TRAIL_STOP" if trailed else "STOP") if stop_hit else "TARGET"
             reference = stop if stop_hit else target
             return slipped_price(reference, exit_side(side), execution_controls.slippage_bps), candle.closed_at, reason
+        # The clock, the way paper applies it: due at this candle's close,
+        # filled at the next candle's open. Without it a strategy that squares
+        # off at 3 PM was measured holding to the last candle of the day.
+        if time_exit_due(opened_at=opened_at, now=candle.closed_at, rules=rules) is not None:
+            following = after[position + 1] if position + 1 < len(after) else None
+            reference = following.open if following is not None else candle.close
+            exited_at = following.opened_at if following is not None else candle.closed_at
+            return slipped_price(reference, exit_side(side), execution_controls.slippage_bps), exited_at, "TIME"
         moved = trail_to(
             side=side,
             entry=entry_price,
@@ -242,6 +252,30 @@ def _analytics(trades: list[BacktestTradeResult], initial_capital: Decimal) -> d
     }
 
 
+def _minute_volumes(by_date: dict) -> dict:
+    """Each session's volume per IST minute, computed once per instrument."""
+    return {
+        day: {candle.opened_at.astimezone(MARKET_TIMEZONE).strftime("%H:%M"): candle.volume for candle in rows}
+        for day, rows in by_date.items()
+    }
+
+
+def _time_of_day_baseline(minute_volumes: dict, session_date, sessions: int) -> dict[str, float]:
+    """Average volume per IST minute over the prior ``sessions`` sessions in the replay.
+
+    The live aggregator's ``_time_of_day_baseline``, from the candles the replay
+    already holds: only sessions before this one, so nothing from the day being
+    replayed reaches its own baseline. The first sessions of a range have less
+    history than live does and get a thinner baseline, or none.
+    """
+    prior = [day for day in sorted(minute_volumes) if day < session_date][-sessions:]
+    buckets: dict[str, list[int]] = defaultdict(list)
+    for day in prior:
+        for minute, volume in minute_volumes[day].items():
+            buckets[minute].append(volume)
+    return {key: round(sum(values) / len(values), 4) for key, values in buckets.items() if values}
+
+
 def run_completed_candle_backtest(
     candles_by_instrument: dict[str, list[CompletedCandle]],
     benchmark_candles: list[CompletedCandle],
@@ -263,6 +297,7 @@ def run_completed_candle_backtest(
         for candle in rows:
             by_date[candle.session_date].append(candle)
         daily_by_date = {day: _session_daily_candle(day_rows) for day, day_rows in by_date.items() if day_rows}
+        minute_volumes = _minute_volumes(by_date)
         for session_date, session_rows in sorted(by_date.items()):
             benchmark = benchmark_by_date.get(session_date, [])
             if len(session_rows) < 3 or not benchmark:
@@ -270,6 +305,11 @@ def run_completed_candle_backtest(
             prior_daily = [daily for day, daily in sorted(daily_by_date.items()) if day < session_date][
                 -settings.daily_history_sessions :
             ]
+            # ``getattr`` because a sweep or test may hand in a slimmer settings
+            # object; 10 is the Settings default.
+            time_of_day_baseline = _time_of_day_baseline(
+                minute_volumes, session_date, getattr(settings, "rvol_baseline_sessions", 10)
+            )
             # One indicator snapshot per candle, shared by every strategy.
             #
             # It was computed inside the strategy loop, though it depends on
@@ -314,6 +354,7 @@ def run_completed_candle_backtest(
                     is_nifty=False,
                     atr_period=settings.atr_period,
                     daily_candles=prior_daily,
+                    time_of_day_volume_baseline=time_of_day_baseline,
                 )
                 nifty = nifty_cache.get(candle.closed_at)
                 if nifty is None:

@@ -77,7 +77,14 @@ TEMPLATE_OVERRIDES: dict[str, dict] = {
     "sip-momentum-v1": {
         "max_trades_per_day": 3,
         "minimum_score": 0,
-        "exit_rules": {"target_rr": 10, "square_off_time": "15:00", "min_stop_distance_percent": 0.3},
+        # stop_atr_multiple pinned rather than inherited: the account control's
+        # default is 1.1, and the research was run against 2.1.
+        "exit_rules": {
+            "target_rr": 10,
+            "square_off_time": "15:00",
+            "min_stop_distance_percent": 0.3,
+            "stop_atr_multiple": 2.1,
+        },
     },
 }
 
