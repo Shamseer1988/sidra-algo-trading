@@ -30,7 +30,13 @@ from app.db.session import SessionLocal
 from app.services import research_jobs, research_runs, user_admin
 from app.services.trading_calendar import TradingCalendar
 
-REPO = pathlib.Path(__file__).resolve().parents[3]
+# The API folder is the root that exists everywhere: in a checkout it is
+# apps/api, and inside the test container scripts/run-tests.sh builds, it is
+# /app (only apps/api is copied in). The repository root, and with it
+# docker-compose.yml, exists only in a checkout.
+API_ROOT = pathlib.Path(__file__).resolve().parents[1]
+REPO = API_ROOT.parents[1] if (API_ROOT.parents[1] / "docker-compose.yml").exists() else None
+NO_CHECKOUT = "needs the repository checkout (docker-compose.yml); the test container holds apps/api only"
 IST_OFFSET = timedelta(hours=5, minutes=30)
 # What TradingCalendar.from_settings reads; the routes build the research window from it.
 CALENDAR_SETTINGS = SimpleNamespace(nse_holiday_overrides="", nse_special_sessions="", calendar_confirmed_years={2026})
@@ -247,10 +253,11 @@ async def test_every_order_path_raises_inside_the_worker():
 
 
 def test_the_worker_names_no_order_capable_client():
-    source = (REPO / "apps/api/app/research_worker.py").read_text(encoding="utf-8")
+    source = (API_ROOT / "app/research_worker.py").read_text(encoding="utf-8")
     assert "UpstoxOrderClient" not in source and "FirstockOrderClient" not in source
 
 
+@pytest.mark.skipif(REPO is None, reason=NO_CHECKOUT)
 def test_compose_gives_the_worker_no_credentials_limits_and_no_ports():
     compose = (REPO / "docker-compose.yml").read_text(encoding="utf-8")
     block = compose.split("  research-worker:\n", 1)[1].split("\n  web:\n", 1)[0]
@@ -471,7 +478,7 @@ async def test_outside_market_hours_the_route_returns_the_worker_s_result(clean_
 
 
 def test_the_routes_no_longer_run_a_replay():
-    source = (REPO / "apps/api/app/api/routes/backtesting.py").read_text(encoding="utf-8")
+    source = (API_ROOT / "app/api/routes/backtesting.py").read_text(encoding="utf-8")
     for call in ("run_portfolio_backtest(", "run_parameter_sweep(", "run_completed_candle_backtest(", "to_thread("):
         assert call not in source, call
     assert "research_jobs.enqueue(" in source
