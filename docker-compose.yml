@@ -34,9 +34,9 @@ services:
       retries: 10
     networks: [internal]
 
-  # The four application services below are one deployment: rebuild them
+  # The application services below are one deployment: rebuild them
   # together, from one commit, every time --
-  #   SIDRA_BUILD_COMMIT=$(git rev-parse HEAD) docker compose up -d --build api scanner-worker swing-worker web
+  #   SIDRA_BUILD_COMMIT=$(git rev-parse HEAD) docker compose up -d --build api scanner-worker swing-worker research-worker web
   # and check the result with scripts/verify-deployment.sh.
   api:
     build:
@@ -108,6 +108,52 @@ services:
     cap_drop: [ALL]
     pids_limit: 128
     networks: [internal, edge]
+
+  # Research Lab: runs backtests and sweeps, which used to run inside the api
+  # process beside the live exit sweep. Its own container so research can never
+  # take the CPU or memory the trading services need, with hard limits on both.
+  # It cannot trade: every broker and Telegram credential is blanked below, which
+  # also leaves it unable to decrypt the stored Upstox token, and the worker
+  # refuses to start if any of them is set. It runs heavy work only outside
+  # 9:00 AM - 3:40 PM IST on trading days.
+  research-worker:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+      args:
+        SIDRA_BUILD_COMMIT: ${SIDRA_BUILD_COMMIT:-unknown}
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    command: ["python", "-m", "app.research_worker"]
+    env_file: .env
+    environment:
+      UPSTOX_ACCESS_TOKEN: ""
+      UPSTOX_API_KEY: ""
+      UPSTOX_API_SECRET: ""
+      UPSTOX_PIN: ""
+      UPSTOX_TOTP_SECRET: ""
+      UPSTOX_MOBILE_NUMBER: ""
+      UPSTOX_TOKEN_ENCRYPTION_KEY: ""
+      FIRSTOCK_API_KEY: ""
+      FIRSTOCK_PASSWORD: ""
+      FIRSTOCK_TOTP_SECRET: ""
+      FIRSTOCK_USER_ID: ""
+      FIRSTOCK_VENDOR_CODE: ""
+      TELEGRAM_BOT_TOKEN: ""
+      TELEGRAM_CONFIG_ENCRYPTION_KEY: ""
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    volumes:
+      - app_logs:/app/logs
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    pids_limit: 128
+    cpus: 1.0
+    mem_limit: 1536m
+    # Internal only: it needs Postgres and Redis and nothing on the internet.
+    networks: [internal]
 
   web:
     build:

@@ -459,7 +459,7 @@ async def main() -> int:
         )
 
     # Each share's sector group, so the per-sector ceiling applies as it does live.
-    from app.api.routes.backtesting import sector_lookup
+    from app.services.research_runs import sector_lookup
 
     async with SessionLocal() as session:
         sector_of_token = await sector_lookup(session, list(by_instrument))

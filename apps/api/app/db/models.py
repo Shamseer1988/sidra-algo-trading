@@ -1150,3 +1150,57 @@ class SwingPaperPosition(TimestampMixin, Base):
     # rule was or was not met, each stop move. The columns above say what; this
     # says why, which is the part a review needs.
     snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class ResearchJob(Base):
+    """One backtest or sweep to be run by the research worker, never by the API.
+
+    Status runs QUEUED -> RUNNING -> SUCCEEDED | FAILED | CANCELLED. A RUNNING
+    job whose heartbeat stops is returned to QUEUED once per remaining attempt,
+    then FAILED. ``payload`` is the full input as it stood when the job was
+    asked for -- strategies, controls, charges -- so the run is reproducible
+    and a settings change made while it waits does not change what it measures.
+    ``result`` names the rows the job wrote (a backtest run or a sweep).
+    """
+
+    __tablename__ = "research_jobs"
+    __table_args__ = (
+        Index("ix_research_jobs_status_priority", "status", "priority", "created_at"),
+        Index("ix_research_jobs_created_at", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    job_type: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(20), default="QUEUED", server_default="QUEUED")
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    failure_detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_by_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, default=2, server_default="2")
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=7200, server_default="7200")
+    cancel_requested: Mapped[bool] = mapped_column(default=False, server_default="false")
+    worker_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ResearchJobEvent(Base):
+    """Every state change of a research job, and who made it. Append-only."""
+
+    __tablename__ = "research_job_events"
+    __table_args__ = (Index("ix_research_job_events_job_occurred", "job_id", "occurred_at"),)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    job_id: Mapped[UUID] = mapped_column(ForeignKey("research_jobs.id", ondelete="CASCADE"))
+    from_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(20))
+    actor: Mapped[str] = mapped_column(String(80))
+    detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
