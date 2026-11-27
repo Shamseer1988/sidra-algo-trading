@@ -167,16 +167,42 @@ class CandleAggregationService:
         self._calendar = calendar or DEFAULT_TRADING_CALENDAR
         self._data_quality = data_quality
         self._open: dict[str, _OpenCandle] = {}
-        self._last_cumulative_volume: dict[str, int] = {}
+        # The highest cumulative volume seen per instrument, and the session it
+        # belongs to.
+        self._last_cumulative_volume: dict[str, tuple[date, int]] = {}
 
     def _volume_delta(self, tick: MarketTick) -> int:
+        """Shares traded since the last tick, from the feed's cumulative day volume.
+
+        A lower cumulative figure within the same session used to be read as a
+        reset, and the whole day's volume so far was booked to that one tick.
+        But inside a session the figure only ever rises; a lower one is an older
+        snapshot that arrived late. Each websocket message is handled as its own
+        coroutine, and they interleave, so that happens all day. The next
+        in-order tick then added the gap a second time. Live candles carried 20
+        to 100 times the exchange's volume (RELIANCE on 26 November: 2.05
+        billion against the provider's 20.0 million), which corrupted session
+        RVOL, the time-of-day baselines and VWAP weights.
+
+        Now a decrease inside a session contributes nothing and leaves the high
+        mark alone. Only a new session resets, and its first tick counts the
+        session's volume so far, as the reset always intended.
+        """
         if tick.cumulative_volume is None:
             return 0
+        session = tick.exchange_timestamp.astimezone(MARKET_TIMEZONE).date()
         previous = self._last_cumulative_volume.get(tick.instrument_token)
-        self._last_cumulative_volume[tick.instrument_token] = tick.cumulative_volume
         if previous is None:
+            self._last_cumulative_volume[tick.instrument_token] = (session, tick.cumulative_volume)
             return 0
-        return tick.cumulative_volume - previous if tick.cumulative_volume >= previous else tick.cumulative_volume
+        previous_session, previous_volume = previous
+        if session != previous_session:
+            self._last_cumulative_volume[tick.instrument_token] = (session, tick.cumulative_volume)
+            return tick.cumulative_volume
+        if tick.cumulative_volume <= previous_volume:
+            return 0
+        self._last_cumulative_volume[tick.instrument_token] = (session, tick.cumulative_volume)
+        return tick.cumulative_volume - previous_volume
 
     async def consume(self, tick: MarketTick) -> None:
         if not is_regular_market_timestamp(tick.exchange_timestamp, self._calendar):
