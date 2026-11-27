@@ -251,14 +251,16 @@ def test_the_worker_names_no_order_capable_client():
     assert "UpstoxOrderClient" not in source and "FirstockOrderClient" not in source
 
 
-def test_compose_gives_the_worker_no_credentials_limits_and_no_edge_network():
+def test_compose_gives_the_worker_no_credentials_limits_and_no_ports():
     compose = (REPO / "docker-compose.yml").read_text(encoding="utf-8")
     block = compose.split("  research-worker:\n", 1)[1].split("\n  web:\n", 1)[0]
     for name in research_worker.FORBIDDEN_ENVIRONMENT:
         assert f'      {name}: ""' in block, name
     assert "cpus:" in block and "mem_limit:" in block
-    assert "networks: [internal]" in block and "edge" not in block.split("networks:")[1]
+    # edge carries outbound HTTPS to the public history endpoint (Phase 4); no port is published.
+    assert "networks: [internal, edge]" in block
     assert "ports:" not in block
+    assert "mem_limit: 1g" in block
 
 
 # --- supervising a job ------------------------------------------------------------------------

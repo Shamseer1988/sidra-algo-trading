@@ -142,18 +142,25 @@ services:
       FIRSTOCK_VENDOR_CODE: ""
       TELEGRAM_BOT_TOKEN: ""
       TELEGRAM_CONFIG_ENCRYPTION_KEY: ""
+      # Historical datasets: one gzip CSV per instrument and month (Phase 4).
+      RESEARCH_DATA_DIR: /app/research_data
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     volumes:
       - app_logs:/app/logs
+      - research_data:/app/research_data
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     pids_limit: 128
     cpus: 1.0
-    mem_limit: 1536m
-    # Internal only: it needs Postgres and Redis and nothing on the internet.
-    networks: [internal]
+    # The NAS has 5.8 GB with about 1.6 GB free beside the trading services
+    # (measured 27 Nov 2026), so 1 GB, not more. A sweep needs about 400 MB.
+    mem_limit: 1g
+    # edge for outbound HTTPS to Upstox's public, unauthenticated history
+    # endpoint (the backfill). No ports are published, and it holds no
+    # credentials to send anywhere.
+    networks: [internal, edge]
 
   web:
     build:
@@ -189,6 +196,7 @@ volumes:
   postgres_data:
   redis_data:
   app_logs:
+  research_data:
 
 networks:
   internal:

@@ -54,6 +54,8 @@ class BacktestRunRequest(BaseModel):
     instrument_tokens: list[str] = Field(min_length=1, max_length=10)
     strategy_ids: list[str] = Field(default_factory=list, max_length=10)
     timeframe_seconds: int = Field(default=60, ge=60, le=900)
+    # A finalised research dataset to measure on instead of the live candle store.
+    dataset_id: UUID | None = None
 
     @field_validator("instrument_tokens", "strategy_ids")
     @classmethod
@@ -287,6 +289,7 @@ class SweepRequest(BaseModel):
     timeframe_seconds: int = Field(default=60, ge=60, le=900)
     validation_fraction: float = Field(default=0.35, ge=0.1, le=0.6)
     parameter_grid: dict[str, list[float]] = Field(min_length=1)
+    dataset_id: UUID | None = None
 
     @field_validator("instrument_tokens")
     @classmethod
