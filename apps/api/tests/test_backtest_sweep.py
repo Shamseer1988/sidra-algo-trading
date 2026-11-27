@@ -123,13 +123,23 @@ def test_run_parameter_sweep_is_deterministic_and_splits_in_sample_from_validati
     assert any(c.validation["trades"] > 0 for c in first.combinations)
 
 
-def test_run_parameter_sweep_prefers_a_validated_combination() -> None:
+def test_run_parameter_sweep_chooses_on_the_in_sample_half_only() -> None:
+    """Research Lab Phase 2 reversed this test's old rule on purpose.
+
+    It used to assert that the best row was a "proven" one, i.e. chosen by its
+    validation result. Choosing by validation makes validation part of the
+    tuning, so the chosen row's validation figure stops being an honest
+    estimate. The best row is now the best in-sample row; validation is only
+    reported.
+    """
     by_instrument, benchmark = _history()
     grid = {"minimum_rr": [1.0, 5.0]}
     result = run_parameter_sweep(
         _strategy(), _controls(), _EXECUTION, _settings(), by_instrument, benchmark, grid, validation_fraction=0.5
     )
     best = next(c for c in result.combinations if c.index == result.best_index)
-    proven = [c for c in result.combinations if c.proven]
-    if proven:
-        assert best.proven
+    top_in_sample = max(
+        result.combinations, key=lambda c: (c.in_sample["return_percent"], c.in_sample["net_pnl"], -c.index)
+    )
+    assert best.index == top_in_sample.index
+    assert result.variants_tested == 2

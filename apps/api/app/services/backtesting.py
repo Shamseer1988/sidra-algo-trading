@@ -13,11 +13,12 @@ from decimal import Decimal
 from hashlib import sha256
 
 from app.core.config import Settings
-from app.services.exit_rules import ExitRules, time_exit_due, trail_to
+from app.services.exit_rules import ExitRules, time_exit_due, trail_to, under_account_deadline
 from app.services.exit_rules import from_controls as exit_rules_from
 from app.services.market_calculations import MARKET_TIMEZONE, CompletedCandle, indicator_snapshot
 from app.services.paper_execution import (
     PaperExecutionControls,
+    PaperOrderManager,
     _money,
     entry_side,
     exit_side,
@@ -48,6 +49,15 @@ class BacktestTradeResult:
     net_pnl: Decimal
     realized_r: Decimal
     exit_reason: str
+    # What the trade was sized to risk -- the live engine's daily allocation
+    # adds these up. Defaulted so a caller building results by hand still works.
+    risk_amount: Decimal = Decimal("0")
+    # One strategy on one share on one day is one chain. In ``all_signals``
+    # mode a chain can hold several candidates, in time order; the portfolio
+    # simulator takes at most one of them, as live does (see
+    # ``run_completed_candle_backtest``).
+    chain_key: str = ""
+    sequence: int = 0
 
 
 @dataclass(frozen=True)
@@ -60,6 +70,14 @@ class BacktestResult:
 
 def _decimal(value: object) -> Decimal:
     return Decimal(str(value))
+
+
+@dataclass(frozen=True)
+class _StopOrder:
+    """The two attributes ``PaperOrderManager._stop_fill`` reads from a paper order."""
+
+    side: str
+    stop_price: Decimal
 
 
 DAILY_TIMEFRAME_SECONDS = 86_400
@@ -158,13 +176,24 @@ def _exit_trade(
     trailed = False
     opened_at = candles[entry_index].opened_at
     after = candles[entry_index + 1 :]
+    band = float(getattr(execution_controls, "stop_limit_band_percent", 0.0) or 0.0)
+    stop_order_side = exit_side(side)
     for position, candle in enumerate(after):
-        stop_hit = candle.low <= stop if side == "LONG" else candle.high >= stop
+        # Where the stop fills, by the paper engine's own rule
+        # (``PaperOrderManager._stop_fill``): at the stop when price trades
+        # through it, at the open when the candle opens beyond it, and -- past
+        # Upstox's SL-limit band -- only if price comes back to the band's
+        # edge. A gap through the stop used to be booked at the stop, a price
+        # that never traded, which flattered every strategy that holds through
+        # a gap. Not filled means the order rests and the next candle is tried.
+        stop_order = _StopOrder(side=stop_order_side, stop_price=stop)
+        stop_filled, stop_fill = PaperOrderManager._stop_fill(stop_order, candle, band)
         target_hit = candle.high >= target if side == "LONG" else candle.low <= target
-        if stop_hit or target_hit:
-            reason = ("TRAIL_STOP" if trailed else "STOP") if stop_hit else "TARGET"
-            reference = stop if stop_hit else target
-            return slipped_price(reference, exit_side(side), execution_controls.slippage_bps), candle.closed_at, reason
+        if stop_filled:
+            reason = "TRAIL_STOP" if trailed else "STOP"
+            return slipped_price(stop_fill, exit_side(side), execution_controls.slippage_bps), candle.closed_at, reason
+        if target_hit:
+            return slipped_price(target, exit_side(side), execution_controls.slippage_bps), candle.closed_at, "TARGET"
         # The clock, the way paper applies it: due at this candle's close,
         # filled at the next candle's open. Without it a strategy that squares
         # off at 3 PM was measured holding to the last candle of the day.
@@ -283,8 +312,27 @@ def run_completed_candle_backtest(
     controls: dict,
     execution_controls: PaperExecutionControls,
     settings: Settings,
+    *,
+    all_signals: bool = False,
 ) -> BacktestResult:
-    """Replay immutable candles with explicit next-candle fills and no future indicators."""
+    """Replay immutable candles with explicit next-candle fills and no future indicators.
+
+    Each strategy is replayed on each share independently. By default a
+    strategy stops on a share after its first signal of the session, which is
+    what live does when that signal is taken.
+
+    ``all_signals=True`` is for ``portfolio_simulation``. Live does not always
+    take a signal: a daily ceiling or a risk gate can refuse it, and then the
+    scanner sets the state back to AWAITING and the setup may form again later
+    that session (``scanner_orchestration._evaluate_strategy``). So in this mode
+    every signal is emitted as a candidate and the state machine is reset
+    exactly as a refusal would reset it. Candidates of one strategy on one share
+    on one day share a ``chain_key`` and are numbered by ``sequence``; the
+    portfolio pass takes at most one per chain and never a later one after it.
+
+    Exits use the strategy's own rules capped at the account's square-off
+    (``session_square_off_time``), the way ``live_exit_manager`` caps them.
+    """
     normalized = {
         key: sorted(value, key=lambda candle: candle.opened_at) for key, value in candles_by_instrument.items()
     }
@@ -326,6 +374,15 @@ def run_completed_candle_backtest(
             pending = {strategy.id: strategy for strategy in sorted(strategies, key=lambda item: item.id)}
             states = dict.fromkeys(pending, AWAITING)
             controls_for = {key: value.effective_controls(controls) for key, value in pending.items()}
+            # The account deadline caps each strategy's own square-off, as live
+            # does. Without it a strategy that says nothing about the clock was
+            # held to the last candle of the day, past the 3 PM the account is
+            # flat by.
+            rules_for = {
+                key: under_account_deadline(exit_rules_from(controls_for[key]), controls.get("session_square_off_time"))
+                for key in pending
+            }
+            sequence_for = dict.fromkeys(pending, 0)
             # Keyed by the candle's close, which is what decides the slice. One
             # session's worth at a time, so this is bounded by a few hundred
             # entries however long the range is.
@@ -378,7 +435,15 @@ def run_completed_candle_backtest(
                     states[key] = decision.next_state
                     if decision.next_state != SIGNALLED or decision.side is None:
                         continue
-                    signalled.append(key)
+                    if all_signals:
+                        # As if refused: the scanner records AWAITING and the
+                        # setup must form again. Whether it was in fact taken
+                        # is the portfolio pass's decision, not this one's.
+                        states[key] = AWAITING
+                    else:
+                        signalled.append(key)
+                    sequence = sequence_for[key]
+                    sequence_for[key] += 1
                     entry_candle = session_rows[index + 1]
                     entry_price = slipped_price(
                         entry_candle.open, entry_side(decision.side), execution_controls.slippage_bps
@@ -390,8 +455,9 @@ def run_completed_candle_backtest(
                         execution_controls,
                         entry_price=entry_price,
                         # The strategy's own rules, read the way paper reads
-                        # them, so a per-strategy override reaches the exit.
-                        rules=exit_rules_from(controls_for[key]),
+                        # them, so a per-strategy override reaches the exit --
+                        # capped at the account deadline.
+                        rules=rules_for[key],
                     )
                     entry_costs = transaction_costs(
                         entry_price, decision.quantity, entry_side(decision.side), execution_controls
@@ -425,6 +491,9 @@ def run_completed_candle_backtest(
                             net_pnl=net,
                             realized_r=_money(net / risk) if risk else Decimal("0"),
                             exit_reason=exit_reason,
+                            risk_amount=_money(risk),
+                            chain_key=f"{strategy.id}:{session_date.isoformat()}:{instrument}",
+                            sequence=sequence,
                         )
                     )
                 # A strategy takes one trade per instrument per session, which

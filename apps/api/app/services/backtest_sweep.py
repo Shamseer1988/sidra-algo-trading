@@ -8,8 +8,9 @@ Nothing is promoted automatically.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from itertools import product
@@ -19,7 +20,12 @@ from app.services.backtesting import run_completed_candle_backtest
 from app.services.exit_rules import ATR_TRAIL, BREAKEVEN_AT_R, NO_TRAIL
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_execution import PaperExecutionControls
+from app.services.portfolio_simulation import simulate_portfolio
 from app.services.strategy_registry import StrategyConfiguration
+
+# Resamples for the bootstrap interval on average R. Enough for two decimal
+# places of a 95% interval; few enough that forty variants stay quick.
+BOOTSTRAP_RESAMPLES = 500
 
 STRATEGY_PARAMS = {
     "minimum_score",
@@ -64,6 +70,9 @@ _SETTINGS_FIELDS = (
     "volume_lookback_candles",
     "atr_period",
     "daily_history_sessions",
+    # Carried through so the time-of-day volume baseline matches the scanner's;
+    # without it the replay fell back to the Settings default of 10.
+    "rvol_baseline_sessions",
 )
 
 
@@ -89,6 +98,11 @@ class SweepCombination:
 class SweepResult:
     combinations: tuple[SweepCombination, ...]
     best_index: int | None
+    # How many variants were tried. A best-of-forty is not a best-of-one, and
+    # any later statistic on the chosen row has to be read against this.
+    variants_tested: int = 0
+    # The taken trades of each variant, for walk_forward. Not persisted.
+    trades_by_index: dict = field(default_factory=dict, compare=False, repr=False)
 
 
 def _normalise(value: object) -> object:
@@ -159,7 +173,10 @@ def build_combinations(grid: dict[str, list], maximum: int) -> list[dict]:
 
 
 def _settings_namespace(base_settings: object, overrides: dict) -> SimpleNamespace:
-    values = {field: getattr(base_settings, field) for field in _SETTINGS_FIELDS}
+    # getattr with a default: a test or script may pass a slimmer settings object,
+    # and rvol_baseline_sessions is newer than most of them (10 is the Settings default).
+    values = {name: getattr(base_settings, name) for name in _SETTINGS_FIELDS if name != "rvol_baseline_sessions"}
+    values["rvol_baseline_sessions"] = getattr(base_settings, "rvol_baseline_sessions", 10)
     values.update({key: overrides[key] for key in overrides if key in _SETTINGS_FIELDS})
     return SimpleNamespace(**values)
 
@@ -172,6 +189,35 @@ def _partition_dates(dates: list[date], validation_fraction: float) -> tuple[set
     return set(ordered[:split]), set(ordered[split:])
 
 
+def _cost_r(trades: list, multiplier: Decimal) -> Decimal | None:
+    """Average R had charges been ``multiplier`` times what they were."""
+    risked = [trade for trade in trades if trade.risk_amount and trade.risk_amount > 0]
+    if not risked:
+        return None
+    total = sum(
+        ((trade.gross_pnl - trade.fees_total * multiplier) / trade.risk_amount for trade in risked),
+        start=Decimal("0"),
+    )
+    return total / len(risked)
+
+
+def bootstrap_interval(values: list[float], *, resamples: int = BOOTSTRAP_RESAMPLES, seed: int = 20261127):
+    """A 95% percentile bootstrap interval for the mean, or None with fewer than 10 values.
+
+    Seeded, so the same trades always give the same interval. An interval that
+    spans zero is the plain statement that these trades cannot tell an edge
+    from none -- which forty trades usually cannot.
+    """
+    if len(values) < 10:
+        return None
+    rng = random.Random(seed)
+    size = len(values)
+    means = sorted(sum(rng.choices(values, k=size)) / size for _ in range(resamples))
+    low = means[int(0.025 * (resamples - 1))]
+    high = means[int(0.975 * (resamples - 1))]
+    return [round(low, 4), round(high, 4)]
+
+
 def _metrics(trades: list, capital: Decimal) -> dict:
     net = sum((trade.net_pnl for trade in trades), start=Decimal("0"))
     wins = sum(trade.net_pnl > 0 for trade in trades)
@@ -179,6 +225,7 @@ def _metrics(trades: list, capital: Decimal) -> dict:
     profit = sum((trade.net_pnl for trade in trades if trade.net_pnl > 0), start=Decimal("0"))
     loss = sum((-trade.net_pnl for trade in trades if trade.net_pnl < 0), start=Decimal("0"))
     realized_r = sum((trade.realized_r for trade in trades), start=Decimal("0"))
+    doubled = _cost_r(trades, Decimal("2"))
     return {
         "trades": len(trades),
         "wins": wins,
@@ -188,24 +235,52 @@ def _metrics(trades: list, capital: Decimal) -> dict:
         "return_percent": round(float(net / capital * 100), 4) if capital else 0.0,
         "profit_factor": round(float(profit / loss), 4) if loss else None,
         "average_realized_r": round(float(realized_r / len(trades)), 4) if trades else 0.0,
+        # The two figures that say whether the average means anything.
+        "average_r_ci95": bootstrap_interval([float(trade.realized_r) for trade in trades]),
+        "average_r_at_double_costs": round(float(doubled), 4) if doubled is not None else None,
     }
 
 
 def _rank(results: list[SweepCombination]) -> int | None:
-    """The index to recommend: the best proven combination, else the best row.
+    """The index to recommend: the best **in-sample** row.
+
+    It used to be the best *validation* row. Choosing among forty combinations
+    by their validation result makes the validation block part of the tuning:
+    the winner is the one that happened to do best there, and its validation
+    figure is then the most optimistic number in the table rather than an
+    honest estimate. Ranked on in-sample, the validation column is what the
+    chosen row actually did on sessions nobody looked at while choosing.
 
     Shared by both paths so they cannot disagree about what "best" means.
     """
     ranked = sorted(
         results,
-        key=lambda item: (
-            item.validation["return_percent"],
-            item.validation["net_pnl"],
-            item.in_sample["return_percent"],
-        ),
+        key=lambda item: (item.in_sample["return_percent"], item.in_sample["net_pnl"], -item.index),
         reverse=True,
     )
-    return next((item.index for item in ranked if item.proven), ranked[0].index if ranked else None)
+    return ranked[0].index if ranked else None
+
+
+def _portfolio_trades(
+    replay_trades: list,
+    variant: StrategyConfiguration,
+    controls: dict,
+    sector_of_token: Callable[[str], str] | None,
+) -> list:
+    """What one live account running only this variant would have taken."""
+    mine = [trade for trade in replay_trades if trade.strategy_id == variant.id]
+    return simulate_portfolio(mine, controls, [variant], sector_of_token=sector_of_token).taken
+
+
+def _combination(
+    index: int, combo: dict, trades: list, in_sample_dates: set[date], validation_dates: set[date], capital: Decimal
+) -> SweepCombination:
+    in_trades = [t for t in trades if date.fromisoformat(t.session_date) in in_sample_dates]
+    val_trades = [t for t in trades if date.fromisoformat(t.session_date) in validation_dates]
+    in_metrics = _metrics(in_trades, capital)
+    val_metrics = _metrics(val_trades, capital)
+    proven = val_metrics["trades"] >= 3 and val_metrics["return_percent"] > 0
+    return SweepCombination(index, combo, in_metrics, val_metrics, proven)
 
 
 def _one_pass(
@@ -220,13 +295,16 @@ def _one_pass(
     validation_dates: set[date],
     capital: Decimal,
     progress: Callable[[int, int, dict], None] | None,
+    sector_of_token: Callable[[str], str] | None,
 ) -> SweepResult:
     """Every combination in one replay, which is the whole optimisation.
 
     Each variant gets a distinct id so its trades can be told apart again --
     the replay stamps ``strategy_id`` on every trade, and nothing in it lets
-    one strategy's decisions reach another: state is per strategy, the trade
-    list is append-only, and there is no cross-strategy daily cap in a replay.
+    one strategy's decisions reach another: state is per strategy and the
+    trade list is append-only. The portfolio pass then runs once per variant,
+    as its own account, so ``max_trades_per_day`` and ``cooldown_minutes``
+    are honoured -- they used to be sweepable and ignored.
     """
     variants = [
         base_strategy.model_copy(update={**combo, "id": f"{base_strategy.id}#sweep{index}"})
@@ -237,30 +315,28 @@ def _one_pass(
         # about what is happening and the estimate drawn from it worse.
         progress(0, 1, {"combinations": len(combos), "shared_pass": True})
 
-    result = run_completed_candle_backtest(
+    replay = run_completed_candle_backtest(
         candles_by_instrument,
         benchmark_candles,
         variants,
         base_controls,
         execution_controls,
         _settings_namespace(base_settings, {}),
+        all_signals=True,
     )
-    by_variant: dict[str, list] = {variant.id: [] for variant in variants}
-    for trade in result.trades:
-        if trade.strategy_id in by_variant:
-            by_variant[trade.strategy_id].append(trade)
-
     results: list[SweepCombination] = []
+    trades_by_index: dict[int, list] = {}
     for index, (combo, variant) in enumerate(zip(combos, variants, strict=True)):
-        mine = by_variant[variant.id]
-        in_trades = [t for t in mine if date.fromisoformat(t.session_date) in in_sample_dates]
-        val_trades = [t for t in mine if date.fromisoformat(t.session_date) in validation_dates]
-        in_metrics = _metrics(in_trades, capital)
-        val_metrics = _metrics(val_trades, capital)
-        proven = val_metrics["trades"] >= 3 and val_metrics["return_percent"] > 0
-        results.append(SweepCombination(index, combo, in_metrics, val_metrics, proven))
+        taken = _portfolio_trades(list(replay.trades), variant, base_controls, sector_of_token)
+        trades_by_index[index] = taken
+        results.append(_combination(index, combo, taken, in_sample_dates, validation_dates, capital))
 
-    return SweepResult(combinations=tuple(results), best_index=_rank(results))
+    return SweepResult(
+        combinations=tuple(results),
+        best_index=_rank(results),
+        variants_tested=len(combos),
+        trades_by_index=trades_by_index,
+    )
 
 
 def run_parameter_sweep(
@@ -275,13 +351,19 @@ def run_parameter_sweep(
     validation_fraction: float = 0.35,
     maximum_combinations: int = 40,
     progress: Callable[[int, int, dict], None] | None = None,
+    sector_of_token: Callable[[str], str] | None = None,
 ) -> SweepResult:
-    """Replay every combination, scored in sample and out of it.
+    """Replay every combination as one live account, scored in sample and out of it.
 
     ``progress`` is called with (finished, total, parameters) before each
     combination. A sweep over months of candles takes hours on a small machine,
     and one that prints nothing until it is done is one an operator kills
     because they cannot tell it from a hang.
+
+    ``base_settings`` must carry the indicator periods the strategy is meant to
+    run with -- the stored ones (``indicator_settings.effective``), not the
+    environment's -- or the sweep measures with a different ruler than the
+    scanner trades with.
     """
     # Before anything is replayed: a sweep costs hours, and a grid that was
     # never going to produce a usable answer should say so in a second.
@@ -293,19 +375,12 @@ def run_parameter_sweep(
 
     # When the grid only varies what a strategy carries, every combination
     # sees exactly the same candles and the same indicators -- so they can be
-    # replayed together instead of once each. The replay already takes a list
-    # of strategies and now computes each candle's indicators once for all of
-    # them, so N variants in one pass cost about what one pass costs.
+    # replayed together instead of once each.
     #
     # A grid touching CONTROL_PARAMS or SETTINGS_PARAMS cannot share a pass:
     # those change the controls dict or the indicator periods, which the
-    # replay takes once for the whole run. Those still go one at a time.
-    #
-    # EXIT_PARAMS are excluded too, though a strategy does carry them and they
-    # could in principle share. One replay per variant costs minutes and
-    # cannot be subtly wrong; sharing one would put the nested exit_rules
-    # rebuild on a second code path, and a variant that quietly kept the base
-    # rules would score as a difference that is not there.
+    # replay takes once for the whole run. EXIT_PARAMS go one at a time too:
+    # sharing would put the nested exit_rules rebuild on a second code path.
     if combos and len(combos) > 1 and set(grid) <= STRATEGY_PARAMS:
         return _one_pass(
             base_strategy,
@@ -319,9 +394,11 @@ def run_parameter_sweep(
             validation_dates,
             capital,
             progress,
+            sector_of_token,
         )
 
     results: list[SweepCombination] = []
+    trades_by_index: dict[int, list] = {}
     for index, combo in enumerate(combos):
         if progress is not None:
             progress(index, len(combos), combo)
@@ -342,19 +419,97 @@ def run_parameter_sweep(
             **{key: value for key, value in combo.items() if key in CONTROL_PARAMS},
         }
         settings_variant = _settings_namespace(base_settings, combo)
-        result = run_completed_candle_backtest(
+        replay = run_completed_candle_backtest(
             candles_by_instrument,
             benchmark_candles,
             [strategy_variant],
             controls_variant,
             execution_controls,
             settings_variant,
+            all_signals=True,
         )
-        in_trades = [t for t in result.trades if date.fromisoformat(t.session_date) in in_sample_dates]
-        val_trades = [t for t in result.trades if date.fromisoformat(t.session_date) in validation_dates]
-        in_metrics = _metrics(in_trades, capital)
-        val_metrics = _metrics(val_trades, capital)
-        proven = val_metrics["trades"] >= 3 and val_metrics["return_percent"] > 0
-        results.append(SweepCombination(index, combo, in_metrics, val_metrics, proven))
+        taken = _portfolio_trades(list(replay.trades), strategy_variant, controls_variant, sector_of_token)
+        trades_by_index[index] = taken
+        results.append(_combination(index, combo, taken, in_sample_dates, validation_dates, capital))
 
-    return SweepResult(combinations=tuple(results), best_index=_rank(results))
+    return SweepResult(
+        combinations=tuple(results),
+        best_index=_rank(results),
+        variants_tested=len(combos),
+        trades_by_index=trades_by_index,
+    )
+
+
+@dataclass(frozen=True)
+class WalkForwardFold:
+    train_start: date
+    train_end: date
+    test_start: date
+    test_end: date
+    chosen_index: int | None
+    in_sample: dict
+    out_of_sample: dict
+
+    def as_dict(self) -> dict:
+        return {
+            "train": [self.train_start.isoformat(), self.train_end.isoformat()],
+            "test": [self.test_start.isoformat(), self.test_end.isoformat()],
+            "chosen_index": self.chosen_index,
+            "in_sample": self.in_sample,
+            "out_of_sample": self.out_of_sample,
+        }
+
+
+@dataclass(frozen=True)
+class WalkForwardResult:
+    folds: tuple[WalkForwardFold, ...]
+    stitched: dict
+    variants_tested: int
+
+
+def walk_forward(
+    trades_by_index: dict[int, list],
+    session_dates: list[date],
+    *,
+    train_sessions: int,
+    test_sessions: int,
+    capital: Decimal,
+) -> WalkForwardResult:
+    """Choose on each training window, score on the window after it, then move on.
+
+    Selection uses the in-sample rule ``_rank`` uses. The stitched result is the
+    chosen variant's trades in each test window, laid end to end: what an
+    operator who re-tuned every ``test_sessions`` sessions on the previous
+    ``train_sessions`` would have traded. Nothing from a test window is seen
+    before its own fold chooses.
+
+    Cheap: the variants' trades are already simulated, so a fold is only a
+    choice and a filter.
+    """
+    if train_sessions < 1 or test_sessions < 1:
+        raise ValueError("train_sessions and test_sessions must both be at least 1")
+    ordered = sorted(set(session_dates))
+    folds: list[WalkForwardFold] = []
+    stitched: list = []
+    start = 0
+    while start + train_sessions < len(ordered):
+        train = ordered[start : start + train_sessions]
+        test = ordered[start + train_sessions : start + train_sessions + test_sessions]
+        train_set, test_set = set(train), set(test)
+        scored = []
+        for index, trades in sorted(trades_by_index.items()):
+            in_trades = [t for t in trades if date.fromisoformat(t.session_date) in train_set]
+            scored.append((index, _metrics(in_trades, capital)))
+        scored.sort(key=lambda item: (item[1]["return_percent"], item[1]["net_pnl"], -item[0]), reverse=True)
+        chosen, chosen_in = scored[0] if scored else (None, _metrics([], capital))
+        out_trades = (
+            [t for t in trades_by_index.get(chosen, []) if date.fromisoformat(t.session_date) in test_set]
+            if chosen is not None
+            else []
+        )
+        stitched.extend(out_trades)
+        folds.append(
+            WalkForwardFold(train[0], train[-1], test[0], test[-1], chosen, chosen_in, _metrics(out_trades, capital))
+        )
+        start += test_sessions
+    return WalkForwardResult(tuple(folds), _metrics(stitched, capital), len(trades_by_index))

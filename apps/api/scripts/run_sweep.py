@@ -33,6 +33,7 @@ import asyncio
 import sys
 import time
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -249,6 +250,11 @@ async def main() -> int:
             "the ones the ATR band refuses."
         ),
     )
+    parser.add_argument(
+        "--walk-forward",
+        type=lambda text: tuple(int(part) for part in text.split(",")),
+        help="TRAIN,TEST sessions, e.g. 40,20: re-choose on each window and score the next.",
+    )
     parser.add_argument("--memory-budget-mb", type=int, default=700, help="Refuse a run estimated above this.")
     parser.add_argument("--force", action="store_true", help="Run anyway. On a small machine this may be killed.")
     args = parser.parse_args()
@@ -277,6 +283,7 @@ async def main() -> int:
 
     from app.api.routes.settings import DEFAULT_TRADING_CONTROLS, TRADING_KEY, TradingControls
     from app.core.config import get_settings
+    from app.services.indicator_settings import effective as effective_settings
     from app.services.paper_execution import DEFAULT_PAPER_EXECUTION_CONTROLS, PaperExecutionControls
     from app.services.strategy_registry import DEFAULT_STRATEGIES, STRATEGIES_KEY, StrategyConfiguration
 
@@ -284,6 +291,10 @@ async def main() -> int:
     benchmark_keys = {app_settings.nifty_benchmark_token, app_settings.upstox_nifty_benchmark_key}
 
     async with SessionLocal() as session:
+        # The stored indicator periods, as the scanner uses. This read the
+        # environment's, so a sweep after a change on the Settings screen
+        # measured with a different ruler than the one that trades.
+        app_settings = await effective_settings(session, app_settings)
         controls_row = await session.get(ApplicationSetting, TRADING_KEY)
         controls = TradingControls.model_validate(controls_row.value if controls_row else DEFAULT_TRADING_CONTROLS)
         strategies_row = await session.get(ApplicationSetting, STRATEGIES_KEY)
@@ -447,6 +458,12 @@ async def main() -> int:
             f"({each / 60:.1f} min each, about {remaining / 60:.0f} min left)"
         )
 
+    # Each share's sector group, so the per-sector ceiling applies as it does live.
+    from app.api.routes.backtesting import sector_lookup
+
+    async with SessionLocal() as session:
+        sector_of_token = await sector_lookup(session, list(by_instrument))
+
     result = run_parameter_sweep(
         chosen,
         controls.model_dump(),
@@ -458,6 +475,7 @@ async def main() -> int:
         validation_fraction=args.validation_fraction,
         maximum_combinations=app_settings.backtest_sweep_max_combinations,
         progress=report,
+        sector_of_token=sector_of_token,
     )
     took = time.monotonic() - started
     # Per *replayed* candle, not per loaded one. --ranked-only drops the
@@ -468,19 +486,23 @@ async def main() -> int:
     # "hour of compute" into six.
     replayed = sum(len(rows) for rows in by_instrument.values())
     per_second = replayed * len(combinations) / max(took, 1)
-    print(f"\n  Replays finished in {took / 60:.1f} min ({per_second:,.0f} candles/second).")
+    print()
+    print(f"  Replays finished in {took / 60:.1f} min ({per_second:,.0f} candles/second).")
     if replayed != total:
         print(f"  {replayed:,} of {total:,} candles replayed per combination; the rest the ranking dropped.")
 
-    heading("RESULTS — ranked by validation return, which is the half it was not tuned on")
+    # Ranked on the in-sample half only. Ranking on validation made the
+    # validation half part of the tuning, and the top row's validation figure
+    # the most optimistic number on the page instead of an honest one.
+    heading(f"RESULTS — one live account per row, ranked IN sample; {result.variants_tested} variants tried")
     print(
         f"  {'#':>3} {'parameters':<34}"
-        f"{'IN trades':>10}{'IN win%':>9}{'IN net':>10}"
-        f"{'OUT trades':>11}{'OUT win%':>10}{'OUT net':>10}{'OUT PF':>8}  proven"
+        f"{'IN trades':>10}{'IN avgR':>9}{'IN net':>10}"
+        f"{'OUT trades':>11}{'OUT avgR':>10}{'OUT net':>10}{'OUT PF':>8}"
     )
     ordered = sorted(
         result.combinations,
-        key=lambda item: (item.validation["return_percent"], item.validation["net_pnl"]),
+        key=lambda item: (item.in_sample["return_percent"], item.in_sample["net_pnl"], -item.index),
         reverse=True,
     )
     for item in ordered:
@@ -488,40 +510,57 @@ async def main() -> int:
         factor = item.validation["profit_factor"]
         print(
             f"  {item.index:>3} {label[:33]:<34}"
-            f"{item.in_sample['trades']:>10}{item.in_sample['win_rate_percent']:>9.1f}"
+            f"{item.in_sample['trades']:>10}{item.in_sample['average_realized_r']:>9.3f}"
             f"{item.in_sample['net_pnl']:>10,.0f}"
-            f"{item.validation['trades']:>11}{item.validation['win_rate_percent']:>10.1f}"
+            f"{item.validation['trades']:>11}{item.validation['average_realized_r']:>10.3f}"
             f"{item.validation['net_pnl']:>10,.0f}"
-            f"{(f'{factor:.2f}' if factor else '—'):>8}  {'yes' if item.proven else 'no'}"
+            f"{(f'{factor:.2f}' if factor else '—'):>8}"
         )
 
     heading("WHAT TO MAKE OF IT")
-    proven = [item for item in ordered if item.proven]
-    if not proven:
-        print("  Nothing is proven: no combination made money on the validation sessions with at")
-        print("  least three trades there. That is a real answer, not a failed run -- it says this")
-        print("  grid contains no setting worth changing on this evidence. Do not pick the best")
-        print("  in-sample row; that row is the one the tuning chose, and it is the most")
-        print("  overfitted thing on the page.")
+    best = next((item for item in result.combinations if item.index == result.best_index), None)
+    if best is None:
+        print("  No combination produced a result.")
         return 0
-
-    best = proven[0]
     label = ", ".join(f"{key}={value}" for key, value in sorted(best.parameters.items()))
-    print(f"  Best proven combination: {label}")
-    print(
-        f"    in sample   {best.in_sample['trades']:>4} trades  {best.in_sample['win_rate_percent']:>5.1f}% win  "
-        f"net {best.in_sample['net_pnl']:,.2f}"
-    )
-    print(
-        f"    validation  {best.validation['trades']:>4} trades  {best.validation['win_rate_percent']:>5.1f}% win  "
-        f"net {best.validation['net_pnl']:,.2f}"
-    )
+    print(f"  Chosen on the in-sample half: {label}")
+    for name, block in (("in sample ", best.in_sample), ("validation", best.validation)):
+        print(
+            f"    {name}  {block['trades']:>4} trades  avg {block['average_realized_r']:+.3f}R  "
+            f"95% CI {block['average_r_ci95'] or 'n/a (<10 trades)'}  "
+            f"at double charges {block['average_r_at_double_costs']}R  net {block['net_pnl']:,.2f}"
+        )
+    print()
+    print(f"  {result.variants_tested} variants were tried to find this row. The best of many looks better")
+    print("  than it is; the validation line is the only one that was not part of choosing it.")
     if best.validation["trades"] < 20:
+        print(f"  Only {best.validation['trades']} validation trades: suggestive at most.")
+
+    if args.walk_forward:
+        from app.services.backtest_sweep import walk_forward
+
+        train, test = args.walk_forward
+        dates = sorted({candle.session_date for rows in by_instrument.values() for candle in rows})
+        folds = walk_forward(
+            result.trades_by_index,
+            dates,
+            train_sessions=train,
+            test_sessions=test,
+            capital=Decimal(str(controls.account_capital)),
+        )
+        heading(f"WALK-FORWARD — choose on {train} sessions, trade the next {test}, repeat")
+        for fold in folds.folds:
+            out = fold.out_of_sample
+            print(
+                f"  train {fold.train_start}..{fold.train_end}  test {fold.test_start}..{fold.test_end}  "
+                f"chose #{fold.chosen_index}  out {out['trades']:>3} trades  avg {out['average_realized_r']:+.3f}R"
+            )
+        stitched = folds.stitched
         print()
-        print(f"  Only {best.validation['trades']} validation trades. That is suggestive, not settled: a win")
-        print("  rate from a handful of trades has a confidence interval wide enough to include")
-        print("  both 'worth changing' and 'worse than what you have'. Treat it as a reason to")
-        print("  paper-forward the setting, not as a result.")
+        print(
+            f"  Stitched out-of-sample: {stitched['trades']} trades, avg {stitched['average_realized_r']:+.3f}R, "
+            f"95% CI {stitched['average_r_ci95']}, net {stitched['net_pnl']:,.2f}"
+        )
     print()
     print("  Charges here are modelled, not the broker's. A grid whose edge is thinner than the")
     print("  difference between the two is not telling you anything about your account.")
