@@ -1,9 +1,13 @@
-"""Completed-candle-only historical research APIs; these routes cannot submit orders."""
+"""Completed-candle-only historical research APIs; these routes cannot submit orders.
 
-import asyncio
-from collections.abc import Callable
-from datetime import date, datetime
-from decimal import Decimal
+Since Research Lab Phase 3 these routes run no replay themselves. A backtest or
+sweep becomes a ``research_jobs`` row; the ``research-worker`` container runs it
+(``app.research_worker``) and the route waits for the answer, so the API
+process -- which also runs the live exit sweep and reconciliation -- never
+spends its CPU on research.
+"""
+
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -21,23 +25,25 @@ from app.api.routes.settings import (
 )
 from app.db.models import (
     ApplicationSetting,
-    AuditLog,
     BacktestRun,
     BacktestSweep,
     BacktestTrade,
-    MarketCandle,
+    ResearchJob,
     User,
     UserRole,
 )
-from app.services import watchlist_store
-from app.services.backtest_sweep import STRATEGY_PARAMS, SWEEPABLE, run_parameter_sweep
-from app.services.indicator_settings import effective as effective_settings
-from app.services.market_calculations import CompletedCandle
+from app.services import research_jobs, research_runs
+from app.services.backtest_sweep import STRATEGY_PARAMS, SWEEPABLE
 from app.services.paper_execution import DEFAULT_PAPER_EXECUTION_CONTROLS, PAPER_EXECUTION_KEY, PaperExecutionControls
-from app.services.portfolio_simulation import run_portfolio_backtest
-from app.services.sectors import sector_of
+from app.services.research_runs import sector_lookup  # noqa: F401 - re-exported for scripts
 from app.services.strategy_registry import DEFAULT_STRATEGIES, STRATEGIES_KEY, StrategyConfiguration, StrategyRegistry
-from app.services.trading_symbols import resolve_script_names
+from app.services.trading_calendar import TradingCalendar
+
+# How long a request waits for the worker before answering "still running".
+# A single backtest is minutes; a sweep can be an hour and is never waited for
+# that long -- it appears in the sweep list when it is done.
+BACKTEST_WAIT_SECONDS = 600
+SWEEP_WAIT_SECONDS = 60
 
 router = APIRouter(prefix="/backtests", tags=["Backtesting"])
 
@@ -152,91 +158,45 @@ def _trade_response(row: BacktestTrade) -> BacktestTradeResponse:
     )
 
 
-def _completed(row: MarketCandle) -> CompletedCandle:
-    return CompletedCandle(
-        instrument_token=row.instrument_token,
-        timeframe_seconds=row.timeframe_seconds,
-        opened_at=row.opened_at,
-        closed_at=row.closed_at,
-        open=Decimal(str(row.open)),
-        high=Decimal(str(row.high)),
-        low=Decimal(str(row.low)),
-        close=Decimal(str(row.close)),
-        volume=row.volume,
-        tick_count=row.tick_count,
-    )
-
-
-async def _load_history(
+async def _run_as_job(
     session: DbSession,
-    app_settings: AppSettings,
-    instrument_tokens: list[str],
-    timeframe_seconds: int,
-    start_date: date,
-    end_date: date,
-) -> tuple[dict[str, list[CompletedCandle]], list[CompletedCandle]]:
-    # NIFTY is stored under whichever key the feed that recorded it uses:
-    # "NSE:26000" from Firstock, "NSE_INDEX|Nifty 50" from Upstox. Asking for
-    # both and letting the data decide is the only version of this that keeps
-    # working when the deployment changes feed, or holds history from both.
-    # Reading one setting would fail every backtest on the other broker with
-    # "Benchmark candles are unavailable", which names the wrong cause.
-    benchmark_keys = {app_settings.nifty_benchmark_token, app_settings.upstox_nifty_benchmark_key}
-    # And the benchmark chosen in Strategies > Subscriptions, when one is saved.
-    saved = await watchlist_store.load(session)
-    if saved is not None:
-        benchmark_keys.add(saved.benchmark)
-    all_tokens = list(dict.fromkeys([*instrument_tokens, *benchmark_keys]))
-    rows = list(
-        (
-            await session.scalars(
-                select(MarketCandle)
-                .where(
-                    MarketCandle.instrument_token.in_(all_tokens),
-                    MarketCandle.timeframe_seconds == timeframe_seconds,
-                    MarketCandle.session_date >= start_date,
-                    MarketCandle.session_date <= end_date,
-                )
-                .order_by(MarketCandle.instrument_token, MarketCandle.opened_at)
-            )
-        ).all()
-    )
-    by_instrument: dict[str, list[CompletedCandle]] = {item: [] for item in instrument_tokens}
-    # Keyed per benchmark candidate rather than merged: two feeds' NIFTY series
-    # interleaved would be one series with two of every candle.
-    benchmark_series: dict[str, list[CompletedCandle]] = {key: [] for key in benchmark_keys}
-    for row in rows:
-        candle = _completed(row)
-        if row.instrument_token in benchmark_series and row.instrument_token not in by_instrument:
-            benchmark_series[row.instrument_token].append(candle)
-        elif row.instrument_token in by_instrument:
-            by_instrument[row.instrument_token].append(candle)
-    benchmark = max(benchmark_series.values(), key=len, default=[])
-    if not benchmark:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Benchmark candles are unavailable for this range"
-        )
-    if not any(by_instrument.values()):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="No requested historical candles are available"
-        )
-    return by_instrument, benchmark
+    app_settings,  # noqa: ANN001 - Settings
+    job_type: str,
+    payload: dict,
+    user: User,
+    *,
+    wait_seconds: float,
+) -> ResearchJob:
+    """Queue the job for the research worker and wait for it, within reason.
 
-
-async def sector_lookup(session: DbSession, tokens: list[str]) -> Callable[[str], str]:
-    """Each token's sector group, resolved once, for the replay's per-sector ceiling.
-
-    Names, not tokens, because ``sectors`` is keyed by trading symbol, as the
-    scanner reads it. A lookup that fails leaves every share in a group of its
-    own -- the scanner's own fallback: the ceiling stops protecting and never
-    starts refusing.
+    Committed before waiting, so the job exists even if this request is
+    abandoned. Inside market hours the worker will not start it, so the route
+    says so at once instead of holding the request open until 3:40 PM.
     """
-    try:
-        names = await resolve_script_names(session, tokens)
-    except Exception:  # noqa: BLE001 - a name lookup must not stop a backtest
-        names = {}
-    groups = {token: sector_of(names.get(token, token)) for token in tokens}
-    return lambda token: groups.get(token, sector_of(token))
+    job = await research_jobs.enqueue(session, job_type, payload, user_id=user.id)
+    await session.commit()
+    gate = research_jobs.research_allowed(datetime.now(UTC), TradingCalendar.from_settings(app_settings))
+    if not gate.open:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{gate.reason} Queued as research job {job.id}; the result appears in the list once it has run.",
+        )
+    finished = await research_jobs.wait_for(job.id, timeout_seconds=wait_seconds)
+    if finished is None or finished.status not in research_jobs.FINISHED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Still running as research job {job.id}; the result appears in the list when it finishes.",
+        )
+    if finished.status != research_jobs.SUCCEEDED:
+        code = (
+            status.HTTP_409_CONFLICT
+            if finished.status == research_jobs.CANCELLED
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        raise HTTPException(
+            status_code=code, detail=finished.failure_detail or f"Research job {finished.status.lower()}"
+        )
+    return finished
 
 
 @router.get("", response_model=list[BacktestRunResponse])
@@ -298,98 +258,17 @@ async def execute_backtest(
             StrategyRegistry.definition(item.strategy_type)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    # The stored indicator periods, not the environment's. A backtest measured
-    # with a different ruler than the live scanner produces numbers nobody can
-    # act on, and the difference would be invisible in the result.
-    measured_with = await effective_settings(session, app_settings)
-    by_instrument, benchmark = await _load_history(
-        session,
-        measured_with,
-        request.instrument_tokens,
-        request.timeframe_seconds,
-        request.start_date,
-        request.end_date,
+    # Run by the research worker, not here. The request carries everything
+    # the run needs, frozen now: a settings change made while it waits does not
+    # change what it measures. The indicator periods are read by the worker at
+    # run time through the scanner's own call.
+    payload = research_runs.backtest_payload(request.model_dump(mode="json"), selected, controls, execution_controls)
+    finished = await _run_as_job(
+        session, app_settings, research_runs.BACKTEST, payload, user, wait_seconds=BACKTEST_WAIT_SECONDS
     )
-    # Off the event loop. The replay is a tight CPU-bound pass over every
-    # candle and it used to run inline, so the whole API stopped answering
-    # while it worked: on 9 October a ten-instrument run starved the loop long
-    # enough that the container's own health check -- a three-second urlopen of
-    # /health/ready -- timed out five times in a row and Docker marked the API
-    # unhealthy. The run itself was fine. Everything else was not, including
-    # the exit sweep that squares positions off at the cutoff.
-    #
-    # One live account, not one replay per strategy and share: every signal is
-    # replayed, then the account's daily ceilings, risk budget, open positions,
-    # exposure and loss stop decide which ones it would have taken. The summary
-    # says how many candidates were refused and why.
-    sector_of_token = await sector_lookup(session, list(by_instrument))
-    result, _ = await asyncio.to_thread(
-        run_portfolio_backtest,
-        by_instrument,
-        benchmark,
-        selected,
-        controls,
-        execution_controls,
-        measured_with,
-        sector_of_token=sector_of_token,
-    )
-    run = BacktestRun(
-        created_by_user_id=user.id,
-        status="COMPLETED",
-        start_date=request.start_date,
-        end_date=request.end_date,
-        timeframe_seconds=request.timeframe_seconds,
-        instrument_tokens=request.instrument_tokens,
-        strategy_snapshot=[item.model_dump(mode="json") for item in selected],
-        controls_snapshot=controls,
-        execution_snapshot=execution_controls.model_dump(mode="json"),
-        data_fingerprint=result.data_fingerprint,
-        source_candle_count=result.source_candle_count,
-        initial_capital=Decimal(str(result.summary["initial_capital"])),
-        final_equity=Decimal(str(result.summary["final_equity"])),
-        net_pnl=Decimal(str(result.summary["net_pnl"])),
-        max_drawdown=Decimal(str(result.summary["max_drawdown"])),
-        result_summary=result.summary,
-    )
-    session.add(run)
-    await session.flush()
-    for trade in result.trades:
-        session.add(
-            BacktestTrade(
-                run_id=run.id,
-                trade_key=trade.trade_key,
-                strategy_id=trade.strategy_id,
-                strategy_name=trade.strategy_name,
-                strategy_version=trade.strategy_version,
-                instrument_token=trade.instrument_token,
-                session_date=date.fromisoformat(trade.session_date),
-                side=trade.side,
-                quantity=trade.quantity,
-                signal_at=trade.signal_at,
-                entered_at=trade.entered_at,
-                exited_at=trade.exited_at,
-                entry_price=trade.entry_price,
-                exit_price=trade.exit_price,
-                gross_pnl=trade.gross_pnl,
-                fees_total=trade.fees_total,
-                net_pnl=trade.net_pnl,
-                realized_r=trade.realized_r,
-                exit_reason=trade.exit_reason,
-            )
-        )
-    session.add(
-        AuditLog(
-            user_id=user.id,
-            event_type="backtest.completed",
-            metadata_json={
-                "run_id": str(run.id),
-                "trades": len(result.trades),
-                "data_fingerprint": result.data_fingerprint,
-            },
-        )
-    )
-    await session.commit()
-    await session.refresh(run)
+    run = await session.get(BacktestRun, UUID(finished.result["backtest_run_id"]))
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="The finished backtest run was not found")
     trades = list(
         (
             await session.scalars(
@@ -526,64 +405,20 @@ async def create_sweep(
     execution_controls = PaperExecutionControls.model_validate(
         execution_setting.value if execution_setting else DEFAULT_PAPER_EXECUTION_CONTROLS
     )
-    # The stored indicator periods, as the single backtest and the scanner use.
-    # This passed the environment's, so a sweep after any change on the
-    # Settings screen measured with a different ruler than the one that trades.
-    measured_with = await effective_settings(session, app_settings)
-    by_instrument, benchmark = await _load_history(
-        session,
-        measured_with,
-        request.instrument_tokens,
-        request.timeframe_seconds,
-        request.start_date,
-        request.end_date,
+    # Run by the research worker; see execute_backtest.
+    payload = research_runs.sweep_payload(
+        request.model_dump(mode="json"),
+        base_strategy,
+        controls,
+        execution_controls,
+        app_settings.backtest_sweep_max_combinations,
     )
-    sector_of_token = await sector_lookup(session, list(by_instrument))
-    try:
-        # Same reason as the single replay above, and more so: a sweep runs
-        # one replay per parameter combination.
-        sweep_result = await asyncio.to_thread(
-            run_parameter_sweep,
-            base_strategy,
-            controls,
-            execution_controls,
-            measured_with,
-            by_instrument,
-            benchmark,
-            request.parameter_grid,
-            validation_fraction=request.validation_fraction,
-            maximum_combinations=app_settings.backtest_sweep_max_combinations,
-            sector_of_token=sector_of_token,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-
-    combinations = [item.as_dict() for item in sweep_result.combinations]
-    sweep = BacktestSweep(
-        created_by_user_id=user.id,
-        status="COMPLETED",
-        strategy_id=base_strategy.id,
-        strategy_snapshot=base_strategy.model_dump(mode="json"),
-        start_date=request.start_date,
-        end_date=request.end_date,
-        timeframe_seconds=request.timeframe_seconds,
-        validation_fraction=Decimal(str(request.validation_fraction)),
-        instrument_tokens=request.instrument_tokens,
-        parameter_grid=request.parameter_grid,
-        combination_count=len(combinations),
-        combinations=combinations,
-        best_index=sweep_result.best_index,
+    finished = await _run_as_job(
+        session, app_settings, research_runs.SWEEP, payload, user, wait_seconds=SWEEP_WAIT_SECONDS
     )
-    session.add(sweep)
-    session.add(
-        AuditLog(
-            user_id=user.id,
-            event_type="backtest.sweep_completed",
-            metadata_json={"strategy_id": base_strategy.id, "combinations": len(combinations)},
-        )
-    )
-    await session.commit()
-    await session.refresh(sweep)
+    sweep = await session.get(BacktestSweep, UUID(finished.result["sweep_id"]))
+    if sweep is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="The finished sweep was not found")
     return _sweep_response(sweep)
 
 

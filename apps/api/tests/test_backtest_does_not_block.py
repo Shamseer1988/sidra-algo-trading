@@ -74,14 +74,18 @@ async def test_running_the_replay_in_a_thread_keeps_the_api_answering() -> None:
     assert beats > expected / 2, f"only {beats} turns in {WORK_SECONDS}s; the loop was still blocked"
 
 
-async def test_the_route_sends_both_replays_to_a_thread() -> None:
-    """Names, so a future edit that drops the await is caught by something
-    other than a production incident."""
+async def test_the_route_runs_no_replay_at_all() -> None:
+    """Research Lab Phase 3 moved the replay out of the API process entirely.
+
+    A thread kept the event loop answering but still held the GIL, so the
+    scheduler jobs in the same process -- the live exit sweep among them --
+    ran slower while a sweep worked. The routes now enqueue a research job and
+    the research-worker container runs it. Pinned by name so a future edit
+    that brings the replay back into the API is caught here.
+    """
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[1] / "app/api/routes/backtesting.py").read_text()
-    # run_portfolio_backtest wraps run_completed_candle_backtest since Phase 2.
-    for call in ("run_portfolio_backtest", "run_parameter_sweep"):
-        assert (
-            f"asyncio.to_thread(\n        {call}," in source or f"asyncio.to_thread(\n            {call}," in source
-        ), f"{call} is no longer dispatched to a thread"
+    for call in ("run_portfolio_backtest(", "run_parameter_sweep(", "run_completed_candle_backtest(", "to_thread("):
+        assert call not in source, f"{call} is back in the API process"
+    assert "research_jobs.enqueue(" in source

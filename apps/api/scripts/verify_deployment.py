@@ -10,7 +10,7 @@ or through ``scripts/verify-deployment.sh``, which does the same.
 
 What it compares, per service:
 
-* api, scanner-worker, swing-worker: the source fingerprint of the ``app``
+* api, scanner-worker, swing-worker, research-worker: the source fingerprint of the ``app``
   package inside the running container against the same fingerprint of the
   checkout on disk, and the build commit baked into the image against
   ``git rev-parse HEAD``.
@@ -51,7 +51,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional  # noqa: UP035 - the NAS host runs Python 3.8
 
-PYTHON_SERVICES = ("api", "scanner-worker", "swing-worker")
+PYTHON_SERVICES = ("api", "scanner-worker", "swing-worker", "research-worker")
 WEB_SERVICE = "web"
 APPLICATION_SERVICES = (*PYTHON_SERVICES, WEB_SERVICE)
 

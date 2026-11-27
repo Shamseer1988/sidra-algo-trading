@@ -25,6 +25,7 @@ from app.api.routes import (
     market_data,
     oms,
     paper,
+    research,
     risk,
     safety,
     scanner,
@@ -177,3 +178,4 @@ app.include_router(users.router, prefix="/api/v1")
 app.include_router(strategy_builder.router, prefix="/api/v1")
 app.include_router(watchlist.router, prefix="/api/v1")
 app.include_router(swing_settings.router, prefix="/api/v1")
+app.include_router(research.router, prefix="/api/v1")

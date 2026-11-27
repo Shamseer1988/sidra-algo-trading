@@ -50,12 +50,7 @@ def _python(commit: str = COMMIT, source: str = SOURCE, **extra) -> dict:
 
 
 def _all_good() -> dict[str, dict | None]:
-    return {
-        "api": _python(),
-        "scanner-worker": _python(),
-        "swing-worker": _python(),
-        "web": {"commit": COMMIT},
-    }
+    return {**{name: _python() for name in verify.PYTHON_SERVICES}, "web": {"commit": COMMIT}}
 
 
 def _states(verdict) -> dict[str, str]:
@@ -106,7 +101,7 @@ def test_build_info_reports_two_fields_and_no_environment(monkeypatch):
 def test_a_consistent_deployment_passes():
     verdict = verify.evaluate(COMMIT, SOURCE, _runner(_all_good()), build_info)
     assert verdict.state == verify.OK
-    assert set(_states(verdict)) == {"api", "scanner-worker", "swing-worker", "web"}
+    assert set(_states(verdict)) == {"api", "scanner-worker", "swing-worker", "research-worker", "web"}
 
 
 def test_a_stale_swing_worker_fails():
@@ -116,6 +111,13 @@ def test_a_stale_swing_worker_fails():
     assert verdict.state == verify.FAIL
     assert _states(verdict)["swing-worker"] == verify.FAIL
     assert _states(verdict)["api"] == verify.OK
+
+
+def test_a_missing_research_worker_fails():
+    answers = _all_good()
+    answers["research-worker"] = None
+    verdict = verify.evaluate(COMMIT, SOURCE, _runner(answers), build_info)
+    assert verdict.state == verify.FAIL and _states(verdict)["research-worker"] == verify.FAIL
 
 
 def test_a_missing_swing_worker_fails():

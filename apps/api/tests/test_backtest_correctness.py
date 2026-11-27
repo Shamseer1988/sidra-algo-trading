@@ -13,11 +13,9 @@ Each claim was a gap the 27 November audit found:
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import delete
 
 from app.services import backtest_sweep
 from app.services.backtest_sweep import bootstrap_interval, run_parameter_sweep, walk_forward
@@ -293,14 +291,17 @@ def test_metrics_carry_the_interval_and_double_costs():
 # --- the API sweep measures with the stored indicator periods ---------------------------------
 
 
-async def test_the_api_sweep_uses_the_stored_indicator_periods(monkeypatch):
-    from app.api.routes import backtesting as routes
-    from app.db.models import ApplicationSetting, AuditLog, BacktestSweep, User, UserRole
-    from app.db.session import SessionLocal
-    from app.services import user_admin
-    from app.services.strategy_registry import STRATEGIES_KEY
+async def test_the_sweep_job_uses_the_stored_indicator_periods(monkeypatch):
+    """The sweep runs in the research worker (Phase 3) and measures with the scanner's ruler.
 
-    stored_periods = SimpleNamespace(marker="stored", nifty_benchmark_token="x", upstox_nifty_benchmark_key="y")
+    It used to pass the environment's settings, so a sweep after any change on
+    the Settings screen measured with different indicator periods than the
+    scanner trades with.
+    """
+    from app.db.session import SessionLocal
+    from app.services import research_runs
+
+    stored_periods = SimpleNamespace(marker="stored")
     seen: dict = {}
 
     async def effective(_session, _settings):
@@ -318,46 +319,29 @@ async def test_the_api_sweep_uses_the_stored_indicator_periods(monkeypatch):
         seen["sector_of_token"] = kwargs.get("sector_of_token")
         return backtest_sweep.SweepResult(combinations=(), best_index=None)
 
-    monkeypatch.setattr(routes, "effective_settings", effective)
-    monkeypatch.setattr(routes, "_load_history", history)
-    monkeypatch.setattr(routes, "sector_lookup", sectors)
-    monkeypatch.setattr(routes, "run_parameter_sweep", sweep)
+    monkeypatch.setattr(research_runs, "effective_settings", effective)
+    monkeypatch.setattr(research_runs, "load_history", history)
+    monkeypatch.setattr(research_runs, "sector_lookup", sectors)
+    monkeypatch.setattr(research_runs, "run_parameter_sweep", sweep)
 
-    strategy = StrategyConfiguration(id=f"t-{uuid4().hex[:8]}", name="Sweep target", strategy_type="rs-pullback-v1")
+    strategy = StrategyConfiguration(id="t-sweep", name="Sweep target", strategy_type="rs-pullback-v1")
+    payload = research_runs.sweep_payload(
+        {
+            "strategy_id": strategy.id,
+            "start_date": "2026-11-02",
+            "end_date": "2026-11-05",
+            "instrument_tokens": ["NSE:A"],
+            "parameter_grid": {"minimum_score": [60, 70]},
+        },
+        strategy,
+        {"account_capital": 50000},
+        PaperExecutionControls(),
+        40,
+    )
     async with SessionLocal() as session:
-        row = await session.get(ApplicationSetting, STRATEGIES_KEY)
-        saved = row.value if row is not None else None
-        if row is None:
-            session.add(ApplicationSetting(key=STRATEGIES_KEY, value=[strategy.model_dump()]))
-        else:
-            row.value = [strategy.model_dump()]
-        user = await user_admin.create_user(
-            session, f"sweep-{uuid4().hex[:8]}@test.invalid", "correct horse b", UserRole.ADMIN
-        )
-        await session.commit()
-        await session.refresh(user)
-    try:
-        request = routes.SweepRequest(
-            strategy_id=strategy.id,
-            start_date=date(2026, 11, 2),
-            end_date=date(2026, 11, 5),
-            instrument_tokens=["NSE:A"],
-            parameter_grid={"minimum_score": [60, 70]},
-        )
-        async with SessionLocal() as session:
-            await routes.create_sweep(request, SimpleNamespace(backtest_sweep_max_combinations=40), session, user)
-        assert seen["history"] is stored_periods
-        assert seen["sweep"] is stored_periods
-        assert seen["sector_of_token"] is not None
-    finally:
-        async with SessionLocal() as session:
-            await session.execute(delete(BacktestSweep).where(BacktestSweep.created_by_user_id == user.id))
-            await session.execute(delete(AuditLog).where(AuditLog.user_id == user.id))
-            row = await session.get(ApplicationSetting, STRATEGIES_KEY)
-            if saved is None:
-                await session.delete(row)
-            else:
-                row.value = saved
-            await session.flush()
-            await session.execute(delete(User).where(User.id == user.id))
-            await session.commit()
+        result = await research_runs.run_sweep_job(session, payload, SimpleNamespace(), None)
+        await session.rollback()  # nothing to keep
+    assert seen["history"] is stored_periods
+    assert seen["sweep"] is stored_periods
+    assert seen["sector_of_token"] is not None
+    assert result["combinations"] == 0
