@@ -137,6 +137,12 @@ class PaperRiskEngine:
             # back its gains.
             # The paper day's P&L, from the paper ledger. Live reads the broker
             # instead; the two sources never meet, which is the point.
+            # Only this candidate's book: a paper-only strategy is measured as if
+            # it traded the account alone (``same_book``), so its day is not
+            # ended by the other strategies' paper losses, nor theirs by its.
+            # On 27 November the RS Pullback paper copies lost about 750 by
+            # 10:18 AM; on the shared ledger that would have refused and then
+            # flattened a paper-only strategy that had not lost a rupee.
             session_pnl = sum(
                 (
                     _decimal(item.total_pnl)
@@ -145,16 +151,26 @@ class PaperRiskEngine:
                             select(PaperPosition).where(PaperPosition.session_date == signal.session_date)
                         )
                     ).all()
+                    if same_book(candidate_type, strategy_type_of(item.strategy_version), paper_only_types)
                 ),
                 start=Decimal("0"),
             )
-            verdict = await daily_limits.verdict_for(
-                session,
-                signal.session_date,
-                daily_limits.PAPER,
-                session_pnl=session_pnl,
-                controls=controls,
-            )
+            own_book = candidate_type in paper_only_types
+            if own_book:
+                # No latch: session_halts holds one PAPER row a day, and that row
+                # belongs to the shared book. A fresh look at this book's own
+                # money is enough to refuse a new entry once it is down the limit.
+                verdict = daily_limits.DailyVerdict(
+                    session_pnl=session_pnl, reason=daily_limits.evaluate(session_pnl, controls)
+                )
+            else:
+                verdict = await daily_limits.verdict_for(
+                    session,
+                    signal.session_date,
+                    daily_limits.PAPER,
+                    session_pnl=session_pnl,
+                    controls=controls,
+                )
 
             reason = "Paper risk reserved"
             if verdict.halted:
@@ -162,7 +178,8 @@ class PaperRiskEngine:
                 # Written here as well as in paper execution because a limit can
                 # first be crossed by a signal arriving rather than by a price
                 # moving, and whichever notices first owns recording it.
-                await daily_limits.record_halt(session, signal.session_date, daily_limits.PAPER, verdict)
+                if not own_book:
+                    await daily_limits.record_halt(session, signal.session_date, daily_limits.PAPER, verdict)
             elif (banded := outside_price_band(signal.entry_price, controls)) is not None:
                 # Before the allocation checks: this is a fact about the share,
                 # not about the day, and "we are not trading this stock" is a

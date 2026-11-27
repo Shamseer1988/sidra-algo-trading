@@ -64,6 +64,9 @@ DEFAULT_REQUIRED_INPUTS = {
     # checks itself and refuses without. ATR is what the stop floor is sized
     # against, and fourteen 1-minute candles have long existed by 10:15 AM.
     "cpr-breakout-v1": [ATR],
+    # The entry side is checked against VWAP, and ATR sizes the stop floor.
+    # The session volume, daily ATR and yesterday's close it checks itself.
+    "sip-momentum-v1": [ATR, VWAP],
 }
 
 

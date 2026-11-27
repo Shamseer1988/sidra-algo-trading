@@ -307,3 +307,82 @@ async def test_a_day_that_never_reaches_a_limit_records_no_halt() -> None:
             )
             is None
         )
+
+
+# --- a paper-only strategy keeps its own day ----------------------------------
+#
+# On 27 November the RS Pullback paper copies lost about 750 by 10:18 AM. On one
+# shared paper ledger that ends the paper day, refuses a paper-only strategy's
+# 10:10 AM signal and flattens its positions, though it had lost nothing. A
+# paper-only strategy is measured as if it traded the account alone.
+
+SIP = "sip-momentum-v1"
+
+
+@pytest.fixture
+def sip_paper_only(monkeypatch):  # noqa: ANN001, ANN201
+    from app.services.strategy_registry import StrategyRegistry
+
+    async def _paper_only(_session):  # noqa: ANN001, ANN202
+        return (SIP,)
+
+    monkeypatch.setattr(StrategyRegistry, "paper_only_types", _paper_only)
+
+
+async def retag(version: str) -> None:
+    """Move every position and signal booked so far onto ``version``."""
+    async with SessionLocal() as session:
+        for row in (await session.scalars(select(PaperPosition).where(PaperPosition.instrument_token == TOKEN))).all():
+            row.strategy_version = version
+        for row in (await session.scalars(select(PaperSignal).where(PaperSignal.instrument_token == TOKEN))).all():
+            row.strategy_version = version
+        await session.commit()
+
+
+async def decide_as(version: str) -> str:
+    signal = await make_signal()
+    async with SessionLocal() as session:
+        stored = await session.get(PaperSignal, signal.id)
+        stored.strategy_version = version
+        await session.commit()
+        await session.refresh(stored)
+    return (await PaperRiskEngine().reserve_signal(stored)).reason
+
+
+async def test_the_shared_books_loss_does_not_stop_a_paper_only_strategy(sip_paper_only) -> None:  # noqa: ANN001
+    await controls(daily_loss_limit=1000.0, maximum_daily_risk_percent=10.0)
+    await book(realized="-1200")
+    assert await decide() == "Daily loss limit reached"
+    assert await decide_as(f"{SIP}@1") == "Paper risk reserved"
+
+
+async def test_a_paper_only_strategys_loss_stops_only_itself(sip_paper_only) -> None:  # noqa: ANN001
+    await controls(daily_loss_limit=1000.0, maximum_daily_risk_percent=10.0)
+    await book(realized="-1200")
+    await retag(f"{SIP}@1")
+    assert await decide_as(f"{SIP}@1") == "Daily loss limit reached"
+    # The shared book has lost nothing and is not halted by it.
+    assert await decide() == "Paper risk reserved"
+    async with SessionLocal() as session:
+        assert await session.scalar(select(SessionHalt).where(SessionHalt.session_date == SESSION)) is None
+
+
+async def test_the_shared_halt_does_not_flatten_a_paper_only_position(sip_paper_only) -> None:  # noqa: ANN001
+    from app.db.models import PaperOrder
+    from app.services.paper_execution import PaperOrderManager
+
+    await controls(daily_loss_limit=1000.0, maximum_daily_risk_percent=10.0)
+    await book(realized="0", status="OPEN")
+    await retag(f"{SIP}@1")
+    await book(realized="-1200")
+    async with SessionLocal() as session:
+        await PaperOrderManager()._halt_if_the_day_is_over(session, SESSION)
+        await session.commit()
+        halts = (await session.scalars(select(PaperOrder).where(PaperOrder.instrument_token == TOKEN))).all()
+        await session.execute(delete(PaperOrder).where(PaperOrder.instrument_token == TOKEN))
+        await session.commit()
+    # The shared day halted (its -1,200 passed the limit) but the paper-only
+    # position, still open, was left to its own stop.
+    assert [order.order_role for order in halts] == []
+    async with SessionLocal() as session:
+        assert await session.scalar(select(SessionHalt).where(SessionHalt.session_date == SESSION)) is not None

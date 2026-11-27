@@ -733,3 +733,131 @@ def _score_cpr_breakout(side: Side, levels: dict, benchmark: dict) -> dict[str, 
         "first_hour_breakout": 20,
         "market_confirmation": 20 if _regime_name(benchmark) == wanted else 0,
     }
+
+
+# --- Stocks-in-Play momentum ---------------------------------------------------
+#
+# One look per share per day, at 10:10 AM. A share that has already traded far
+# more than usual this morning, has moved at least 1% from yesterday's close,
+# and sits on that side of VWAP, is entered in the direction of the move and
+# held to the square-off, with a stop half a daily ATR away and no target.
+#
+# From the 27 November 2026 research replay (59 shares, 148 sessions,
+# charges included): positive in both the first 60% of sessions and the last
+# 40%, and across most settings at 10:05, 10:10 and 10:15 AM, but not at
+# 10:00 or after 10:20, with two losing months of eight and no t-statistic
+# above 2. That is a reason to paper trade it, not to trust it.
+
+SIP_MOMENTUM_VERSION = "sip-momentum-v1"
+SIP_DONE = "SIP_DONE"
+SIP_STATES = {AWAITING, SIP_DONE}
+# The decision candle is the one that spans this minute: for 1-minute candles,
+# 10:09-10:10, so the trade is entered at about 10:10.
+SIP_DECISION_TIME = "10:10"
+DEFAULT_SIP_MIN_SESSION_RVOL = Decimal("2.5")
+DEFAULT_SIP_MIN_MOVE_PERCENT = Decimal("1.0")
+DEFAULT_SIP_STOP_DAILY_ATR = Decimal("0.5")
+
+
+def _hhmm(moment) -> str:
+    return moment.astimezone(MARKET_TIMEZONE).strftime("%H:%M")
+
+
+def _control(controls: dict, key: str, default: Decimal) -> Decimal:
+    raw = controls.get(key)
+    return Decimal(str(raw)) if raw is not None else default
+
+
+def sip_rank(session_rvol: Decimal, move_percent: Decimal) -> Decimal:
+    """How strongly a share is in play: unusual volume times the size of its move.
+
+    The research ranked candidates by this; the signal records it so the paper
+    record can later be cut to the top one or top three of each day.
+    """
+    return (session_rvol * abs(move_percent)).quantize(Decimal("0.01"))
+
+
+def evaluate_sip_momentum(
+    candle: CompletedCandle,
+    indicators: dict,
+    benchmark: dict,
+    controls: dict,
+    prior_state: str = AWAITING,
+) -> StrategyDecision:
+    """Decide once, on the candle spanning 10:10 AM, and never again that day."""
+    if prior_state == SIGNALLED:
+        return StrategyDecision(next_state=SIGNALLED, reason="Instrument already signalled this session")
+    if prior_state not in SIP_STATES:
+        return StrategyDecision(next_state=AWAITING, reason="Unknown strategy state was reset")
+    if prior_state == SIP_DONE:
+        return StrategyDecision(next_state=SIP_DONE, reason="Today's 10:10 AM decision has been made")
+    opened, closed = _hhmm(candle.opened_at), _hhmm(candle.closed_at)
+    if closed < SIP_DECISION_TIME:
+        return StrategyDecision(next_state=AWAITING, reason="Waiting for the 10:10 AM decision")
+    if opened >= SIP_DECISION_TIME:
+        return StrategyDecision(next_state=SIP_DONE, reason="No candle spanned 10:10 AM; no trade today")
+
+    rvol = _number(indicators, "session_rvol")
+    daily_atr = _number(indicators, "daily_atr")
+    vwap = _number(indicators, "vwap")
+    cpr = indicators.get("cpr") if isinstance(indicators.get("cpr"), dict) else {}
+    prior_close = _level(cpr.get("prior_day"), "close")
+    missing = [
+        name
+        for name, value in (
+            ("session volume baseline", rvol),
+            ("daily ATR", daily_atr),
+            ("VWAP", vwap),
+            ("yesterday's close", prior_close),
+        )
+        if value is None or value <= 0
+    ]
+    if missing:
+        return StrategyDecision(next_state=SIP_DONE, reason=f"Not available at 10:10 AM: {', '.join(missing)}")
+
+    min_rvol = _control(controls, "sip_min_session_rvol", DEFAULT_SIP_MIN_SESSION_RVOL)
+    min_move = _control(controls, "sip_min_move_percent", DEFAULT_SIP_MIN_MOVE_PERCENT)
+    move = (candle.close - prior_close) / prior_close * Decimal("100")
+    facts = f"volume {rvol:.2f}x usual, move {move:+.2f}% from yesterday's close"
+    if rvol < min_rvol:
+        return StrategyDecision(next_state=SIP_DONE, reason=f"Not in play: {facts}; needs {min_rvol}x")
+    if abs(move) < min_move:
+        return StrategyDecision(next_state=SIP_DONE, reason=f"Move too small: {facts}; needs {min_move}%")
+    side: Side = "LONG" if move > 0 else "SHORT"
+    if (side == "LONG" and candle.close <= vwap) or (side == "SHORT" and candle.close >= vwap):
+        return StrategyDecision(next_state=SIP_DONE, reason=f"Price is on the wrong side of VWAP: {facts}")
+
+    refusal = _required_refusal(indicators, benchmark, controls)
+    if refusal is not None:
+        return StrategyDecision(next_state=SIP_DONE, reason=refusal.reason)
+
+    rank = sip_rank(rvol, move)
+    breakdown = {
+        "session_volume": _round_points(_clamp(rvol, Decimal("0"), Decimal("10")) * Decimal("5"), Decimal("50")),
+        "move_from_close": _round_points(_clamp(abs(move), Decimal("0"), Decimal("5")) * Decimal("10"), Decimal("50")),
+    }
+    score = sum(breakdown.values())
+    if score < int(controls["minimum_score"]):
+        return StrategyDecision(
+            next_state=SIP_DONE, score=score, score_breakdown=breakdown, reason=f"Below score threshold: {facts}"
+        )
+    offset = daily_atr * _control(controls, "sip_stop_daily_atr", DEFAULT_SIP_STOP_DAILY_ATR)
+    structural_stop = candle.close - offset if side == "LONG" else candle.close + offset
+    plan = plan_trade(side, candle.close, structural_stop, indicators, controls)
+    if plan is None:
+        return StrategyDecision(
+            next_state=SIP_DONE, score=score, score_breakdown=breakdown, reason="Risk plan is invalid"
+        )
+    stop, target, quantity, risk_amount = plan
+    return StrategyDecision(
+        next_state=SIGNALLED,
+        side=side,
+        entry_price=candle.close,
+        stop_price=stop,
+        target_price=target,
+        quantity=quantity,
+        risk_amount=risk_amount,
+        score=score,
+        score_breakdown=breakdown,
+        reason=f"Paper signal confirmed: {facts}, rank {rank}",
+    )

@@ -153,6 +153,26 @@ PROFILES: dict[str, StrategyProfile] = {
             "short side mirrors the notes' buy rules; the notes themselves give only buy rules."
         ),
     ),
+    "sip-momentum-v1": StrategyProfile(
+        purpose=(
+            "Trades the few shares the market is clearly busy with today -- far more volume than usual and a "
+            "real move from yesterday's close -- in the direction they are already going. Paper only until it "
+            "has forward evidence."
+        ),
+        regime=(
+            "Needs news or flow concentrated in a handful of names. On a quiet day nothing qualifies and it "
+            "stands aside; in the research its losing months were June and September 2026."
+        ),
+        entry=(
+            "Once a day, at 10:10 AM: the morning's volume is at least 2.5 times the usual for those minutes, "
+            "price is at least 1% from yesterday's close, and it is above VWAP for a buy or below it for a sell. "
+            "Stop half a daily ATR from entry, no target, squared off at 3 PM."
+        ),
+        does_not=(
+            "It does not look again after 10:10 AM, and it does not fade a move. The rank in each signal's reason "
+            "(volume times move) is recorded so the paper record can be cut to each day's best one or three."
+        ),
+    ),
 }
 
 GENERIC_PROFILE = StrategyProfile(

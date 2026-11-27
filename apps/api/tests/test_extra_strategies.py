@@ -168,6 +168,7 @@ def test_registry_exposes_all_strategies_and_routes_by_type() -> None:
         "ema-momentum-v1",
         "rs-pullback-v1",
         "cpr-breakout-v1",
+        "sip-momentum-v1",
     }
 
     strategy = StrategyConfiguration(name="VWAP Pullback A", strategy_type="vwap-pullback-v1")

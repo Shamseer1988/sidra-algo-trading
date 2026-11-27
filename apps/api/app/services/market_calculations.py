@@ -191,6 +191,31 @@ def time_of_day_relative_volume(
     return round(active[-1].volume / average, 4)
 
 
+def session_relative_volume(
+    active: list[CompletedCandle],
+    baseline: dict[str, float] | None,
+) -> float | None:
+    """Volume traded so far this session over what the same minutes usually trade.
+
+    The per-bar ``time_of_day_rvol`` asks whether one candle was busy; this asks
+    whether the whole morning has been, which is how a "stock in play" is
+    recognised. Only minutes the baseline knows are counted, on both sides of
+    the ratio, so a minute missing from history neither inflates nor dilutes it.
+    """
+    if not active or not baseline:
+        return None
+    traded = 0
+    expected = 0.0
+    for candle in active:
+        average = baseline.get(candle.opened_at.astimezone(MARKET_TIMEZONE).strftime("%H:%M"))
+        if average and average > 0:
+            traded += candle.volume
+            expected += average
+    if expected <= 0:
+        return None
+    return round(traded / expected, 4)
+
+
 def opening_range(candles: list[CompletedCandle], minutes: int) -> dict[str, float | bool | None]:
     if not candles:
         return {"high": None, "low": None, "complete": False}
@@ -499,6 +524,9 @@ def indicator_snapshot(
         "distance_to_prior_high_atr": _distance_atr(prior["high"]),
         "distance_to_prior_low_atr": _distance_atr(prior["low"]),
         "time_of_day_rvol": time_of_day_relative_volume(active, time_of_day_volume_baseline),
+        # For the Stocks-in-Play momentum strategy: the session's volume so far
+        # against the same minutes of the baseline sessions.
+        "session_rvol": session_relative_volume(active, time_of_day_volume_baseline),
         # For the CPR breakout strategy: pivot levels from the two prior days,
         # and the 9:15-10:15 range, independent of opening_range_minutes.
         "cpr": cpr_levels(daily, active[-1].session_date) if active else None,
