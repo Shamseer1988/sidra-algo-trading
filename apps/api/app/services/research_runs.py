@@ -139,9 +139,12 @@ async def candles_for(
     if not dataset_id:
         by_instrument, benchmark = await load_history(session, settings, tokens, timeframe, start, end)
         return by_instrument, benchmark, {"source": "public.market_candles"}
-    from app.services.research_data import TIMEFRAMES, read_dataset
+    from app.services.research_data import TIMEFRAMES, DatasetTooLarge, read_dataset
 
-    dataset, by_instrument, benchmark = await read_dataset(session, UUID(str(dataset_id)), tokens, start, end)
+    try:
+        dataset, by_instrument, benchmark = await read_dataset(session, UUID(str(dataset_id)), tokens, start, end)
+    except DatasetTooLarge as exc:
+        raise ResearchInputError(str(exc)) from exc
     if TIMEFRAMES[dataset.timeframe][2] != timeframe:
         raise ResearchInputError(
             f"Dataset {dataset.name} holds {dataset.timeframe} bars; this run asked for {timeframe}-second candles"
