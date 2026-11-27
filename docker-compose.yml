@@ -125,7 +125,11 @@ services:
     restart: unless-stopped
     init: true
     stop_grace_period: 30s
-    command: ["python", "-m", "app.research_worker"]
+    # Lowest scheduling priority instead of a CPU quota: the Synology kernel has
+    # no CFS bandwidth control, so `cpus:` makes Docker refuse to create the
+    # container (found on the first deploy, 28 Nov 2026). nice 10 means the
+    # trading services always get the CPU first.
+    command: ["nice", "-n", "10", "python", "-m", "app.research_worker"]
     env_file: .env
     environment:
       UPSTOX_ACCESS_TOKEN: ""
@@ -153,7 +157,6 @@ services:
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     pids_limit: 128
-    cpus: 1.0
     # The NAS has 5.8 GB with about 1.6 GB free beside the trading services
     # (measured 27 Nov 2026), so 1 GB, not more. A sweep needs about 400 MB.
     mem_limit: 1g

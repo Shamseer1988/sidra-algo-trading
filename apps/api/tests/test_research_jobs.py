@@ -263,7 +263,11 @@ def test_compose_gives_the_worker_no_credentials_limits_and_no_ports():
     block = compose.split("  research-worker:\n", 1)[1].split("\n  web:\n", 1)[0]
     for name in research_worker.FORBIDDEN_ENVIRONMENT:
         assert f'      {name}: ""' in block, name
-    assert "cpus:" in block and "mem_limit:" in block
+    # No `cpus:` -- the NAS kernel cannot enforce it and Docker refuses the container.
+    assert "
+    cpus:" not in block and "
+    mem_limit:" in block
+    assert 'command: ["nice", "-n", "10", "python", "-m", "app.research_worker"]' in block
     # edge carries outbound HTTPS to the public history endpoint (Phase 4); no port is published.
     assert "networks: [internal, edge]" in block
     assert "ports:" not in block
