@@ -20,7 +20,9 @@ bare `docker` fails with `sh: docker: command not found`. It works when you ssh 
 and type it, because that shell is interactive and reads the profile. The same
 command through Claude is not.
 
-Services: `api`, `scanner-worker`, `postgres`, `redis`, `caddy`, `web`.
+Application services: `api`, `scanner-worker`, `swing-worker`, `web` -- one
+deployment, always rebuilt together. Infrastructure: `postgres`, `redis`,
+`caddy` (LAN TLS, from `docker-compose.lan-https.yml` via `COMPOSE_FILE`).
 The scanner is `scanner-worker`, not `worker`.
 
 ## What may be run, and when
@@ -67,8 +69,26 @@ run without a prompt. Anything else still asks.
 ```
 ssh nas "cd /volume1/docker/sidra-algo-trading && git pull origin <branch> && scripts/run-tests.sh"
 # only once the suite is green:
-ssh nas "cd /volume1/docker/sidra-algo-trading && docker compose up -d --build api scanner-worker"
+ssh nas 'cd /volume1/docker/sidra-algo-trading && SIDRA_BUILD_COMMIT=$(git rev-parse HEAD) /usr/local/bin/docker compose up -d --build api scanner-worker swing-worker web'
+# then prove every container runs that checkout (read-only, safe any time):
+ssh nas "cd /volume1/docker/sidra-algo-trading && scripts/verify-deployment.sh"
 ```
+
+**All four application services, every time.** The command used to rebuild
+only `api scanner-worker`; on 27 November 2026 the swing worker had been
+running code 45 hours older than the API, and nothing on any screen said so.
+`SIDRA_BUILD_COMMIT` stamps the commit into each image (never put it in
+`.env`, which would override it). `verify-deployment.sh` compares each
+container's source fingerprint and build commit with the checkout and exits 1
+on a mismatch or a missing service.
+
+Single quotes on that `ssh` line, so `$(git rev-parse HEAD)` runs on the NAS.
+
+Deploys are coordinated between sessions through `~/sidra-deploy/LOCK` and
+`~/sidra-deploy/log.txt` on the NAS (protocol in `~/sidra-deploy/README.txt`):
+deploy only from the shared line `claude/epic-knuth-g8brv1`, never between
+8:15 AM and 3:40 PM IST on a trading day, never while a job runs in `api`, and
+only with Shamseer's approval.
 
 **`docker compose exec` runs in the container that is already up, not in the
 image you just built.** `scripts/run-tests.sh` builds the image and tests it in
