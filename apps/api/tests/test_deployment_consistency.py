@@ -16,8 +16,14 @@ import pytest
 
 from app.services import build_info
 
-REPO = Path(__file__).resolve().parents[3]
-SCRIPT = REPO / "apps" / "api" / "scripts" / "verify_deployment.py"
+# The API folder is the root that exists everywhere: in a checkout it is
+# apps/api, and inside the test container scripts/run-tests.sh builds, it is
+# /app (only apps/api is copied in). The repository root, and with it
+# docker-compose.yml, exists only in a checkout.
+API_ROOT = Path(__file__).resolve().parents[1]
+REPO = API_ROOT.parents[1] if (API_ROOT.parents[1] / "docker-compose.yml").exists() else None
+NO_CHECKOUT = "needs the repository checkout (docker-compose.yml); the test container holds apps/api only"
+SCRIPT = API_ROOT / "scripts" / "verify_deployment.py"
 COMMIT = "a4548b0abddba8df5ef5bdd7ed8acebb3b7b8065"
 OTHER_COMMIT = "f657615" + "0" * 33
 SOURCE = "a" * 64
@@ -179,7 +185,7 @@ def test_the_docker_runner_never_returns_stderr(monkeypatch):
         return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=f"UPSTOX_PIN={SECRET}")
 
     monkeypatch.setattr(verify.subprocess, "run", fake_run)
-    assert verify.docker_runner("docker", REPO)("api", verify.PYTHON_PROBE) is None
+    assert verify.docker_runner("docker", API_ROOT)("api", verify.PYTHON_PROBE) is None
 
 
 def test_the_fallback_probe_computes_the_same_fingerprint(tmp_path):
@@ -218,6 +224,7 @@ def test_the_probe_commands_read_nothing_but_the_commit():
     assert "SIDRA_BUILD_COMMIT" in probe and "process.env)" not in probe and "printenv" not in probe
 
 
+@pytest.mark.skipif(REPO is None, reason=NO_CHECKOUT)
 @pytest.mark.parametrize("flag", [[], ["--json"]])
 def test_main_against_a_fake_docker_prints_no_secret(monkeypatch, capsys, flag):
     monkeypatch.setenv("UPSTOX_TOTP_SECRET", SECRET)
