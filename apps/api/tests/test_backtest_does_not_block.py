@@ -80,7 +80,8 @@ async def test_the_route_sends_both_replays_to_a_thread() -> None:
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[1] / "app/api/routes/backtesting.py").read_text()
-    for call in ("run_completed_candle_backtest", "run_parameter_sweep"):
+    # run_portfolio_backtest wraps run_completed_candle_backtest since Phase 2.
+    for call in ("run_portfolio_backtest", "run_parameter_sweep"):
         assert (
             f"asyncio.to_thread(\n        {call}," in source or f"asyncio.to_thread(\n            {call}," in source
         ), f"{call} is no longer dispatched to a thread"

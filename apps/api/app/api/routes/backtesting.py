@@ -1,6 +1,7 @@
 """Completed-candle-only historical research APIs; these routes cannot submit orders."""
 
 import asyncio
+from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -30,11 +31,13 @@ from app.db.models import (
 )
 from app.services import watchlist_store
 from app.services.backtest_sweep import STRATEGY_PARAMS, SWEEPABLE, run_parameter_sweep
-from app.services.backtesting import run_completed_candle_backtest
 from app.services.indicator_settings import effective as effective_settings
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_execution import DEFAULT_PAPER_EXECUTION_CONTROLS, PAPER_EXECUTION_KEY, PaperExecutionControls
+from app.services.portfolio_simulation import run_portfolio_backtest
+from app.services.sectors import sector_of
 from app.services.strategy_registry import DEFAULT_STRATEGIES, STRATEGIES_KEY, StrategyConfiguration, StrategyRegistry
+from app.services.trading_symbols import resolve_script_names
 
 router = APIRouter(prefix="/backtests", tags=["Backtesting"])
 
@@ -220,6 +223,22 @@ async def _load_history(
     return by_instrument, benchmark
 
 
+async def sector_lookup(session: DbSession, tokens: list[str]) -> Callable[[str], str]:
+    """Each token's sector group, resolved once, for the replay's per-sector ceiling.
+
+    Names, not tokens, because ``sectors`` is keyed by trading symbol, as the
+    scanner reads it. A lookup that fails leaves every share in a group of its
+    own -- the scanner's own fallback: the ceiling stops protecting and never
+    starts refusing.
+    """
+    try:
+        names = await resolve_script_names(session, tokens)
+    except Exception:  # noqa: BLE001 - a name lookup must not stop a backtest
+        names = {}
+    groups = {token: sector_of(names.get(token, token)) for token in tokens}
+    return lambda token: groups.get(token, sector_of(token))
+
+
 @router.get("", response_model=list[BacktestRunResponse])
 async def list_backtests(
     _: CurrentUser, session: DbSession, limit: int = Query(default=20, ge=1, le=100)
@@ -298,14 +317,21 @@ async def execute_backtest(
     # /health/ready -- timed out five times in a row and Docker marked the API
     # unhealthy. The run itself was fine. Everything else was not, including
     # the exit sweep that squares positions off at the cutoff.
-    result = await asyncio.to_thread(
-        run_completed_candle_backtest,
+    #
+    # One live account, not one replay per strategy and share: every signal is
+    # replayed, then the account's daily ceilings, risk budget, open positions,
+    # exposure and loss stop decide which ones it would have taken. The summary
+    # says how many candidates were refused and why.
+    sector_of_token = await sector_lookup(session, list(by_instrument))
+    result, _ = await asyncio.to_thread(
+        run_portfolio_backtest,
         by_instrument,
         benchmark,
         selected,
         controls,
         execution_controls,
         measured_with,
+        sector_of_token=sector_of_token,
     )
     run = BacktestRun(
         created_by_user_id=user.id,
@@ -500,14 +526,19 @@ async def create_sweep(
     execution_controls = PaperExecutionControls.model_validate(
         execution_setting.value if execution_setting else DEFAULT_PAPER_EXECUTION_CONTROLS
     )
+    # The stored indicator periods, as the single backtest and the scanner use.
+    # This passed the environment's, so a sweep after any change on the
+    # Settings screen measured with a different ruler than the one that trades.
+    measured_with = await effective_settings(session, app_settings)
     by_instrument, benchmark = await _load_history(
         session,
-        app_settings,
+        measured_with,
         request.instrument_tokens,
         request.timeframe_seconds,
         request.start_date,
         request.end_date,
     )
+    sector_of_token = await sector_lookup(session, list(by_instrument))
     try:
         # Same reason as the single replay above, and more so: a sweep runs
         # one replay per parameter combination.
@@ -516,12 +547,13 @@ async def create_sweep(
             base_strategy,
             controls,
             execution_controls,
-            app_settings,
+            measured_with,
             by_instrument,
             benchmark,
             request.parameter_grid,
             validation_fraction=request.validation_fraction,
             maximum_combinations=app_settings.backtest_sweep_max_combinations,
+            sector_of_token=sector_of_token,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
