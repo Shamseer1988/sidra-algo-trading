@@ -16,7 +16,7 @@ the same call the scanner uses, so the replay measures with the scanner's ruler.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -37,7 +37,8 @@ from app.services.trading_symbols import resolve_script_names
 
 BACKTEST = "backtest"
 SWEEP = "sweep"
-JOB_TYPES = (BACKTEST, SWEEP)
+BACKFILL = "backfill"
+JOB_TYPES = (BACKTEST, SWEEP, BACKFILL)
 
 
 class ResearchInputError(ValueError):
@@ -126,6 +127,71 @@ async def sector_lookup(session: AsyncSession, tokens: list[str]) -> Callable[[s
     return lambda token: groups.get(token, sector_of(token))
 
 
+async def candles_for(
+    session: AsyncSession, settings: Any, request: dict, tokens: list[str], timeframe: int, start: date, end: date
+) -> tuple[dict[str, list[CompletedCandle]], list[CompletedCandle], dict]:
+    """The candles a run measures: a research dataset when the request names one, else the live store.
+
+    Returns a provenance block for the result summary, so every run says which
+    data it ran on -- a dataset by id and content hash, or the live table.
+    """
+    dataset_id = request.get("dataset_id")
+    if not dataset_id:
+        by_instrument, benchmark = await load_history(session, settings, tokens, timeframe, start, end)
+        return by_instrument, benchmark, {"source": "public.market_candles"}
+    from app.services.research_data import TIMEFRAMES, read_dataset
+
+    dataset, by_instrument, benchmark = await read_dataset(session, UUID(str(dataset_id)), tokens, start, end)
+    if TIMEFRAMES[dataset.timeframe][2] != timeframe:
+        raise ResearchInputError(
+            f"Dataset {dataset.name} holds {dataset.timeframe} bars; this run asked for {timeframe}-second candles"
+        )
+    if dataset.status != "COMPLETE":
+        raise ResearchInputError(
+            f"Dataset {dataset.name} is {dataset.status}; only a finalised dataset can be measured"
+        )
+    if not benchmark:
+        raise ResearchInputError("Benchmark candles are unavailable in this dataset for this range")
+    if not any(by_instrument.values()):
+        raise ResearchInputError("No requested instrument has bars in this dataset for this range")
+    return (
+        by_instrument,
+        benchmark,
+        {
+            "sessions": sorted({candle.session_date for candle in benchmark}),
+            "source": "research.dataset",
+            "dataset_id": str(dataset.id),
+            "dataset_name": dataset.name,
+            "content_sha256": dataset.content_sha256,
+            "price_adjustment": dataset.price_adjustment,
+        },
+    )
+
+
+def _calendar_for(data_source: dict):  # noqa: ANN202 - a context manager
+    """A dataset replay needs the dataset's own sessions as its calendar; the live store does not."""
+    from contextlib import nullcontext
+
+    from app.services.research_data import replay_calendar
+
+    sessions = data_source.get("sessions")
+    return replay_calendar(sessions) if sessions else nullcontext()
+
+
+def _summary_of(data_source: dict) -> dict:
+    """The provenance block as stored: the session list is summarised, not kept."""
+    sessions = data_source.get("sessions")
+    if not sessions:
+        return data_source
+    rest = {key: value for key, value in data_source.items() if key != "sessions"}
+    return {
+        **rest,
+        "sessions": len(sessions),
+        "first_session": sessions[0].isoformat(),
+        "last_session": sessions[-1].isoformat(),
+    }
+
+
 # --- payloads: everything a job needs, frozen when it is asked for ----------------------
 
 
@@ -189,17 +255,21 @@ async def run_backtest_job(session: AsyncSession, payload: dict, settings: Any, 
     timeframe = int(request.get("timeframe_seconds", 60))
 
     measured_with = await effective_settings(session, settings)
-    by_instrument, benchmark = await load_history(session, measured_with, tokens, timeframe, start, end)
-    sector_of_token = await sector_lookup(session, list(by_instrument))
-    result, _ = run_portfolio_backtest(
-        by_instrument,
-        benchmark,
-        selected,
-        controls,
-        execution_controls,
-        measured_with,
-        sector_of_token=sector_of_token,
+    by_instrument, benchmark, data_source = await candles_for(
+        session, measured_with, request, tokens, timeframe, start, end
     )
+    sector_of_token = await sector_lookup(session, list(by_instrument))
+    with _calendar_for(data_source):
+        result, _ = run_portfolio_backtest(
+            by_instrument,
+            benchmark,
+            selected,
+            controls,
+            execution_controls,
+            measured_with,
+            sector_of_token=sector_of_token,
+        )
+    data_source = _summary_of(data_source)
     run = BacktestRun(
         created_by_user_id=user_id,
         status="COMPLETED",
@@ -216,7 +286,7 @@ async def run_backtest_job(session: AsyncSession, payload: dict, settings: Any, 
         final_equity=Decimal(str(result.summary["final_equity"])),
         net_pnl=Decimal(str(result.summary["net_pnl"])),
         max_drawdown=Decimal(str(result.summary["max_drawdown"])),
-        result_summary=result.summary,
+        result_summary={**result.summary, "data": data_source},
     )
     session.add(run)
     await session.flush()
@@ -270,23 +340,27 @@ async def run_sweep_job(session: AsyncSession, payload: dict, settings: Any, use
 
     # The stored indicator periods, as the single backtest and the scanner use.
     measured_with = await effective_settings(session, settings)
-    by_instrument, benchmark = await load_history(session, measured_with, tokens, timeframe, start, end)
+    by_instrument, benchmark, data_source = await candles_for(
+        session, measured_with, request, tokens, timeframe, start, end
+    )
     sector_of_token = await sector_lookup(session, list(by_instrument))
     try:
-        sweep_result = run_parameter_sweep(
-            base_strategy,
-            controls,
-            execution_controls,
-            measured_with,
-            by_instrument,
-            benchmark,
-            request["parameter_grid"],
-            validation_fraction=float(request.get("validation_fraction", 0.35)),
-            maximum_combinations=int(payload.get("maximum_combinations", 40)),
-            sector_of_token=sector_of_token,
-        )
+        with _calendar_for(data_source):
+            sweep_result = run_parameter_sweep(
+                base_strategy,
+                controls,
+                execution_controls,
+                measured_with,
+                by_instrument,
+                benchmark,
+                request["parameter_grid"],
+                validation_fraction=float(request.get("validation_fraction", 0.35)),
+                maximum_combinations=int(payload.get("maximum_combinations", 40)),
+                sector_of_token=sector_of_token,
+            )
     except ValueError as exc:
         raise ResearchInputError(str(exc)) from exc
+    data_source = _summary_of(data_source)
 
     combinations = [item.as_dict() for item in sweep_result.combinations]
     sweep = BacktestSweep(
@@ -315,6 +389,7 @@ async def run_sweep_job(session: AsyncSession, payload: dict, settings: Any, use
                 "strategy_id": base_strategy.id,
                 "combinations": len(combinations),
                 "variants_tested": sweep_result.variants_tested,
+                "data": data_source,
             },
         )
     )
@@ -322,7 +397,48 @@ async def run_sweep_job(session: AsyncSession, payload: dict, settings: Any, use
     return {"sweep_id": str(sweep.id), "combinations": len(combinations)}
 
 
+async def run_backfill_job(session: AsyncSession, payload: dict, settings: Any, user_id: UUID | None) -> dict:
+    """Fetch, store and check a historical dataset; finalise it when every file is in.
+
+    Stops between files when the research window closes and reports how far it
+    got; running the same job again continues from there.
+    """
+    from app.services import research_data
+    from app.services.research_jobs import research_allowed
+    from app.services.trading_calendar import TradingCalendar
+
+    calendar = TradingCalendar.from_settings(settings)
+    try:
+        dataset = await research_data.open_dataset(
+            session,
+            name=payload["dataset"],
+            timeframe=payload["timeframe"],
+            start=date.fromisoformat(payload["start"]),
+            end=date.fromisoformat(payload["end"]),
+            benchmark_key=payload.get("benchmark") or research_data.NIFTY_50,
+            provenance={"instruments_requested": len(payload["instruments"])},
+        )
+    except ValueError as exc:
+        raise ResearchInputError(str(exc)) from exc
+    await session.commit()
+    source = research_data.UpstoxPublicHistory(requests_per_second=float(payload.get("requests_per_second", 2.0)))
+    report = await research_data.backfill(
+        session,
+        dataset,
+        list(payload["instruments"]),
+        source,
+        keep_going=lambda: research_allowed(datetime.now(UTC), calendar).open,
+    )
+    result = {"dataset_id": str(dataset.id), "dataset": dataset.name, **report.__dict__}
+    if report.stopped_early is None:
+        result["coverage_rows"] = await research_data.compute_coverage(session, dataset)
+        if payload.get("finalize", True):
+            result["content_sha256"] = await research_data.finalize(session, dataset)
+    return result
+
+
 HANDLERS: dict[str, Callable[[AsyncSession, dict, Any, UUID | None], Awaitable[dict]]] = {
     BACKTEST: run_backtest_job,
     SWEEP: run_sweep_job,
+    BACKFILL: run_backfill_job,
 }

@@ -6,7 +6,7 @@ COPY apps/api/pyproject.toml apps/api/README.md ./
 RUN pip install --upgrade pip && pip install -e .
 COPY apps/api ./
 RUN pip install -e . && addgroup --system sidra && adduser --system --ingroup sidra sidra \
-    && mkdir -p /app/logs && chown -R sidra:sidra /app
+    && mkdir -p /app/logs /app/research_data && chown -R sidra:sidra /app
 # The commit this image was built from, read by app/services/build_info.py and
 # compared across containers by scripts/verify-deployment.sh. Declared after
 # the installs so a new commit rebuilds only this layer. Pass it at deploy:

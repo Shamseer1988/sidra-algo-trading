@@ -183,8 +183,15 @@ async def request_cancel(session: AsyncSession, job_id: UUID, *, actor: str) -> 
     return job
 
 
-async def release(session: AsyncSession, job_id: UUID, *, actor: str, detail: str) -> ResearchJob | None:
-    """Put a RUNNING job back in the queue because its worker is stopping, not because it failed."""
+async def release(
+    session: AsyncSession, job_id: UUID, *, actor: str, detail: str, refund_attempt: bool = False
+) -> ResearchJob | None:
+    """Put a RUNNING job back in the queue because its worker is stopping, not because it failed.
+
+    ``refund_attempt`` gives back the attempt the claim used, for a job stopped
+    on purpose -- the research window closing -- so a long job that is paused
+    every morning does not run out of attempts.
+    """
     job = await session.get(ResearchJob, job_id, with_for_update=True)
     if job is None or job.status != RUNNING:
         return job
@@ -193,6 +200,8 @@ async def release(session: AsyncSession, job_id: UUID, *, actor: str, detail: st
     session.add(_event(job, QUEUED, actor, detail))
     job.status = QUEUED
     job.worker_id = None
+    if refund_attempt and job.attempts > 0:
+        job.attempts -= 1
     await session.flush()
     return job
 

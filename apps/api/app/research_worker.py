@@ -182,7 +182,14 @@ async def _child_main(job_id: UUID) -> int:
 # --- the parent: supervise one job ------------------------------------------------------
 
 
-async def supervise(job_id: UUID, timeout_seconds: int, worker_id: str, *, process_factory=None) -> str:  # noqa: ANN001
+async def supervise(  # noqa: PLR0912, PLR0915 - one loop, every way a job can end
+    job_id: UUID,
+    timeout_seconds: int,
+    worker_id: str,
+    *,
+    process_factory=None,  # noqa: ANN001
+    window_open=None,  # noqa: ANN001 - Callable[[], bool]
+) -> str:
     """Run the job in a child process; keep its heartbeat; stop it on cancel or timeout.
 
     Returns the status the job ended in, as recorded.
@@ -210,6 +217,22 @@ async def supervise(job_id: UUID, timeout_seconds: int, worker_id: str, *, proce
                     stop_reason = (research_jobs.CANCELLED, "Cancelled while running")
             if stop_reason is None and now - started > timeout_seconds:
                 stop_reason = (research_jobs.FAILED, f"Timed out after {timeout_seconds} seconds")
+            if stop_reason is None and window_open is not None and not window_open():
+                # The research window closed with the job still running: the
+                # scanner needs the machine. Stop it and queue it again without
+                # spending an attempt; a backfill resumes from its last file.
+                process.terminate()
+                process.join(10)
+                async with SessionLocal() as session:
+                    await research_jobs.release(
+                        session,
+                        job_id,
+                        actor=worker_id,
+                        detail="Research window closed; queued again",
+                        refund_attempt=True,
+                    )
+                    await session.commit()
+                return research_jobs.QUEUED
             if stop_reason is not None:
                 process.terminate()
                 process.join(10)
@@ -294,7 +317,12 @@ async def run(*, once: bool = False) -> None:
                 continue
             job_id, timeout_seconds, job_type = claimed
             logger.info("research_worker.job_started", job_id=str(job_id), job_type=job_type)
-            outcome = await supervise(job_id, timeout_seconds, worker_id)
+            outcome = await supervise(
+                job_id,
+                timeout_seconds,
+                worker_id,
+                window_open=lambda: research_jobs.research_allowed(datetime.now(UTC), calendar).open,
+            )
             logger.info("research_worker.job_finished", job_id=str(job_id), status=outcome)
             if once:
                 return

@@ -1204,3 +1204,120 @@ class ResearchJobEvent(Base):
     actor: Mapped[str] = mapped_column(String(80))
     detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# --- Research schema (Research Lab Phase 4) ------------------------------------------
+#
+# Bars themselves are files on the research worker's volume, one per instrument
+# and month; these rows say where each came from and whether it can be trusted.
+# Nothing here is read by the trading engine.
+
+RESEARCH_SCHEMA = "research"
+
+
+class ResearchInstrument(Base):
+    __tablename__ = "instrument"
+    __table_args__ = {"schema": RESEARCH_SCHEMA}
+
+    instrument_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(40))
+    isin: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    industry: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    sector: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    tick_size: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    source: Mapped[str] = mapped_column(String(80))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ResearchUniverseMembership(Base):
+    """Which instruments were in an index, and from when.
+
+    ``valid_to`` null means still a member. A row whose ``note`` says
+    "current constituents only" records today's list, not the past: a backtest
+    over that list is survivorship-biased and has to say so.
+    """
+
+    __tablename__ = "universe_membership"
+    __table_args__ = (
+        UniqueConstraint("universe", "instrument_key", "valid_from", name="uq_universe_membership"),
+        {"schema": RESEARCH_SCHEMA},
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    universe: Mapped[str] = mapped_column(String(40))
+    instrument_key: Mapped[str] = mapped_column(String(64))
+    valid_from: Mapped[date] = mapped_column(Date)
+    valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    source: Mapped[str] = mapped_column(String(120))
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class ResearchDataset(Base):
+    """A named, versioned set of historical bars and where it came from.
+
+    BUILDING while files are being written; COMPLETE once ``content_sha256``
+    -- a hash over every file's own hash -- is fixed. A research result names
+    the dataset it ran on, so it can be reproduced or shown to be stale.
+    """
+
+    __tablename__ = "dataset"
+    __table_args__ = {"schema": RESEARCH_SCHEMA}
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    source: Mapped[str] = mapped_column(String(80))
+    timeframe: Mapped[str] = mapped_column(String(20))
+    price_adjustment: Mapped[str] = mapped_column(String(30))
+    benchmark_key: Mapped[str] = mapped_column(String(64))
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(20), default="BUILDING", server_default="BUILDING")
+    storage_path: Mapped[str] = mapped_column(String(255))
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    instrument_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    row_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    provenance: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ResearchDatasetFile(Base):
+    __tablename__ = "dataset_file"
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "instrument_key", "month", name="uq_dataset_file_month"),
+        {"schema": RESEARCH_SCHEMA},
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    dataset_id: Mapped[UUID] = mapped_column(ForeignKey(f"{RESEARCH_SCHEMA}.dataset.id", ondelete="CASCADE"))
+    instrument_key: Mapped[str] = mapped_column(String(64))
+    month: Mapped[date] = mapped_column(Date)
+    relative_path: Mapped[str] = mapped_column(String(255))
+    rows: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    first_bar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_bar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ResearchDatasetCoverage(Base):
+    """One instrument's bars on one session, against the benchmark's bars that session."""
+
+    __tablename__ = "dataset_coverage"
+    __table_args__ = (
+        Index("ix_dataset_coverage_dataset_session", "dataset_id", "session_date"),
+        {"schema": RESEARCH_SCHEMA},
+    )
+
+    dataset_id: Mapped[UUID] = mapped_column(
+        ForeignKey(f"{RESEARCH_SCHEMA}.dataset.id", ondelete="CASCADE"), primary_key=True
+    )
+    instrument_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    bars: Mapped[int] = mapped_column(Integer)
+    expected_bars: Mapped[int] = mapped_column(Integer)
+    missing_bars: Mapped[int] = mapped_column(Integer)
+    duplicates: Mapped[int] = mapped_column(Integer)
+    bad_ohlc: Mapped[int] = mapped_column(Integer)
+    zero_volume: Mapped[int] = mapped_column(Integer)
+    outside_session: Mapped[int] = mapped_column(Integer)
