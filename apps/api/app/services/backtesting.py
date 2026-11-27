@@ -178,6 +178,23 @@ def _exit_trade(
     after = candles[entry_index + 1 :]
     band = float(getattr(execution_controls, "stop_limit_band_percent", 0.0) or 0.0)
     stop_order_side = exit_side(side)
+    # The entry candle itself. The entry fills at its open, and live places the
+    # protective stop seconds after the fill, so the rest of that minute can
+    # stop the trade out. This used to start checking on the next candle, so a
+    # trade that was stopped inside its first minute was carried on instead --
+    # Research Lab Phase 5. Only the stop is checked here: whether the target
+    # was touched before or after the stop inside one bar is unknowable, and
+    # the target is never assumed.
+    entry_candle = candles[entry_index]
+    stop_filled, stop_fill = PaperOrderManager._stop_fill(
+        _StopOrder(side=stop_order_side, stop_price=stop), entry_candle, band
+    )
+    if stop_filled:
+        return (
+            slipped_price(stop_fill, exit_side(side), execution_controls.slippage_bps),
+            entry_candle.closed_at,
+            "STOP",
+        )
     for position, candle in enumerate(after):
         # Where the stop fills, by the paper engine's own rule
         # (``PaperOrderManager._stop_fill``): at the stop when price trades

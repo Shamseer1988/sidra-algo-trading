@@ -3708,3 +3708,102 @@ for (const theme of ["light", "dark"] as const) {
     });
   });
 }
+
+// --- Research Lab (Phase 5) ------------------------------------------------------------
+
+const RESEARCH_EXPERIMENT = {
+  id: "exp-1",
+  hypothesis_id: "hyp-1",
+  name: "RS Pullback 2022-26 walk-forward",
+  dataset_id: "ds-1",
+  instruments: ["NSE_EQ|INE002A01018", "NSE_EQ|INE009A01021"],
+  strategy: { id: "rs-pullback-default", name: "RS Pullback", strategy_type: "rs-pullback-v1" },
+  parameter_grid: { minimum_score: [65, 71, 77] },
+  variants: 3,
+  selection_start: "2022-01-03",
+  selection_end: "2025-06-30",
+  holdout_start: "2025-07-01",
+  holdout_end: "2026-11-26",
+  train_sessions: 60,
+  test_sessions: 20,
+  success_mean_r: 0.1,
+  status: "SELECTED",
+  chosen_index: 1,
+  chosen_parameters: { minimum_score: 71 },
+  holdout_used: false,
+  verdict: null,
+  registered_at: "2026-11-28T10:00:00Z",
+  created_at: "2026-11-28T09:00:00Z",
+};
+
+async function mockResearch(page: Page, holdoutBodies: unknown[]) {
+  await page.route("**/api/v1/research/worker", (route: Route) =>
+    route.fulfill({ json: { status: "healthy", detail: "research worker is running.", last_seen: null, research_window_open: true, window_detail: "Outside market hours.", queued: 0, running: 0 } }),
+  );
+  await page.route("**/api/v1/research/datasets", (route: Route) =>
+    route.fulfill({ json: [{ id: "ds-1", name: "nifty200-1m-2022", status: "COMPLETE", timeframe: "1minute", source: "upstox-public-v3", price_adjustment: "ADJUSTED_BY_PROVIDER", start_date: "2022-01-01", end_date: "2026-11-26", instrument_count: 201, row_count: 90000000, content_sha256: "a".repeat(64), sessions: 1215, complete_instrument_sessions: 240000, instrument_sessions: 244215, created_at: "2026-11-28T00:00:00Z", finalized_at: "2026-11-28T02:00:00Z" }] }),
+  );
+  await page.route("**/api/v1/research/hypotheses", (route: Route) =>
+    route.fulfill({ json: [{ id: "hyp-1", title: "RS Pullback has an edge", statement: "The live strategy makes money after costs.", rationale: null, status: "OPEN", created_at: "2026-11-28T09:00:00Z" }] }),
+  );
+  await page.route("**/api/v1/research/experiments", (route: Route) => route.fulfill({ json: [RESEARCH_EXPERIMENT] }));
+  await page.route("**/api/v1/research/experiments/exp-1", (route: Route) =>
+    route.fulfill({
+      json: {
+        ...RESEARCH_EXPERIMENT,
+        results: [{
+          kind: "SELECTION", code_fingerprint: "b".repeat(64), dataset_sha256: "a".repeat(64), created_at: "2026-11-28T11:00:00Z",
+          summary: {
+            selection_sessions: 860, variants_tested: 3, dataset: { name: "nifty200-1m-2022" },
+            walk_forward: {
+              stitched: { trades: 410, mean_r: -0.03, t_stat: -0.6, win_rate: 0.39, ci95_mean_r: [-0.12, 0.06] },
+              deflated_sharpe: { sharpe: -0.02, threshold: 0.07, dsr: 0.04, trials: 3 },
+              cost_sensitivity: { x1: -0.03, x1_5: -0.08, x2: -0.13 },
+              regimes: { UP: { trades: 200, mean_r: 0.01, ci95_mean_r: [-0.1, 0.12] } },
+              folds: [{ train: ["2022-01-03", "2022-03-31"], test: ["2022-04-01", "2022-04-29"], chosen_index: 1, out_of_sample: { trades: 9, average_realized_r: -0.2 } }],
+            },
+          },
+        }],
+      },
+    }),
+  );
+  await page.route("**/api/v1/research/experiments/exp-1/holdout", async (route: Route) => {
+    holdoutBodies.push(route.request().postDataJSON());
+    await route.fulfill({ json: { ...RESEARCH_EXPERIMENT, status: "HOLDOUT_QUEUED" } });
+  });
+  await page.route("**/api/v1/research/jobs", (route: Route) =>
+    route.fulfill({ json: [{ id: "job-12345678", job_type: "experiment_selection", status: "SUCCEEDED", attempts: 1, max_attempts: 2, cancel_requested: false, result: { status: "SELECTED" }, failure_detail: null, worker_id: "research:w", created_at: "2026-11-28T10:00:00Z", started_at: null, heartbeat_at: null, finished_at: "2026-11-28T11:00:00Z" }] }),
+  );
+}
+
+test.describe("Research Lab", () => {
+  test("shows datasets, a pre-registered experiment, and scores the holdout only after confirming", async ({ page }) => {
+    const holdoutBodies: unknown[] = [];
+    await setupMockRoutes(page, "ADMIN");
+    await mockResearch(page, holdoutBodies);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Research Lab", exact: true }).click();
+    await expect(page.getByText("How an experiment decides")).toBeVisible();
+
+    await page.getByRole("tab", { name: "Datasets", exact: true }).click();
+    await expect(page.getByText("nifty200-1m-2022")).toBeVisible();
+    await expect(page.getByText("aaaaaaaaaaaaaaaa")).toBeVisible();
+
+    await page.getByRole("tab", { name: "Experiments", exact: true }).click();
+    await expect(page.getByText("Selection: walk-forward, out of sample")).toBeVisible();
+    await expect(page.getByText("-0.120 … 0.060")).toBeVisible();
+    await expect(page.getByText("4.0%")).toBeVisible();
+    // Nothing here can change a strategy.
+    await expect(page.getByRole("button", { name: /promote/i })).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Score the holdout" }).click();
+    await expect(page.getByText("can be scored", { exact: false })).toBeVisible();
+    expect(holdoutBodies).toHaveLength(0);
+    await page.getByRole("button", { name: "Score it once" }).click();
+    await expect.poll(() => holdoutBodies.length).toBe(1);
+    expect(holdoutBodies[0]).toEqual({ confirm_single_use: true });
+
+    await page.getByRole("tab", { name: "Jobs", exact: true }).click();
+    await expect(page.getByText("Experiment Selection")).toBeVisible();
+  });
+});

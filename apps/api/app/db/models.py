@@ -1321,3 +1321,76 @@ class ResearchDatasetCoverage(Base):
     bad_ohlc: Mapped[int] = mapped_column(Integer)
     zero_volume: Mapped[int] = mapped_column(Integer)
     outside_session: Mapped[int] = mapped_column(Integer)
+
+
+class ResearchHypothesis(Base):
+    """A claim to be tested, written before any experiment on it is run."""
+
+    __tablename__ = "hypothesis"
+    __table_args__ = {"schema": RESEARCH_SCHEMA}
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    title: Mapped[str] = mapped_column(String(120))
+    statement: Mapped[str] = mapped_column(Text)
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="OPEN", server_default="OPEN")
+    created_by_user_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ResearchExperiment(Base):
+    """A pre-registered test: everything that decides the answer, fixed before it runs.
+
+    DRAFT may be edited. QUEUED freezes it (``registered_at``). SELECTED means
+    the selection period has been searched and ``chosen_parameters`` fixed.
+    HOLDOUT_SCORED means the sealed period has been used, once, and
+    ``verdict`` is PASSED or FAILED. FAILED_TO_RUN is a job that broke.
+    """
+
+    __tablename__ = "experiment"
+    __table_args__ = {"schema": RESEARCH_SCHEMA}
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    hypothesis_id: Mapped[UUID] = mapped_column(ForeignKey(f"{RESEARCH_SCHEMA}.hypothesis.id", ondelete="RESTRICT"))
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    dataset_id: Mapped[UUID] = mapped_column(ForeignKey(f"{RESEARCH_SCHEMA}.dataset.id", ondelete="RESTRICT"))
+    instruments: Mapped[list] = mapped_column(JSON, default=list)
+    strategy: Mapped[dict] = mapped_column(JSON, default=dict)
+    controls: Mapped[dict] = mapped_column(JSON, default=dict)
+    execution: Mapped[dict] = mapped_column(JSON, default=dict)
+    parameter_grid: Mapped[dict] = mapped_column(JSON, default=dict)
+    variants: Mapped[int] = mapped_column(Integer)
+    selection_start: Mapped[date] = mapped_column(Date)
+    selection_end: Mapped[date] = mapped_column(Date)
+    holdout_start: Mapped[date] = mapped_column(Date)
+    holdout_end: Mapped[date] = mapped_column(Date)
+    train_sessions: Mapped[int] = mapped_column(Integer)
+    test_sessions: Mapped[int] = mapped_column(Integer)
+    success_mean_r: Mapped[Decimal] = mapped_column(Numeric(8, 4))
+    status: Mapped[str] = mapped_column(String(20), default="DRAFT", server_default="DRAFT")
+    chosen_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chosen_parameters: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    holdout_used: Mapped[bool] = mapped_column(default=False, server_default="false")
+    verdict: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    registered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_user_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ResearchExperimentResult(Base):
+    """One stage's outcome -- SELECTION or HOLDOUT -- with the code and data it ran on."""
+
+    __tablename__ = "experiment_result"
+    __table_args__ = (
+        UniqueConstraint("experiment_id", "kind", name="uq_experiment_result_kind"),
+        {"schema": RESEARCH_SCHEMA},
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    experiment_id: Mapped[UUID] = mapped_column(ForeignKey(f"{RESEARCH_SCHEMA}.experiment.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(20))
+    job_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    code_fingerprint: Mapped[str] = mapped_column(String(64))
+    dataset_sha256: Mapped[str] = mapped_column(String(64))
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
