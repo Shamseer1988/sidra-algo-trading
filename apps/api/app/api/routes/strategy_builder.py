@@ -63,6 +63,22 @@ ABOUT: dict[str, str] = {
     "cpr-breakout-v1": (
         "Uses the previous day's central pivot range and the first hour's range; enters when price breaks out of both."
     ),
+    "sip-momentum-v1": (
+        "At 10:10 AM, picks shares that have traded far more than usual this morning and moved at least 1% from "
+        "yesterday's close, on the same side of VWAP; holds to 3 PM with a stop half a daily ATR away. Paper only."
+    ),
+}
+
+# Starting values that differ from the generic defaults, per type. The SIP
+# research held to 3 PM with no target and no percent floor on the stop, so the
+# template says so rather than leaving the account's 1:2 target and 0.8% floor
+# to change the strategy that was tested.
+TEMPLATE_OVERRIDES: dict[str, dict] = {
+    "sip-momentum-v1": {
+        "max_trades_per_day": 3,
+        "minimum_score": 0,
+        "exit_rules": {"target_rr": 10, "square_off_time": "15:00", "min_stop_distance_percent": 0.3},
+    },
 }
 
 
@@ -148,6 +164,7 @@ async def catalog(session: DbSession, _: CurrentUser) -> BuilderCatalog:
                 strategy_type=meta.identifier,
                 enabled=False,
                 live_orders=False,
+                **TEMPLATE_OVERRIDES.get(meta.identifier, {}),
             ),
         )
         for meta in StrategyRegistry.metadata()

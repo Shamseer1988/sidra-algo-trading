@@ -1,4 +1,4 @@
-const ACRONYMS = new Set(["rs", "orb", "vwap", "ema", "cpr"]);
+const ACRONYMS = new Set(["rs", "orb", "vwap", "ema", "cpr", "sip"]);
 
 /** `rs-pullback-v1@8` reads as "RS Pullback": the name a person uses, without the revision. */
 export function strategyLabel(version: string): string {

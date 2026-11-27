@@ -13,10 +13,12 @@ from app.services.extra_strategies import (
     CPR_BREAKOUT_VERSION,
     EMA_MOMENTUM_VERSION,
     RS_PULLBACK_VERSION,
+    SIP_MOMENTUM_VERSION,
     VWAP_PULLBACK_VERSION,
     evaluate_cpr_breakout,
     evaluate_ema_momentum,
     evaluate_rs_pullback,
+    evaluate_sip_momentum,
     evaluate_vwap_pullback,
 )
 from app.services.market_calculations import CompletedCandle
@@ -82,6 +84,12 @@ class StrategyConfiguration(BaseModel):
     minimum_ema_spread_percent: float = Field(default=0.05, ge=0, le=5)
     # Minimum |relative strength vs NIFTY| for the RS Pullback strategy; blank uses its built-in default.
     rs_threshold_percent: float | None = Field(default=None, ge=0, le=10)
+    # Stocks-in-Play momentum only; blank uses its built-in defaults (2.5x the
+    # usual volume for the morning so far, a 1% move from yesterday's close, a
+    # stop half a daily ATR from entry).
+    sip_min_session_rvol: float | None = Field(default=None, ge=1, le=20)
+    sip_min_move_percent: float | None = Field(default=None, ge=0.1, le=10)
+    sip_stop_daily_atr: float | None = Field(default=None, ge=0.1, le=3)
     # Indicator inputs this strategy depends on. A required input that is
     # missing blocks the signal outright rather than scoring it lower: a
     # breakout-retest without volume confirmation is not a weaker version of
@@ -153,6 +161,9 @@ class StrategyConfiguration(BaseModel):
             values["risk_per_trade_percent"] = self.risk_per_trade_percent
         if self.rs_threshold_percent is not None:
             values["rs_threshold_percent"] = self.rs_threshold_percent
+        for key in ("sip_min_session_rvol", "sip_min_move_percent", "sip_stop_daily_atr"):
+            if getattr(self, key) is not None:
+                values[key] = getattr(self, key)
         # A per-strategy stop override replaces the account control for this
         # strategy only; left blank, the account control still reaches it.
         if self.exit_rules.stop_atr_multiple is not None:
@@ -241,6 +252,20 @@ class CprBreakoutDefinition:
         )
 
 
+class SipMomentumDefinition:
+    metadata = StrategyMetadata(
+        identifier=SIP_MOMENTUM_VERSION,
+        name="Stocks-in-Play Momentum",
+        implementation_version=SIP_MOMENTUM_VERSION,
+        prerequisites=("completed candle", "time-of-day volume baseline", "daily candles", "VWAP"),
+    )
+
+    def evaluate(self, candle, indicators, benchmark, controls, configuration, prior_state) -> StrategyDecision:
+        return _direction_gated(
+            evaluate_sip_momentum(candle, indicators, benchmark, controls, prior_state), configuration
+        )
+
+
 def _direction_gated(decision: StrategyDecision, configuration: "StrategyConfiguration") -> StrategyDecision:
     if decision.side and decision.side not in configuration.allowed_sides:
         return StrategyDecision(next_state=AWAITING, reason=f"{decision.side.title()} signals are disabled")
@@ -259,6 +284,7 @@ class StrategyRegistry:
         EMA_MOMENTUM_VERSION: EmaMomentumDefinition(),
         RS_PULLBACK_VERSION: RsPullbackDefinition(),
         CPR_BREAKOUT_VERSION: CprBreakoutDefinition(),
+        SIP_MOMENTUM_VERSION: SipMomentumDefinition(),
     }
 
     @classmethod
