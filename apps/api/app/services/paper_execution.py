@@ -489,12 +489,25 @@ class PaperOrderManager:
         setting = await session.get(ApplicationSetting, TRADING_KEY)
         trading = TradingControls.model_validate(setting.value if setting else DEFAULT_TRADING_CONTROLS)
 
+        # The shared paper book only. A paper-only strategy (live_orders=false)
+        # is measured as if it traded the account alone, the same split the
+        # risk engine's ``same_book`` makes: its P&L does not end the shared
+        # day, and the shared day's halt does not flatten its positions.
+        from app.services.risk_engine import strategy_type_of
+        from app.services.strategy_registry import StrategyRegistry
+
+        paper_only = await StrategyRegistry.paper_only_types(session)
+
+        def shared(version: str | None) -> bool:
+            return strategy_type_of(version) not in paper_only
+
         session_pnl = sum(
             (
                 Decimal(str(item.total_pnl or 0))
                 for item in (
                     await session.scalars(select(PaperPosition).where(PaperPosition.session_date == session_date))
                 ).all()
+                if shared(item.strategy_version)
             ),
             start=Decimal("0"),
         )
@@ -518,6 +531,8 @@ class PaperOrderManager:
                 )
             )
         ).all():
+            if not shared(order.strategy_version):
+                continue
             # A halted day must not open anything new, and the brackets on a
             # position being exited would otherwise race the exit.
             order.status = "CANCELLED"
@@ -531,7 +546,7 @@ class PaperOrderManager:
                 )
             )
         ).all():
-            if position.open_quantity <= 0:
+            if position.open_quantity <= 0 or not shared(position.strategy_version):
                 continue
             signal = await session.get(PaperSignal, position.paper_signal_id)
             if signal is None:
