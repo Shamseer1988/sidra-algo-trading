@@ -3,6 +3,7 @@ import {
   BriefcaseBusiness,
   CalendarRange,
   ClipboardList,
+  FlaskConical,
   DatabaseZap,
   FileBarChart,
   Ghost,
@@ -53,6 +54,7 @@ export type WorkspaceId =
   | "risk"
   | "settings"
   | "swing"
+  | "research"
   // Admin & diagnostics
   | "backtesting"
   | "oms"
@@ -88,6 +90,10 @@ export const navigationSections: NavigationSection[] = [
     ],
   },
   {
+    label: "Research",
+    items: [{ id: "research", label: "Research Lab", icon: FlaskConical }],
+  },
+  {
     label: "Swing desk",
     items: [{ id: "swing", label: "Swing (paper)", icon: Layers, desk: "swing" }],
   },
@@ -118,6 +124,7 @@ export const workspaceMeta: Record<WorkspaceId, { eyebrow: string; title: string
   risk: { eyebrow: "Safety controls", title: "Risk" },
   settings: { eyebrow: "Configuration", title: "Settings" },
   swing: { eyebrow: "Paper only — no real orders", title: "Swing desk" },
+  research: { eyebrow: "Evidence before money", title: "Research Lab" },
   backtesting: { eyebrow: "Research", title: "Backtesting" },
   oms: { eyebrow: "Execution lifecycle", title: "OMS operations" },
   shadow: { eyebrow: "Zero-submission comparison", title: "Shadow comparison" },
@@ -169,6 +176,12 @@ export const workspaceTabs: Partial<Record<WorkspaceId, WorkspaceTab[]>> = {
     { id: "strategies", label: "By strategy" },
     { id: "quality", label: "Execution quality" },
     { id: "diagnostics", label: "Diagnostics" },
+  ],
+  research: [
+    { id: "overview", label: "Overview" },
+    { id: "experiments", label: "Experiments" },
+    { id: "datasets", label: "Datasets" },
+    { id: "jobs", label: "Jobs" },
   ],
   swing: [
     { id: "portfolio", label: "Portfolio" },

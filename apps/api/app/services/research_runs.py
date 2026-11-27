@@ -442,3 +442,14 @@ HANDLERS: dict[str, Callable[[AsyncSession, dict, Any, UUID | None], Awaitable[d
     SWEEP: run_sweep_job,
     BACKFILL: run_backfill_job,
 }
+
+
+def _register_experiment_handlers() -> None:
+    # Imported late: research_experiments imports this module's error type.
+    from app.services import research_experiments
+
+    HANDLERS[research_experiments.SELECTION_JOB] = research_experiments.selection_job
+    HANDLERS[research_experiments.HOLDOUT_JOB] = research_experiments.holdout_job
+
+
+_register_experiment_handlers()

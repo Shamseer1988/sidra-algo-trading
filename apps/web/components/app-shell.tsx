@@ -33,6 +33,7 @@ import { StrategiesPanel } from "../features/strategies/strategies-panel";
 import { StrategyBuilder } from "../features/strategies/strategy-builder";
 import { SubscriptionsPanel } from "../features/strategies/subscriptions";
 import { SwingWorkspace } from "../features/swing/swing-workspace";
+import { ResearchLab } from "../features/research/research-lab";
 import { DiagnosticsPanel } from "../features/reports/diagnostics-panel";
 import { SystemHealthPanel } from "../features/system/system-health-panel";
 import { WorkspaceTabs } from "./layout/workspace-tabs";
@@ -192,6 +193,9 @@ export function AppShell() {
       break;
     case "swing":
       content = <SwingWorkspace tab={showing ?? "portfolio"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
+      break;
+    case "research":
+      content = <ResearchLab tab={showing ?? "overview"} isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
       break;
     case "backtesting":
       content = <BacktestingWorkspace isAdmin={Boolean(isAdmin)} onMessage={setMessage} />;
