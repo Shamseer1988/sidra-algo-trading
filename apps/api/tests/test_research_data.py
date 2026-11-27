@@ -332,8 +332,9 @@ async def test_the_backfill_job_builds_and_finalises_a_dataset(clean_datasets, t
 def test_the_worker_volume_and_network_for_backfills():
     from pathlib import Path
 
-    compose_file = Path(__file__).resolve().parents[1].parents[1] / "docker-compose.yml"
-    if not compose_file.exists():
+    roots = [parent for parent in Path(__file__).resolve().parents if (parent / "docker-compose.yml").exists()]
+    compose_file = roots[0] / "docker-compose.yml" if roots else None
+    if compose_file is None:
         pytest.skip("needs the repository checkout (docker-compose.yml); the test container holds apps/api only")
     compose = compose_file.read_text(encoding="utf-8")
     block = compose.split("  research-worker:\n", 1)[1].split("\n  web:\n", 1)[0]
