@@ -17,6 +17,7 @@ from app.db.models import ApplicationSetting, PaperSignal, ScannerEvaluation, Sc
 from app.db.session import SessionLocal
 from app.services.desks import INTRADAY_DESK, desk_enabled
 from app.services.entry_gate import entry_gate
+from app.services.extra_strategies import SIP_CANDIDATE_STATES, SIP_MOMENTUM_VERSION
 from app.services.market_calculations import CompletedCandle
 from app.services.paper_execution import PaperOrderManager
 from app.services.paper_strategy import AWAITING, SIGNALLED
@@ -670,6 +671,40 @@ class PaperScannerOrchestrator:
                     instrument_token=candle.instrument_token,
                 )
 
+    def _sip_keys(self, candle: CompletedCandle, strategy: StrategyConfiguration) -> tuple[str, str]:
+        base = f"scanner:sip:{strategy.id}:v{strategy.version}:{candle.session_date.isoformat()}"
+        return f"{base}:rank", f"{base}:facts"
+
+    async def _sip_register(self, candle: CompletedCandle, strategy: StrategyConfiguration, details: dict) -> None:
+        """Enter a 10:10 candidate in the day's ranking for this strategy."""
+        rank_key, facts_key = self._sip_keys(candle, strategy)
+        await self._redis.zadd(rank_key, {candle.instrument_token: float(details["rank"])})
+        await self._redis.hset(facts_key, candle.instrument_token, json.dumps(details))
+        await self._redis.expire(rank_key, STATE_TTL_SECONDS)
+        await self._redis.expire(facts_key, STATE_TTL_SECONDS)
+
+    async def _sip_selection(self, candle: CompletedCandle, strategy: StrategyConfiguration) -> dict:
+        """Whether this candidate made the day's top ``max_trades_per_day`` by rank.
+
+        Read on the candidate's first candle after 10:10. Every share's 10:09
+        candle has completed by then -- a quiet share's is flushed seconds after
+        the minute -- so the ranking it reads is the whole of the day's field.
+        Equal ranks are ordered by Redis on the token: arbitrary, but repeatable.
+        """
+        rank_key, facts_key = self._sip_keys(candle, strategy)
+        ranked = await self._redis.zrevrange(rank_key, 0, -1)
+        raw = await self._redis.hget(facts_key, candle.instrument_token)
+        facts = json.loads(raw) if raw else {}
+        top = strategy.max_trades_per_day
+        position = ranked.index(candle.instrument_token) + 1 if candle.instrument_token in ranked else None
+        return {
+            "sip_selected": position is not None and position <= top,
+            "sip_position": position,
+            "sip_candidates": len(ranked),
+            "sip_top": top,
+            "sip_candidate": facts,
+        }
+
     async def _evaluate_strategy(
         self,
         candle: CompletedCandle,
@@ -690,7 +725,17 @@ class PaperScannerOrchestrator:
         strategy_snapshot = strategy.snapshot(controls)
         state_key = self._state_key(candle, strategy)
         prior_state = await self._redis.get(state_key) or AWAITING
+        is_sip = strategy.strategy_type == SIP_MOMENTUM_VERSION
+        if is_sip and prior_state in SIP_CANDIDATE_STATES:
+            effective_controls = {**effective_controls, **await self._sip_selection(candle, strategy)}
         decision = StrategyRegistry.evaluate(strategy, candle, indicators, nifty, effective_controls, prior_state)
+        details = getattr(decision, "details", None)
+        if is_sip and decision.next_state in SIP_CANDIDATE_STATES and details:
+            await self._sip_register(candle, strategy, details)
+        if details:
+            # Structured, so the rank and the facts behind it can be queried
+            # from the evaluation and the signal, not parsed out of a sentence.
+            indicators = {**indicators, "strategy_details": details}
         # The lock, the limit checks, the signal row and the live order all sit
         # inside one block, because the defect was the distance between them.
         # Every `return` below still releases it, and a signal that did not get

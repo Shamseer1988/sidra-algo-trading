@@ -24,6 +24,7 @@ from app.services.data_quality import MarketDataQualityService
 from app.services.firstock.market_data import FirstockMarketDataService
 from app.services.indicator_settings import IndicatorSettings, overlay
 from app.services.indicator_settings import load as load_indicators
+from app.services.paper_execution import PaperOrderManager
 from app.services.scanner_orchestration import PaperScannerOrchestrator
 from app.services.trading_calendar import MARKET_TIMEZONE, TradingCalendar
 from app.services.universe import ranking_is_on as universe_ranking_is_on
@@ -40,6 +41,9 @@ from app.services.worker_alerts import (
     alert_worker_recovered,
 )
 from app.services.worker_supervision import WORKER_STATE_KEY, RestartBackoff, completed_task_detail
+
+# Late enough that every 3 PM TIME exit has had its candles; before the close.
+PAPER_EOD_SQUARE_OFF = "15:25"
 
 # Consecutive failed iterations before the worker hands the process back to
 # the supervisor. At the loop's 30-second ceiling this is about ten minutes of
@@ -123,6 +127,8 @@ async def run() -> None:
     last_watchlist_check = 0.0
     last_instrument_check = 0.0
     last_universe_refresh: object = None
+    # The day the end-of-day paper square-off last ran, so it runs once.
+    last_paper_square_off: object = None
     market_data_backoff = RestartBackoff()
     loop_backoff = RestartBackoff(maximum_seconds=30)
     # Whether the operator has been told the scanner stopped. Kept so the
@@ -391,6 +397,23 @@ async def run() -> None:
                             logger.info("scanner.universe_refreshed", **summary)
                         except Exception as exc:
                             logger.warning("scanner.universe_refresh_failed", error=str(exc))
+
+                # Paper positions the 3 PM square-off could not reach (no candle
+                # after 3 PM, or a TIME order only partly filled). Paper only:
+                # it closes simulated positions and touches nothing at a broker.
+                market_now = datetime.now(UTC)
+                local_market = market_now.astimezone(MARKET_TIMEZONE)
+                if (
+                    last_paper_square_off != local_market.date()
+                    and local_market.strftime("%H:%M") >= PAPER_EOD_SQUARE_OFF
+                    and calendar.status_at(market_now).trading_day
+                ):
+                    last_paper_square_off = local_market.date()
+                    try:
+                        swept = await PaperOrderManager().square_off_session(local_market.date())
+                        logger.info("scanner.paper_eod_square_off", positions=swept)
+                    except Exception as exc:
+                        logger.warning("scanner.paper_eod_square_off_failed", error=str(exc))
 
                 if now - last_heartbeat_log >= 30:
                     logger.info("scanner.worker_heartbeat", status=requested_state, provider=active_broker)

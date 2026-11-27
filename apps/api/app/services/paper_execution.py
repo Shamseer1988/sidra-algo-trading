@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.models import (
     ApplicationSetting,
+    MarketCandle,
     MarketIndicatorSnapshot,
     PaperFill,
     PaperOrder,
@@ -41,6 +42,14 @@ class PaperExecutionControls(BaseModel):
     gst_percent: float = Field(default=18, ge=0, le=100)
     sebi_percent: float = Field(default=0.0001, ge=0, le=1)
     stamp_duty_buy_percent: float = Field(default=0.003, ge=0, le=1)
+    # NSE's Investor Protection Fund Trust charge, Rs 10 a crore on both legs.
+    ipft_percent: float = Field(default=0.0001, ge=0, le=1)
+    # A stop is an SL-M order, which Upstox turns into an SL-limit with this
+    # much protection (``upstox_orders.MARKET_PROTECTION_PERCENT``). A candle
+    # that opens beyond that band and never trades back inside it does not
+    # fill the stop; the order keeps resting at the band's edge. 0 turns the
+    # band off and every triggered stop fills.
+    stop_limit_band_percent: float = Field(default=2.0, ge=0, le=20)
 
 
 DEFAULT_PAPER_EXECUTION_CONTROLS = PaperExecutionControls().model_dump()
@@ -113,9 +122,12 @@ def transaction_costs(
 
     brokerage = capped_brokerage(prior_gross + gross) - capped_brokerage(prior_gross)
     stt = percentage(controls.stt_sell_percent) if side == "SELL" else Decimal("0")
-    exchange_charge = percentage(controls.exchange_transaction_percent)
-    gst = (brokerage + exchange_charge) * Decimal(str(controls.gst_percent)) / Decimal("100")
+    # IPFT is levied by the exchange alongside its transaction charge and is
+    # reported with it, so a fill row needs no new column for it.
+    exchange_charge = percentage(controls.exchange_transaction_percent) + percentage(controls.ipft_percent)
     sebi_charge = percentage(controls.sebi_percent)
+    # GST is charged on brokerage, the exchange's charges and SEBI's fee alike.
+    gst = (brokerage + exchange_charge + sebi_charge) * Decimal(str(controls.gst_percent)) / Decimal("100")
     stamp_duty = percentage(controls.stamp_duty_buy_percent) if side == "BUY" else Decimal("0")
     return CostBreakdown(*(_money(value) for value in (brokerage, stt, exchange_charge, gst, sebi_charge, stamp_duty)))
 
@@ -166,7 +178,9 @@ class PaperOrderManager:
         return PaperExecutionControls.model_validate(setting.value if setting else DEFAULT_PAPER_EXECUTION_CONTROLS)
 
     @staticmethod
-    def _fillable(order: PaperOrder, candle: CompletedCandle) -> tuple[bool, Decimal]:
+    def _fillable(
+        order: PaperOrder, candle: CompletedCandle, band_percent: float = 0.0
+    ) -> tuple[bool, Decimal]:
         if order.order_type == "MARKET":
             return True, candle.open
         if order.order_type == "LIMIT" and (
@@ -174,12 +188,43 @@ class PaperOrderManager:
             or (order.side == "BUY" and candle.low <= order.limit_price)
         ):
             return True, order.limit_price
-        if order.order_type == "STOP" and (
-            (order.side == "SELL" and candle.low <= order.stop_price)
-            or (order.side == "BUY" and candle.high >= order.stop_price)
-        ):
-            return True, order.stop_price
+        if order.order_type == "STOP":
+            return PaperOrderManager._stop_fill(order, candle, band_percent)
         return False, Decimal("0")
+
+    @staticmethod
+    def _stop_fill(order: PaperOrder, candle: CompletedCandle, band_percent: float) -> tuple[bool, Decimal]:
+        """Where a triggered stop fills, if it fills on this candle at all.
+
+        It used to fill at the stop price whatever the candle did. A share that
+        opened 3% through a long's stop was booked out at the stop, a price that
+        never traded: every gap made the paper record look better than the
+        account would have been. Now:
+
+        - traded through from above (opened on the safe side): the stop price;
+        - opened beyond the stop but inside the SL-limit band: the open;
+        - opened beyond the band: only if the candle comes back to the band's
+          edge, and then at that edge -- otherwise no fill, and the order rests.
+        """
+        stop = Decimal(str(order.stop_price))
+        band = Decimal(str(band_percent)) / Decimal("100")
+        if order.side == "SELL":
+            if candle.low > stop:
+                return False, Decimal("0")
+            if candle.open > stop:
+                return True, stop
+            limit = stop * (Decimal("1") - band)
+            if band <= 0 or candle.open >= limit:
+                return True, candle.open
+            return (True, _money(limit)) if candle.high >= limit else (False, Decimal("0"))
+        if candle.high < stop:
+            return False, Decimal("0")
+        if candle.open < stop:
+            return True, stop
+        limit = stop * (Decimal("1") + band)
+        if band <= 0 or candle.open <= limit:
+            return True, candle.open
+        return (True, _money(limit)) if candle.low <= limit else (False, Decimal("0"))
 
     async def _create_exit_orders(self, session: AsyncSession, position: PaperPosition, signal: PaperSignal) -> None:
         orders = list(
@@ -319,7 +364,11 @@ class PaperOrderManager:
                             select(PaperOrder).where(
                                 PaperOrder.paper_signal_id == signal.id,
                                 PaperOrder.id != order.id,
-                                PaperOrder.order_role.in_(["TARGET", "STOP", "TIME", "HALT"]),
+                                # ENTRY as well: a partly filled entry whose
+                                # filled part was just stopped out must not
+                                # fill the rest on the same or a later candle,
+                                # into a position whose stop is already spent.
+                                PaperOrder.order_role.in_(["ENTRY", "TARGET", "STOP", "TIME", "HALT"]),
                                 PaperOrder.status.in_(["PENDING", "PARTIALLY_FILLED"]),
                             )
                         )
@@ -501,14 +550,11 @@ class PaperOrderManager:
         def shared(version: str | None) -> bool:
             return strategy_type_of(version) not in paper_only
 
+        day_positions = list(
+            (await session.scalars(select(PaperPosition).where(PaperPosition.session_date == session_date))).all()
+        )
         session_pnl = sum(
-            (
-                Decimal(str(item.total_pnl or 0))
-                for item in (
-                    await session.scalars(select(PaperPosition).where(PaperPosition.session_date == session_date))
-                ).all()
-                if shared(item.strategy_version)
-            ),
+            (Decimal(str(item.total_pnl or 0)) for item in day_positions if shared(item.strategy_version)),
             start=Decimal("0"),
         )
         verdict = await daily_limits.verdict_for(
@@ -518,11 +564,32 @@ class PaperOrderManager:
             session_pnl=session_pnl,
             controls=trading,
         )
-        if await daily_limits.record_halt(session, session_date, daily_limits.PAPER, verdict) is None:
-            # Either nothing was reached, or the day halted on an earlier candle
-            # and the positions were flattened then.
-            return
+        # record_halt returns None when nothing was reached, or when the day
+        # halted on an earlier candle and was flattened then.
+        if await daily_limits.record_halt(session, session_date, daily_limits.PAPER, verdict) is not None:
+            await self._flatten(session, session_date, day_positions, shared, verdict.reason, verdict.session_pnl)
 
+        # Each paper-only book against the same limit, on its own money. Without
+        # this a paper-only strategy's limit only refused new entries, which for
+        # one that enters everything at 10:10 AM refuses nothing. No latch row:
+        # session_halts holds one PAPER row a day and it belongs to the shared
+        # book. Flattening is idempotent instead -- a position already carrying
+        # a HALT order is not given a second one.
+        for book in paper_only:
+
+            def in_book(version: str | None, book: str = book) -> bool:
+                return strategy_type_of(version) == book
+
+            book_pnl = sum(
+                (Decimal(str(item.total_pnl or 0)) for item in day_positions if in_book(item.strategy_version)),
+                start=Decimal("0"),
+            )
+            reason = daily_limits.evaluate(book_pnl, trading)
+            if reason is not None:
+                await self._flatten(session, session_date, day_positions, in_book, reason, book_pnl)
+
+    async def _flatten(self, session, session_date: date, positions, belongs, reason: str, pnl: Decimal) -> None:  # noqa: ANN001
+        """Cancel the book's resting orders and exit its open positions at market."""
         for order in (
             await session.scalars(
                 select(PaperOrder).where(
@@ -531,25 +598,27 @@ class PaperOrderManager:
                 )
             )
         ).all():
-            if not shared(order.strategy_version):
+            if not belongs(order.strategy_version) or order.order_role == "HALT":
                 continue
             # A halted day must not open anything new, and the brackets on a
             # position being exited would otherwise race the exit.
             order.status = "CANCELLED"
-            order.rejection_reason = verdict.reason
+            order.rejection_reason = reason
 
-        for position in (
-            await session.scalars(
-                select(PaperPosition).where(
-                    PaperPosition.session_date == session_date,
-                    PaperPosition.status.in_(["OPENING", "OPEN", "REDUCING"]),
-                )
-            )
-        ).all():
-            if position.open_quantity <= 0 or not shared(position.strategy_version):
+        for position in positions:
+            if (
+                position.status not in {"OPENING", "OPEN", "REDUCING"}
+                or position.open_quantity <= 0
+                or not belongs(position.strategy_version)
+            ):
                 continue
             signal = await session.get(PaperSignal, position.paper_signal_id)
             if signal is None:
+                continue
+            already = await session.scalar(
+                select(PaperOrder.id).where(PaperOrder.paper_signal_id == signal.id, PaperOrder.order_role == "HALT")
+            )
+            if already is not None:
                 continue
             session.add(
                 PaperOrder(
@@ -565,12 +634,115 @@ class PaperOrderManager:
                     eligible_after=position.opened_at or signal.candle_opened_at,
                     simulation_snapshot={
                         "source": "daily_limit_halt",
-                        "reason": verdict.reason,
-                        "session_pnl": str(verdict.session_pnl),
+                        "reason": reason,
+                        "session_pnl": str(pnl),
                         "paper_only": True,
                     },
                 )
             )
+
+    async def square_off_session(self, session_date: date) -> int:
+        """Close every paper position still open after the square-off, at its last price.
+
+        The 3 PM square-off is an order that fills on the next candle. A share
+        with no candle after 3 PM -- a quiet name, a feed gap, the scanner
+        stopped -- never gets one, and neither does the rest of a TIME order the
+        participation cap filled only partly. Such a position would sit open
+        overnight in a simulation of an intraday account, and its unrealised
+        P&L would stand in the day's total as if it were real. This closes it at
+        the last 1-minute close the day recorded, with the usual slippage, and
+        says so on the order. Run once a day, late in the session. Returns how
+        many positions it closed.
+        """
+        closed = 0
+        settled: list[object] = []
+        async with SessionLocal() as session:
+            controls = await self._controls(session)
+            positions = list(
+                (
+                    await session.scalars(
+                        select(PaperPosition)
+                        .where(
+                            PaperPosition.session_date == session_date,
+                            PaperPosition.status.in_(["OPENING", "OPEN", "REDUCING"]),
+                        )
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            for position in positions:
+                signal = await session.get(PaperSignal, position.paper_signal_id)
+                if signal is None:
+                    continue
+                for order in (
+                    await session.scalars(
+                        select(PaperOrder).where(
+                            PaperOrder.paper_signal_id == signal.id,
+                            PaperOrder.status.in_(["PENDING", "PARTIALLY_FILLED"]),
+                        )
+                    )
+                ).all():
+                    order.status = "CANCELLED"
+                    order.rejection_reason = "End-of-day paper square-off"
+                if position.open_quantity <= 0:
+                    continue
+                last = await session.scalar(
+                    select(MarketCandle)
+                    .where(
+                        MarketCandle.instrument_token == position.instrument_token,
+                        MarketCandle.session_date == session_date,
+                        MarketCandle.timeframe_seconds == 60,
+                    )
+                    .order_by(MarketCandle.opened_at.desc())
+                    .limit(1)
+                )
+                if last is None:
+                    continue
+                candle = CompletedCandle(
+                    instrument_token=last.instrument_token,
+                    timeframe_seconds=last.timeframe_seconds,
+                    opened_at=last.opened_at,
+                    closed_at=last.closed_at,
+                    open=last.close,
+                    high=last.close,
+                    low=last.close,
+                    close=last.close,
+                    volume=last.volume,
+                    tick_count=last.tick_count,
+                )
+                order = PaperOrder(
+                    paper_signal_id=signal.id,
+                    client_order_id=f"paper:{signal.id}:eod",
+                    instrument_token=signal.instrument_token,
+                    session_date=session_date,
+                    strategy_version=signal.strategy_version,
+                    side=exit_side(signal.side),
+                    order_type="MARKET",
+                    order_role="TIME",
+                    quantity=position.open_quantity,
+                    filled_quantity=0,
+                    fee_total=Decimal("0"),
+                    eligible_after=last.opened_at,
+                    simulation_snapshot={
+                        "source": "end_of_day_square_off",
+                        "reason": "No fill after the square-off time; closed at the day's last recorded price",
+                        "paper_only": True,
+                    },
+                )
+                session.add(order)
+                await session.flush()
+                if await self._apply_fill(
+                    session, order, signal, candle, controls, last.close, position.open_quantity
+                ):
+                    settled.append(signal.id)
+                closed += 1
+            await session.commit()
+        if settled:
+            from app.services.risk_engine import PaperRiskEngine
+
+            for signal_id in settled:
+                await PaperRiskEngine().settle_signal(signal_id)
+        return closed
 
     async def process_completed_candle(self, candle: CompletedCandle) -> None:
         async with SessionLocal() as session:
@@ -614,7 +786,11 @@ class PaperOrderManager:
             for order in orders:
                 if order.order_role in EXIT_ROLES and order.paper_signal_id in processed_exit_signals:
                     continue
-                fillable, reference = self._fillable(order, candle)
+                # An earlier order on this candle may have settled this one: an
+                # exit that closed the position cancels the rest of its entry.
+                if order.status not in {"PENDING", "PARTIALLY_FILLED"}:
+                    continue
+                fillable, reference = self._fillable(order, candle, controls.stop_limit_band_percent)
                 if not fillable:
                     continue
                 signal = await session.get(PaperSignal, order.paper_signal_id)

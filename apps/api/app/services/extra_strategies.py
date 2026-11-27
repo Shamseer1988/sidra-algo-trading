@@ -750,10 +750,22 @@ def _score_cpr_breakout(side: Side, levels: dict, benchmark: dict) -> dict[str, 
 
 SIP_MOMENTUM_VERSION = "sip-momentum-v1"
 SIP_DONE = "SIP_DONE"
-SIP_STATES = {AWAITING, SIP_DONE}
+# A share that qualified at 10:10 and is waiting for the ranking. The side is
+# in the state because the state is all that survives from one candle to the
+# next.
+SIP_CANDIDATE_LONG = "SIP_CANDIDATE_LONG"
+SIP_CANDIDATE_SHORT = "SIP_CANDIDATE_SHORT"
+SIP_CANDIDATE_STATES = {SIP_CANDIDATE_LONG, SIP_CANDIDATE_SHORT}
+SIP_STATES = {AWAITING, SIP_DONE, *SIP_CANDIDATE_STATES}
 # The decision candle is the one that spans this minute: for 1-minute candles,
-# 10:09-10:10, so the trade is entered at about 10:10.
+# 10:09-10:10. Qualifying shares become candidates on it; the selected ones are
+# entered on their next candle. That is how every share is compared with every
+# other before any is taken: candles arrive one share at a time, so the 10:09
+# candle of one share cannot see another's.
 SIP_DECISION_TIME = "10:10"
+# A selected share with no candle by then is not chased.
+SIP_SELECTION_CUTOFF = "10:15"
+SIP_TIMEFRAME_SECONDS = 60
 DEFAULT_SIP_MIN_SESSION_RVOL = Decimal("2.5")
 DEFAULT_SIP_MIN_MOVE_PERCENT = Decimal("1.0")
 DEFAULT_SIP_STOP_DAILY_ATR = Decimal("0.5")
@@ -771,10 +783,17 @@ def _control(controls: dict, key: str, default: Decimal) -> Decimal:
 def sip_rank(session_rvol: Decimal, move_percent: Decimal) -> Decimal:
     """How strongly a share is in play: unusual volume times the size of its move.
 
-    The research ranked candidates by this; the signal records it so the paper
-    record can later be cut to the top one or top three of each day.
+    Candidates are ranked by this at 10:10 and only the top
+    ``max_trades_per_day`` are entered.
     """
     return (session_rvol * abs(move_percent)).quantize(Decimal("0.01"))
+
+
+def _sip_breakdown(rvol: Decimal, move: Decimal) -> dict[str, int]:
+    return {
+        "session_volume": _round_points(_clamp(rvol, Decimal("0"), Decimal("10")) * Decimal("5"), Decimal("50")),
+        "move_from_close": _round_points(_clamp(abs(move), Decimal("0"), Decimal("5")) * Decimal("10"), Decimal("50")),
+    }
 
 
 def evaluate_sip_momentum(
@@ -784,16 +803,33 @@ def evaluate_sip_momentum(
     controls: dict,
     prior_state: str = AWAITING,
 ) -> StrategyDecision:
-    """Decide once, on the candle spanning 10:10 AM, and never again that day."""
+    """Qualify once on the candle spanning 10:10 AM; enter on the next one if ranked in.
+
+    The selection arrives in the controls from the scanner, which alone sees
+    every share: ``sip_selected`` True or False, with ``sip_candidate`` (the
+    facts recorded at 10:10) and ``sip_position``. When it is absent -- a
+    backtest, which replays one share at a time -- every candidate is taken.
+    """
     if prior_state == SIGNALLED:
         return StrategyDecision(next_state=SIGNALLED, reason="Instrument already signalled this session")
     if prior_state not in SIP_STATES:
         return StrategyDecision(next_state=AWAITING, reason="Unknown strategy state was reset")
     if prior_state == SIP_DONE:
         return StrategyDecision(next_state=SIP_DONE, reason="Today's 10:10 AM decision has been made")
+    # Every threshold here -- the 10:09 candle, the per-minute volume baseline
+    # -- is defined on 1-minute candles. On any other timeframe it would quietly
+    # be a different strategy, so it does not run at all.
+    if candle.timeframe_seconds != SIP_TIMEFRAME_SECONDS:
+        return StrategyDecision(
+            next_state=prior_state,
+            reason=f"Runs on 1-minute candles only, not {candle.timeframe_seconds}-second ones",
+        )
+    if prior_state in SIP_CANDIDATE_STATES:
+        return _sip_enter_if_selected(candle, indicators, controls, prior_state)
+
     opened, closed = _hhmm(candle.opened_at), _hhmm(candle.closed_at)
     if closed < SIP_DECISION_TIME:
-        return StrategyDecision(next_state=AWAITING, reason="Waiting for the 10:10 AM decision")
+        return StrategyDecision(next_state=AWAITING, reason="Awaiting the 10:10 AM decision")
     if opened >= SIP_DECISION_TIME:
         return StrategyDecision(next_state=SIP_DONE, reason="No candle spanned 10:10 AM; no trade today")
 
@@ -832,15 +868,53 @@ def evaluate_sip_momentum(
         return StrategyDecision(next_state=SIP_DONE, reason=refusal.reason)
 
     rank = sip_rank(rvol, move)
-    breakdown = {
-        "session_volume": _round_points(_clamp(rvol, Decimal("0"), Decimal("10")) * Decimal("5"), Decimal("50")),
-        "move_from_close": _round_points(_clamp(abs(move), Decimal("0"), Decimal("5")) * Decimal("10"), Decimal("50")),
-    }
+    breakdown = _sip_breakdown(rvol, move)
     score = sum(breakdown.values())
     if score < int(controls["minimum_score"]):
         return StrategyDecision(
             next_state=SIP_DONE, score=score, score_breakdown=breakdown, reason=f"Below score threshold: {facts}"
         )
+    return StrategyDecision(
+        next_state=SIP_CANDIDATE_LONG if side == "LONG" else SIP_CANDIDATE_SHORT,
+        score=score,
+        score_breakdown=breakdown,
+        reason=f"Awaiting the 10:10 AM ranking: {facts}, rank {rank}",
+        details={
+            "rank": float(rank),
+            "session_rvol": float(rvol),
+            "move_percent": float(move.quantize(Decimal("0.0001"))),
+            "side": side,
+            "decision_close": float(candle.close),
+            "decided_at": candle.closed_at.isoformat(),
+        },
+    )
+
+
+def _sip_enter_if_selected(
+    candle: CompletedCandle, indicators: dict, controls: dict, prior_state: str
+) -> StrategyDecision:
+    side: Side = "LONG" if prior_state == SIP_CANDIDATE_LONG else "SHORT"
+    candidate = controls.get("sip_candidate") if isinstance(controls.get("sip_candidate"), dict) else {}
+    if _hhmm(candle.closed_at) > SIP_SELECTION_CUTOFF:
+        return StrategyDecision(next_state=SIP_DONE, reason="Selection window closed before an entry candle arrived")
+    selected = controls.get("sip_selected")
+    position, of = controls.get("sip_position"), controls.get("sip_candidates")
+    standing = f"#{position} of {of}" if position and of else "unranked"
+    if selected is False:
+        return StrategyDecision(
+            next_state=SIP_DONE,
+            reason=(
+                f"Not in today's top {controls.get('sip_top', '?')} by rank "
+                f"({standing}, rank {candidate.get('rank')})"
+            ),
+        )
+    daily_atr = _number(indicators, "daily_atr")
+    if daily_atr is None or daily_atr <= 0:
+        return StrategyDecision(next_state=SIP_DONE, reason="Daily ATR is not available at entry")
+    breakdown: dict[str, int] = {}
+    if "session_rvol" in candidate and "move_percent" in candidate:
+        breakdown = _sip_breakdown(Decimal(str(candidate["session_rvol"])), Decimal(str(candidate["move_percent"])))
+    score = sum(breakdown.values())
     offset = daily_atr * _control(controls, "sip_stop_daily_atr", DEFAULT_SIP_STOP_DAILY_ATR)
     structural_stop = candle.close - offset if side == "LONG" else candle.close + offset
     plan = plan_trade(side, candle.close, structural_stop, indicators, controls)
@@ -849,6 +923,11 @@ def evaluate_sip_momentum(
             next_state=SIP_DONE, score=score, score_breakdown=breakdown, reason="Risk plan is invalid"
         )
     stop, target, quantity, risk_amount = plan
+    facts = (
+        f"volume {candidate.get('session_rvol')}x usual, move {candidate.get('move_percent')}% from yesterday's close"
+        if candidate
+        else "the 10:10 facts were not available"
+    )
     return StrategyDecision(
         next_state=SIGNALLED,
         side=side,
@@ -859,5 +938,6 @@ def evaluate_sip_momentum(
         risk_amount=risk_amount,
         score=score,
         score_breakdown=breakdown,
-        reason=f"Paper signal confirmed: {facts}, rank {rank}",
+        reason=f"Paper signal confirmed: {facts}, rank {candidate.get('rank')} ({standing})",
+        details={**candidate, "position": position, "candidates": of},
     )

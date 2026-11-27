@@ -386,3 +386,36 @@ async def test_the_shared_halt_does_not_flatten_a_paper_only_position(sip_paper_
     assert [order.order_role for order in halts] == []
     async with SessionLocal() as session:
         assert await session.scalar(select(SessionHalt).where(SessionHalt.session_date == SESSION)) is not None
+
+
+async def test_a_paper_only_book_past_its_loss_limit_is_flattened(sip_paper_only) -> None:  # noqa: ANN001
+    """Refusing new entries is not enough for a strategy that enters everything at 10:10."""
+    from app.db.models import PaperOrder
+    from app.services.paper_execution import PaperOrderManager
+
+    await controls(daily_loss_limit=1000.0, maximum_daily_risk_percent=10.0)
+    await book(realized="0", unrealized="-1100", status="OPEN")
+    await retag(f"{SIP}@1")
+    manager = PaperOrderManager()
+    try:
+        for _ in range(2):  # a second candle must not add a second exit
+            async with SessionLocal() as session:
+                await manager._halt_if_the_day_is_over(session, SESSION)
+                await session.commit()
+        async with SessionLocal() as session:
+            halts = list(
+                (
+                    await session.scalars(
+                        select(PaperOrder).where(PaperOrder.instrument_token == TOKEN, PaperOrder.order_role == "HALT")
+                    )
+                ).all()
+            )
+            shared_halt = await session.scalar(select(SessionHalt).where(SessionHalt.session_date == SESSION))
+        assert len(halts) == 1 and halts[0].order_type == "MARKET"
+        assert halts[0].simulation_snapshot["reason"] == "Daily loss limit reached"
+        # The shared book lost nothing and is not halted by it.
+        assert shared_halt is None
+    finally:
+        async with SessionLocal() as session:
+            await session.execute(delete(PaperOrder).where(PaperOrder.instrument_token == TOKEN))
+            await session.commit()
