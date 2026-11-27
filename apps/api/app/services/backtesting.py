@@ -8,7 +8,7 @@ is filled from the following candle, so future bars cannot influence a decision.
 import json
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from hashlib import sha256
 
@@ -331,6 +331,7 @@ def run_completed_candle_backtest(
     settings: Settings,
     *,
     all_signals: bool = False,
+    evaluate_from: date | None = None,
 ) -> BacktestResult:
     """Replay immutable candles with explicit next-candle fills and no future indicators.
 
@@ -349,6 +350,11 @@ def run_completed_candle_backtest(
 
     Exits use the strategy's own rules capped at the account's square-off
     (``session_square_off_time``), the way ``live_exit_manager`` caps them.
+
+    ``evaluate_from`` replays only sessions on or after that date. Earlier
+    candles still feed the daily history and the volume baseline, exactly as
+    they would in a longer run, so a long range can be replayed a month at a
+    time (``research_replay``) with the same trades as one pass.
     """
     normalized = {
         key: sorted(value, key=lambda candle: candle.opened_at) for key, value in candles_by_instrument.items()
@@ -366,6 +372,8 @@ def run_completed_candle_backtest(
         for session_date, session_rows in sorted(by_date.items()):
             benchmark = benchmark_by_date.get(session_date, [])
             if len(session_rows) < 3 or not benchmark:
+                continue
+            if evaluate_from is not None and session_date < evaluate_from:
                 continue
             prior_daily = [daily for day, daily in sorted(daily_by_date.items()) if day < session_date][
                 -settings.daily_history_sessions :

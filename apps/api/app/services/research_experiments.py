@@ -44,14 +44,13 @@ from app.services.backtest_sweep import (
     _metrics,
     _settings_namespace,
     build_combinations,
-    run_parameter_sweep,
     validate_grid,
     walk_forward,
 )
 from app.services.build_info import source_fingerprint
 from app.services.paper_execution import PaperExecutionControls
-from app.services.portfolio_simulation import run_portfolio_backtest
-from app.services.research_data import read_dataset, replay_calendar
+from app.services.research_data import benchmark_days, replay_calendar
+from app.services.research_replay import ReplayGroup, replay_taken, warmup_days
 from app.services.strategy_registry import StrategyConfiguration
 
 DRAFT = "DRAFT"
@@ -66,7 +65,9 @@ SELECTION_JOB = "experiment_selection"
 HOLDOUT_JOB = "experiment_holdout"
 
 # Calendar days of bars loaded before a period so daily indicators (ATR, CPR,
-# prior close) exist on its first session. Trades in the warm-up are discarded.
+# prior close) exist on its first session; ``research_replay.warmup_days``
+# raises it when the stored indicator settings look back further. Sessions in
+# the warm-up are history only and are never replayed.
 WARMUP_DAYS = 70
 MAXIMUM_VARIANTS = 60
 
@@ -201,13 +202,48 @@ def _trade_rows(trades: list, limit: int = 400) -> list[dict]:
     ]
 
 
-async def _load(session: AsyncSession, experiment: ResearchExperiment, start: date, end: date):
-    dataset, by_instrument, benchmark = await read_dataset(
-        session, experiment.dataset_id, list(experiment.instruments), start, end
-    )
-    if not benchmark:
+async def _dataset_and_days(
+    session: AsyncSession, experiment: ResearchExperiment, start: date, end: date
+) -> tuple[ResearchDataset, dict[date, str]]:
+    """The experiment's dataset and its benchmark sessions from ``start`` to ``end`` ("UP"/"DOWN")."""
+    dataset = await session.get(ResearchDataset, experiment.dataset_id)
+    if dataset is None:
+        raise ExperimentError("The experiment's dataset no longer exists.")
+    days = await benchmark_days(session, dataset, start, end)
+    if not days:
         raise ExperimentError("The dataset has no benchmark bars for this period.")
-    return dataset, by_instrument, benchmark
+    return dataset, days
+
+
+def _groups(
+    base: StrategyConfiguration, controls: dict, settings: Any, grid: dict, combos: list[dict]
+) -> list[ReplayGroup]:
+    """The replays the grid needs: one shared pass when it varies only strategy fields, else one per combination.
+
+    The same rule ``run_parameter_sweep`` follows: controls and indicator
+    periods are fixed for a whole replay, so a combination changing them
+    needs a replay of its own.
+    """
+    variants = []
+    for index, combo in enumerate(combos):
+        strategy, controls_variant, settings_variant = apply_combination(base, controls, settings, combo)
+        strategy = strategy.model_copy(update={"id": f"{base.id}#sweep{index}"})
+        variants.append((index, strategy, controls_variant, settings_variant))
+    if len(combos) > 1 and set(grid) <= STRATEGY_PARAMS:
+        return [
+            ReplayGroup(
+                strategies=[strategy for _, strategy, _, _ in variants],
+                controls=dict(controls),
+                settings=_settings_namespace(settings, {}),
+                index_of={strategy.id: index for index, strategy, _, _ in variants},
+            )
+        ]
+    return [
+        ReplayGroup(
+            strategies=[strategy], controls=controls_variant, settings=settings_variant, index_of={strategy.id: index}
+        )
+        for index, strategy, controls_variant, settings_variant in variants
+    ]
 
 
 # --- the selection job ------------------------------------------------------------------
@@ -222,28 +258,29 @@ async def run_selection(session: AsyncSession, payload: dict, settings: Any, use
     measured_with = await effective_settings(session, settings)
     base = StrategyConfiguration.model_validate(experiment.strategy)
     execution = PaperExecutionControls.model_validate(experiment.execution)
-    warm_start = experiment.selection_start - timedelta(days=WARMUP_DAYS)
-    # Read up to selection_end and no further: the holdout is never loaded here.
-    dataset, by_instrument, benchmark = await _load(session, experiment, warm_start, experiment.selection_end)
-    sessions = sorted({candle.session_date for candle in benchmark})
+    validate_grid(experiment.parameter_grid)
+    combos = build_combinations(experiment.parameter_grid, MAXIMUM_VARIANTS)
+    groups = _groups(base, dict(experiment.controls), measured_with, experiment.parameter_grid, combos)
+    warm_start = experiment.selection_start - timedelta(days=max(warmup_days(group.settings) for group in groups))
+    # Nothing after selection_end is read: the holdout is never loaded here.
+    dataset, days = await _dataset_and_days(session, experiment, warm_start, experiment.selection_end)
+    sessions = list(days)
     selection_sessions = [day for day in sessions if day >= experiment.selection_start]
 
     with replay_calendar(sessions):
-        sweep = run_parameter_sweep(
-            base,
-            dict(experiment.controls),
+        taken, replay_stats = await replay_taken(
+            session,
+            dataset,
+            list(experiment.instruments),
+            experiment.selection_start,
+            experiment.selection_end,
+            groups,
             execution,
-            measured_with,
-            by_instrument,
-            benchmark,
-            experiment.parameter_grid,
-            maximum_combinations=MAXIMUM_VARIANTS,
         )
-    combos = build_combinations(experiment.parameter_grid, MAXIMUM_VARIANTS)
     capital = Decimal(str(experiment.controls["account_capital"]))
     trades_by_index = {
-        index: _in_period(trades, experiment.selection_start, experiment.selection_end)
-        for index, trades in sweep.trades_by_index.items()
+        index: _in_period(taken.get(index, []), experiment.selection_start, experiment.selection_end)
+        for index in range(len(combos))
     }
     per_variant = []
     for index, combo in enumerate(combos):
@@ -267,11 +304,12 @@ async def run_selection(session: AsyncSession, payload: dict, settings: Any, use
         for trade in trades_by_index[fold.chosen_index]
         if fold.test_start <= _date(trade.session_date) <= fold.test_end
     ]
-    directions = stats.benchmark_day_direction(benchmark)
+    directions = days
     variance = stats.sharpe_variance([[t.realized_r for t in trades] for trades in trades_by_index.values()])
     summary = {
         "dataset": {"id": str(dataset.id), "name": dataset.name, "price_adjustment": dataset.price_adjustment},
         "selection_sessions": len(selection_sessions),
+        "replay": replay_stats.as_dict(),
         "variants_tested": len(combos),
         "chosen": {"index": chosen["index"], "parameters": chosen["parameters"]},
         "per_variant": per_variant,
@@ -320,15 +358,21 @@ async def run_holdout(session: AsyncSession, payload: dict, settings: Any, user_
         base, dict(experiment.controls), measured_with, experiment.chosen_parameters or {}
     )
     execution = PaperExecutionControls.model_validate(experiment.execution)
-    dataset, by_instrument, benchmark = await _load(
-        session, experiment, experiment.holdout_start - timedelta(days=WARMUP_DAYS), experiment.holdout_end
-    )
-    sessions = sorted({candle.session_date for candle in benchmark})
+    warm_start = experiment.holdout_start - timedelta(days=warmup_days(settings_variant))
+    dataset, days = await _dataset_and_days(session, experiment, warm_start, experiment.holdout_end)
+    sessions = list(days)
+    group = ReplayGroup(strategies=[strategy], controls=controls, settings=settings_variant, index_of={strategy.id: 0})
     with replay_calendar(sessions):
-        result, outcome = run_portfolio_backtest(
-            by_instrument, benchmark, [strategy], controls, execution, settings_variant
+        taken, replay_stats = await replay_taken(
+            session,
+            dataset,
+            list(experiment.instruments),
+            experiment.holdout_start,
+            experiment.holdout_end,
+            [group],
+            execution,
         )
-    trades = _in_period(list(result.trades), experiment.holdout_start, experiment.holdout_end)
+    trades = _in_period(taken.get(0, []), experiment.holdout_start, experiment.holdout_end)
     summary_stats = stats.summary(t.realized_r for t in trades)
     interval = summary_stats.get("ci95_mean_r")
     mean = summary_stats.get("mean_r")
@@ -346,8 +390,9 @@ async def run_holdout(session: AsyncSession, payload: dict, settings: Any, user_
         "metrics": _metrics(trades, capital),
         "deflated_sharpe": stats.deflated_sharpe([t.realized_r for t in trades], trials=experiment.variants),
         "cost_sensitivity": stats.cost_sensitivity(trades),
-        "regimes": stats.regime_split(trades, stats.benchmark_day_direction(benchmark)),
-        "portfolio": outcome.summary(),
+        "regimes": stats.regime_split(trades, days),
+        "portfolio": replay_stats.portfolio_summary(0),
+        "replay": replay_stats.as_dict(),
         "threshold_mean_r": float(experiment.success_mean_r),
         "verdict": experiment.verdict,
         "verdict_rule": "mean R >= the registered threshold AND the 95% interval of mean R is above zero",

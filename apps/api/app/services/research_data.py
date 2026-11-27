@@ -411,41 +411,68 @@ def _load(root: Path, row: ResearchDatasetFile) -> list[Bar]:
     return decode_bars(payload)
 
 
+def _files_by_key(files: list[ResearchDatasetFile]) -> dict[str, list[ResearchDatasetFile]]:
+    grouped: dict[str, list[ResearchDatasetFile]] = defaultdict(list)
+    for row in files:
+        grouped[row.instrument_key].append(row)
+    return grouped
+
+
+def _day_checks(root: Path, rows: list[ResearchDatasetFile], *, daily: bool) -> dict[date, DayCheck]:
+    """One instrument's per-session checks, one monthly file in memory at a time.
+
+    A session's bars all sit in the file of its month (files are cut by local
+    date), so checking file by file gives the same answer as the whole series.
+    """
+    checks: dict[date, DayCheck] = {}
+    for row in rows:
+        for day, bars in by_session(_load(root, row)).items():
+            checks[day] = check_day(bars, daily=daily)
+    return checks
+
+
 async def compute_coverage(session: AsyncSession, dataset: ResearchDataset, *, root: Path | None = None) -> int:
-    """Rebuild the dataset's coverage rows. Returns how many were written."""
+    """Rebuild the dataset's coverage rows. Returns how many were written.
+
+    One instrument at a time, written with a bulk insert: every bar of a
+    200-share minute dataset (tens of millions), or every coverage row as an
+    ORM object (a quarter of a million), does not fit in the research worker.
+    """
+    from sqlalchemy import insert
+
     root = root or data_root()
     daily = dataset.timeframe == "day"
-    files = await _files(session, dataset.id)
-    per_key: dict[str, list[Bar]] = defaultdict(list)
-    for row in files:
-        per_key[row.instrument_key].extend(_load(root, row))
+    grouped = _files_by_key(await _files(session, dataset.id))
     benchmark_days = {
-        day: check_day(bars, daily=daily).bars
-        for day, bars in by_session(per_key.get(dataset.benchmark_key, [])).items()
+        day: check.bars for day, check in _day_checks(root, grouped.get(dataset.benchmark_key, []), daily=daily).items()
     }
 
     await session.execute(delete(ResearchDatasetCoverage).where(ResearchDatasetCoverage.dataset_id == dataset.id))
     written = 0
-    for key, bars in per_key.items():
-        days = by_session(bars)
-        for day in sorted(set(days) | set(benchmark_days)):
-            check = check_day(days.get(day, []), daily=daily)
+    empty = DayCheck(0, 0, 0, 0, 0)
+    for key, rows in grouped.items():
+        checks = _day_checks(root, rows, daily=daily)
+        values = []
+        for day in sorted(set(checks) | set(benchmark_days)):
+            check = checks.get(day, empty)
             expected = benchmark_days.get(day, 0)
-            session.add(
-                ResearchDatasetCoverage(
-                    dataset_id=dataset.id,
-                    instrument_key=key,
-                    session_date=day,
-                    bars=check.bars,
-                    expected_bars=expected,
-                    missing_bars=max(0, expected - check.bars),
-                    duplicates=check.duplicates,
-                    bad_ohlc=check.bad_ohlc,
-                    zero_volume=check.zero_volume,
-                    outside_session=check.outside_session,
-                )
+            values.append(
+                {
+                    "dataset_id": dataset.id,
+                    "instrument_key": key,
+                    "session_date": day,
+                    "bars": check.bars,
+                    "expected_bars": expected,
+                    "missing_bars": max(0, expected - check.bars),
+                    "duplicates": check.duplicates,
+                    "bad_ohlc": check.bad_ohlc,
+                    "zero_volume": check.zero_volume,
+                    "outside_session": check.outside_session,
+                }
             )
-            written += 1
+        if values:
+            await session.execute(insert(ResearchDatasetCoverage), values)
+            written += len(values)
     await session.flush()
     return written
 
@@ -469,6 +496,20 @@ async def finalize(session: AsyncSession, dataset: ResearchDataset, *, root: Pat
     return digest
 
 
+# A loaded CompletedCandle of minute data, measured: about 712 bytes with its
+# Decimals. The research worker has 1 GB, shared with whatever else it runs.
+CANDLE_BYTES = 712
+READ_LIMIT = 500_000  # about 340 MB of candles
+
+
+class DatasetTooLarge(ValueError):
+    """The run would load more candles than the research worker can hold."""
+
+
+def _month_overlaps(month: date, start: date, end: date) -> bool:
+    return date(start.year, start.month, 1) <= month <= end
+
+
 async def read_dataset(
     session: AsyncSession,
     dataset_id: UUID,
@@ -477,18 +518,46 @@ async def read_dataset(
     end: date,
     *,
     root: Path | None = None,
+    max_candles: int | None = READ_LIMIT,
 ) -> tuple[ResearchDataset, dict[str, list[CompletedCandle]], list[CompletedCandle]]:
-    """A dataset's bars as completed candles, for the backtester. Repeated timestamps are dropped."""
+    """A dataset's bars as completed candles, for the backtester. Repeated timestamps are dropped.
+
+    Everything is held in memory at once, so a run larger than ``max_candles``
+    is refused before anything is read (``DatasetTooLarge``).
+    """
     root = root or data_root()
     dataset = await session.get(ResearchDataset, dataset_id)
     if dataset is None:
         raise ValueError("Dataset not found")
-    seconds = TIMEFRAMES[dataset.timeframe][2]
+    grouped = _files_by_key(await _files(session, dataset.id))
     wanted = set(instrument_keys) | {dataset.benchmark_key}
-    first_month = date(start.year, start.month, 1)
-    candles: dict[str, list[CompletedCandle]] = {key: [] for key in wanted}
-    for row in await _files(session, dataset.id):
-        if row.instrument_key not in wanted or row.month < first_month or row.month > end:
+    if max_candles is not None:
+        planned = sum(
+            row.rows for key in wanted for row in grouped.get(key, []) if _month_overlaps(row.month, start, end)
+        )
+        if planned > max_candles:
+            raise DatasetTooLarge(
+                f"This range holds about {planned:,} candles; one run may load at most {max_candles:,} "
+                f"(roughly {max_candles * CANDLE_BYTES // 2**20} MB). Use fewer shares or a shorter range, "
+                "or a pre-registered experiment, which replays a month at a time."
+            )
+    candles = {key: window(root, dataset, grouped.get(key, []), start, end) for key in sorted(wanted)}
+    benchmark = candles.pop(dataset.benchmark_key, [])
+    return dataset, candles, benchmark
+
+
+def window(
+    root: Path, dataset: ResearchDataset, rows: list[ResearchDatasetFile], start: date, end: date
+) -> list[CompletedCandle]:
+    """One instrument's bars from ``start`` to ``end`` as completed candles, oldest first.
+
+    Only the monthly files that overlap the window are read. Repeated
+    timestamps are dropped.
+    """
+    seconds = TIMEFRAMES[dataset.timeframe][2]
+    candles: list[CompletedCandle] = []
+    for row in sorted(rows, key=lambda item: item.month):
+        if not _month_overlaps(row.month, start, end):
             continue
         seen: set[datetime] = set()
         for bar in _load(root, row):
@@ -497,7 +566,7 @@ async def read_dataset(
                 continue
             seen.add(bar.at)
             opened = bar.at.astimezone(UTC)
-            candles[row.instrument_key].append(
+            candles.append(
                 CompletedCandle(
                     instrument_token=row.instrument_key,
                     timeframe_seconds=seconds,
@@ -511,9 +580,29 @@ async def read_dataset(
                     tick_count=0,
                 )
             )
-    benchmark = sorted(candles.pop(dataset.benchmark_key, []), key=lambda candle: candle.opened_at)
-    by_instrument = {key: sorted(rows, key=lambda candle: candle.opened_at) for key, rows in candles.items()}
-    return dataset, by_instrument, benchmark
+    candles.sort(key=lambda candle: candle.opened_at)
+    return candles
+
+
+async def benchmark_days(
+    session: AsyncSession, dataset: ResearchDataset, start: date, end: date, *, root: Path | None = None
+) -> dict[date, str]:
+    """Each benchmark session from ``start`` to ``end``: "UP" or "DOWN", close against open.
+
+    Read a month at a time, so the session list and the regime of a long
+    period never need the whole benchmark series in memory.
+    """
+    root = root or data_root()
+    rows = (_files_by_key(await _files(session, dataset.id))).get(dataset.benchmark_key, [])
+    days: dict[date, str] = {}
+    for row in sorted(rows, key=lambda item: item.month):
+        if not _month_overlaps(row.month, start, end):
+            continue
+        for day, bars in by_session(_load(root, row)).items():
+            if start <= day <= end and bars:
+                ordered = sorted(bars, key=lambda bar: bar.at)
+                days[day] = "UP" if ordered[-1].close >= ordered[0].open else "DOWN"
+    return dict(sorted(days.items()))
 
 
 # --- the calendar a historical replay needs ----------------------------------------------
@@ -533,9 +622,29 @@ class DatasetCalendar(TradingCalendar):
     rule coverage uses. Hours are the regular 09:15-15:30.
     """
 
+    # Answers remembered at most; a replay revisits the same minutes, never this many.
+    REMEMBERED = 200_000
+
     def __init__(self, sessions: Iterable[date]) -> None:
         super().__init__()
         self._dataset_sessions = frozenset(sessions)
+        self._open_at: dict[datetime, bool] = {}
+
+    def is_open(self, timestamp: datetime) -> bool:
+        """Remembered per instant: this calendar never changes during a replay.
+
+        ``session_candles`` re-checks a session's whole history for every new
+        candle, so a 375-minute session asks about each minute ~190 times;
+        that was 70% of a replay's time (profiled 28 Nov 2026). The answer
+        depends on the instant alone.
+        """
+        known = self._open_at.get(timestamp)
+        if known is None:
+            if len(self._open_at) >= self.REMEMBERED:
+                self._open_at.clear()
+            known = super().is_open(timestamp)
+            self._open_at[timestamp] = known
+        return known
 
     def session_for(self, trading_date: date) -> TradingSession | None:
         return TradingSession(trading_date=trading_date) if trading_date in self._dataset_sessions else None

@@ -12,6 +12,7 @@ The claims:
 * a stop hit inside the entry candle now counts.
 """
 
+from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -33,6 +34,15 @@ from app.services import research_experiments as rx
 from app.services import research_statistics as stats
 from app.services.strategy_registry import StrategyConfiguration
 from tests.test_backtest_sweep import DAYS, _controls, _history, _strategy
+from tests.test_research_replay import _store
+
+SHARE = "NSE_EQ|TEST"
+BENCHMARK = "NSE_INDEX|Nifty 50"
+
+
+def _rekey(rows, key):
+    return [replace(row, instrument_token=key) for row in rows]
+
 
 # --- statistics ---------------------------------------------------------------------------------
 
@@ -104,8 +114,9 @@ def test_a_stop_inside_the_entry_candle_counts():
 
 
 @pytest.fixture
-async def world():
-    """A hypothesis and a COMPLETE dataset row covering the sweep fixture's four days."""
+async def world(tmp_path, monkeypatch):
+    """A hypothesis and a COMPLETE dataset, on disk, holding the sweep fixture's four days."""
+    monkeypatch.setenv("RESEARCH_DATA_DIR", str(tmp_path))
 
     async def wipe():
         async with SessionLocal() as session:
@@ -127,7 +138,7 @@ async def world():
             source="test",
             timeframe="1minute",
             price_adjustment="RAW",
-            benchmark_key="NSE:26000",
+            benchmark_key=BENCHMARK,
             start_date=date(2026, 1, 1),
             end_date=date(2026, 1, 31),
             status="COMPLETE",
@@ -136,6 +147,10 @@ async def world():
             provenance={},
         )
         session.add(dataset)
+        await session.flush()
+        by_instrument, benchmark = _history()
+        stored = {SHARE: _rekey(by_instrument["NSE:TEST"], SHARE), BENCHMARK: _rekey(benchmark, BENCHMARK)}
+        await _store(session, dataset, stored, tmp_path)
         await session.commit()
         ids = SimpleNamespace(hypothesis=hypothesis.id, dataset=dataset.id)
     yield ids
@@ -147,7 +162,7 @@ def _fields(ids, **over):
         "hypothesis_id": ids.hypothesis,
         "name": f"exp-{datetime.now().timestamp()}",
         "dataset_id": ids.dataset,
-        "instruments": ["NSE:TEST"],
+        "instruments": [SHARE],
         "strategy": _strategy().model_dump(mode="json"),
         "controls": {**_controls(), "account_capital": 100000},
         "execution": {
@@ -201,16 +216,22 @@ async def test_registering_freezes_and_queues_once(world):
     assert jobs[0].payload == {"experiment_id": str(experiment.id)}
 
 
-def _fake_reader(calls):
-    by_instrument, benchmark = _history()
+def _spy_reads(monkeypatch, calls):
+    """Record the last day of every range the experiment reads, candles and benchmark alike."""
+    from app.services import research_replay
 
-    async def read(session, dataset_id, instruments, start, end, root=None):
+    real_window, real_days = research_replay.window, rx.benchmark_days
+
+    def window(root, dataset, rows, start, end):
         calls.append((start, end))
-        keep = lambda rows: [c for c in rows if start <= c.session_date <= end]  # noqa: E731
-        dataset = await session.get(ResearchDataset, dataset_id)
-        return dataset, {k: keep(v) for k, v in by_instrument.items()}, keep(benchmark)
+        return real_window(root, dataset, rows, start, end)
 
-    return read
+    async def days(session, dataset, start, end, **kwargs):
+        calls.append((start, end))
+        return await real_days(session, dataset, start, end, **kwargs)
+
+    monkeypatch.setattr(research_replay, "window", window)
+    monkeypatch.setattr(rx, "benchmark_days", days)
 
 
 async def _effective(_session, settings):
@@ -227,7 +248,7 @@ async def _effective(_session, settings):
 
 async def test_selection_never_reads_the_holdout_then_the_holdout_is_scored_once(world, monkeypatch):
     calls = []
-    monkeypatch.setattr(rx, "read_dataset", _fake_reader(calls))
+    _spy_reads(monkeypatch, calls)
     monkeypatch.setattr("app.services.indicator_settings.effective", _effective)
     async with SessionLocal() as session:
         experiment = await rx.create_experiment(session, **_fields(world))
@@ -239,6 +260,7 @@ async def test_selection_never_reads_the_holdout_then_the_holdout_is_scored_once
         result = await rx.selection_job(session, {"experiment_id": str(experiment_id)}, SimpleNamespace(), None)
         await session.commit()
     assert result["status"] == rx.SELECTED
+    assert calls, "the spy saw no reads"
     assert all(end <= DAYS[2] for _, end in calls), "selection asked for bars past the selection period"
 
     async with SessionLocal() as session:
@@ -248,6 +270,7 @@ async def test_selection_never_reads_the_holdout_then_the_holdout_is_scored_once
         walk = selection.summary["walk_forward"]
         assert selection.summary["variants_tested"] == 2 and walk["deflated_sharpe"]["trials"] == 2
         assert len(selection.code_fingerprint) == 64 and selection.dataset_sha256 == "f" * 64
+        assert selection.summary["replay"]["months"] == 1 and selection.summary["replay"]["share_months"] == 1
 
         await rx.request_holdout(session, experiment_id, user_id=None)
         await session.commit()
@@ -267,8 +290,6 @@ async def test_selection_never_reads_the_holdout_then_the_holdout_is_scored_once
 
 
 async def test_a_crashed_holdout_does_not_spend_the_holdout(world, monkeypatch):
-    calls = []
-    monkeypatch.setattr(rx, "read_dataset", _fake_reader(calls))
     monkeypatch.setattr("app.services.indicator_settings.effective", _effective)
     async with SessionLocal() as session:
         experiment = await rx.create_experiment(session, **_fields(world))
@@ -280,10 +301,10 @@ async def test_a_crashed_holdout_does_not_spend_the_holdout(world, monkeypatch):
         await rx.request_holdout(session, experiment_id, user_id=None)
         await session.commit()
 
-    def explode(*_args, **_kwargs):
+    async def explode(*_args, **_kwargs):
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(rx, "run_portfolio_backtest", explode)
+    monkeypatch.setattr(rx, "replay_taken", explode)
     async with SessionLocal() as session:
         with pytest.raises(Exception, match="Holdout scoring failed"):
             await rx.holdout_job(session, {"experiment_id": str(experiment_id)}, SimpleNamespace(), None)
@@ -296,7 +317,7 @@ async def test_a_crashed_selection_is_marked_not_left_queued(world, monkeypatch)
     async def broken(*_args, **_kwargs):
         raise OSError("dataset file missing")
 
-    monkeypatch.setattr(rx, "read_dataset", broken)
+    monkeypatch.setattr(rx, "benchmark_days", broken)
     monkeypatch.setattr("app.services.indicator_settings.effective", _effective)
     async with SessionLocal() as session:
         experiment = await rx.create_experiment(session, **_fields(world))
