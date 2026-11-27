@@ -35,7 +35,7 @@ from app.services.trading_calendar import TradingCalendar
 # /app (only apps/api is copied in). The repository root, and with it
 # docker-compose.yml, exists only in a checkout.
 API_ROOT = pathlib.Path(__file__).resolve().parents[1]
-REPO = API_ROOT.parents[1] if (API_ROOT.parents[1] / "docker-compose.yml").exists() else None
+REPO = next((parent for parent in API_ROOT.parents if (parent / "docker-compose.yml").exists()), None)
 NO_CHECKOUT = "needs the repository checkout (docker-compose.yml); the test container holds apps/api only"
 IST_OFFSET = timedelta(hours=5, minutes=30)
 # What TradingCalendar.from_settings reads; the routes build the research window from it.

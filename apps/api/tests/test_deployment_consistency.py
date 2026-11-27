@@ -21,7 +21,7 @@ from app.services import build_info
 # /app (only apps/api is copied in). The repository root, and with it
 # docker-compose.yml, exists only in a checkout.
 API_ROOT = Path(__file__).resolve().parents[1]
-REPO = API_ROOT.parents[1] if (API_ROOT.parents[1] / "docker-compose.yml").exists() else None
+REPO = next((parent for parent in API_ROOT.parents if (parent / "docker-compose.yml").exists()), None)
 NO_CHECKOUT = "needs the repository checkout (docker-compose.yml); the test container holds apps/api only"
 SCRIPT = API_ROOT / "scripts" / "verify_deployment.py"
 COMMIT = "a4548b0abddba8df5ef5bdd7ed8acebb3b7b8065"
