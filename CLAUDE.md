@@ -20,9 +20,12 @@ bare `docker` fails with `sh: docker: command not found`. It works when you ssh 
 and type it, because that shell is interactive and reads the profile. The same
 command through Claude is not.
 
-Application services: `api`, `scanner-worker`, `swing-worker`,
-`research-worker`, `web` -- one deployment, always rebuilt together.
-`research-worker` runs backtests and sweeps; it holds no broker credentials. Infrastructure: `postgres`, `redis`,
+Application services on the NAS: `api`, `scanner-worker`, `swing-worker`,
+`web` -- one deployment, always rebuilt together.
+`research-worker` (backtests, sweeps, backfills, experiments; no broker
+credentials) runs on the **research VM** (Z2, 192.168.150.60, `/opt/sidra/compose.yml`)
+since 28 Nov 2026. On the NAS it sits behind the `nas-research` profile and stays
+stopped. Never run a sweep or backfill on the NAS. Infrastructure: `postgres`, `redis`,
 `caddy` (LAN TLS, from `docker-compose.lan-https.yml` via `COMPOSE_FILE`).
 The scanner is `scanner-worker`, not `worker`.
 
@@ -70,7 +73,9 @@ run without a prompt. Anything else still asks.
 ```
 ssh nas "cd /volume1/docker/sidra-algo-trading && git pull origin <branch> && scripts/run-tests.sh"
 # only once the suite is green:
-ssh nas 'cd /volume1/docker/sidra-algo-trading && SIDRA_BUILD_COMMIT=$(git rev-parse HEAD) /usr/local/bin/docker compose up -d --build api scanner-worker swing-worker research-worker web'
+ssh nas 'cd /volume1/docker/sidra-algo-trading && SIDRA_BUILD_COMMIT=$(git rev-parse HEAD) /usr/local/bin/docker compose up -d --build api scanner-worker swing-worker web'
+# a change under apps/api also reaches the research VM: rebuild its worker from
+# the same commit (git archive of the NAS checkout), or ask the session that runs it
 # then prove every container runs that checkout (read-only, safe any time):
 ssh nas "cd /volume1/docker/sidra-algo-trading && scripts/verify-deployment.sh"
 ```

@@ -117,6 +117,14 @@ services:
   # refuses to start if any of them is set. It runs heavy work only outside
   # 9:00 AM - 3:40 PM IST on trading days.
   research-worker:
+    # Research runs on the research VM (Z2, 192.168.150.60) from 28 Nov 2026,
+    # with its own compose file, reaching this Postgres and Redis through a
+    # restricted relay. Behind a profile here so a plain `docker compose up -d`
+    # on the NAS never starts a second worker. To run it on the NAS again:
+    #   docker compose --profile nas-research up -d research-worker
+    # (Two workers are safe -- jobs are claimed FOR UPDATE SKIP LOCKED -- but the
+    # NAS one competes with the trading services for CPU and memory.)
+    profiles: [nas-research]
     build:
       context: .
       dockerfile: infra/docker/api.Dockerfile
