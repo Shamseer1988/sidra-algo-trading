@@ -330,5 +330,33 @@ async def run(*, once: bool = False) -> None:
         await redis.aclose()
 
 
+def stop_on_signals(loop: asyncio.AbstractEventLoop, task: asyncio.Task) -> list:
+    """Turn SIGTERM and SIGINT into cancelling ``task``, so a running job is put back in the queue.
+
+    Without this, ``docker stop`` or ``restart`` killed the process outright:
+    the ``CancelledError`` path in ``supervise`` that terminates the child and
+    releases the job never ran, and the job stayed RUNNING until the stale
+    check requeued it three minutes later, spending an attempt (found on the
+    Z2 cut-over, 28 Nov 2026). Returns the signals installed; none where the
+    platform has no signal handlers (Windows).
+    """
+    import signal
+
+    installed = []
+    for number in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(number, task.cancel)
+        except (NotImplementedError, RuntimeError):
+            continue
+        installed.append(number)
+    return installed
+
+
+async def main() -> None:
+    stop_on_signals(asyncio.get_running_loop(), asyncio.current_task())
+    with contextlib.suppress(asyncio.CancelledError):
+        await run()
+
+
 if __name__ == "__main__":
-    asyncio.run(run())
+    asyncio.run(main())
