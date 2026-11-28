@@ -52,6 +52,10 @@ from pathlib import Path
 from typing import Callable, List, Optional  # noqa: UP035 - the NAS host runs Python 3.8
 
 PYTHON_SERVICES = ("api", "scanner-worker", "swing-worker", "research-worker")
+# Expected to be stopped on the NAS: research runs on the research VM (28 Nov
+# 2026). Not running is OK; running here is a warning, and running other code
+# than the checkout is still a failure.
+OPTIONAL_SERVICES = ("research-worker",)
 WEB_SERVICE = "web"
 APPLICATION_SERVICES = (*PYTHON_SERVICES, WEB_SERVICE)
 
@@ -161,6 +165,9 @@ def evaluate(
             # the fallback computes the same fingerprint inline.
             reported = _parse(runner(service, PYTHON_PROBE)) or _parse(runner(service, PYTHON_FALLBACK_PROBE))
         if reported is None:
+            if service in OPTIONAL_SERVICES:
+                checks.append(ServiceCheck(service, OK, notes=["not running on this host (runs on the research VM)"]))
+                continue
             checks.append(ServiceCheck(service, FAIL, notes=["not running, or did not answer the version probe"]))
             continue
         check = ServiceCheck(service, OK, commit=_clean_commit(reported.get("commit"), build_info))
@@ -179,6 +186,10 @@ def evaluate(
         elif expected_commit != build_info.UNKNOWN and check.commit != expected_commit:
             check.state = FAIL
             check.notes.append("built from a different commit than the checkout")
+        if service in OPTIONAL_SERVICES:
+            if check.state == OK:
+                check.state = WARN
+            check.notes.append("running on the NAS; research is meant to run on the research VM")
         checks.append(check)
 
     # When the checkout could not be fingerprinted, every container "differs from

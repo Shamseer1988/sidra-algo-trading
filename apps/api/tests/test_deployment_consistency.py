@@ -105,7 +105,9 @@ def test_build_info_reports_two_fields_and_no_environment(monkeypatch):
 
 
 def test_a_consistent_deployment_passes():
-    verdict = verify.evaluate(COMMIT, SOURCE, _runner(_all_good()), build_info)
+    answers = _all_good()
+    answers["research-worker"] = None  # runs on the research VM, not here
+    verdict = verify.evaluate(COMMIT, SOURCE, _runner(answers), build_info)
     assert verdict.state == verify.OK
     assert set(_states(verdict)) == {"api", "scanner-worker", "swing-worker", "research-worker", "web"}
 
@@ -119,11 +121,13 @@ def test_a_stale_swing_worker_fails():
     assert _states(verdict)["api"] == verify.OK
 
 
-def test_a_missing_research_worker_fails():
+def test_a_research_worker_on_the_nas_warns_and_stale_code_there_still_fails():
+    running = verify.evaluate(COMMIT, SOURCE, _runner(_all_good()), build_info)
+    assert running.state == verify.WARN and _states(running)["research-worker"] == verify.WARN
     answers = _all_good()
-    answers["research-worker"] = None
-    verdict = verify.evaluate(COMMIT, SOURCE, _runner(answers), build_info)
-    assert verdict.state == verify.FAIL and _states(verdict)["research-worker"] == verify.FAIL
+    answers["research-worker"] = _python(commit="unknown", source=STALE_SOURCE)
+    stale = verify.evaluate(COMMIT, SOURCE, _runner(answers), build_info)
+    assert stale.state == verify.FAIL and _states(stale)["research-worker"] == verify.FAIL
 
 
 def test_a_missing_swing_worker_fails():
