@@ -358,3 +358,14 @@ async def test_the_holdout_route_demands_explicit_confirmation():
     with pytest.raises(HTTPException) as refused:
         await routes.score_holdout(uuid4(), routes.HoldoutRequest(), None, None)
     assert refused.value.status_code == 422 and "once" in refused.value.detail
+
+
+def test_job_timeouts_follow_the_size_of_the_replay():
+    # The first real selection: 33 shares, Apr 2022-Jun 2025, one shared pass.
+    selection = rx.job_timeout_seconds(33, date(2022, 4, 1), date(2025, 6, 30))
+    assert 40 * 3600 < selection < 50 * 3600  # the fixed 6 hours would have killed it
+    assert rx.job_timeout_seconds(1, date(2026, 1, 5), date(2026, 1, 8)) == rx.MINIMUM_TIMEOUT_SECONDS
+    assert rx.job_timeout_seconds(500, date(2010, 1, 1), date(2026, 1, 1), passes=60) == rx.MAXIMUM_TIMEOUT_SECONDS
+    assert rx._weekdays(date(2026, 11, 23), date(2026, 11, 29)) == 5
+    assert rx._selection_passes({"minimum_rr": [1, 2]}, 2) == 1
+    assert rx._selection_passes({"atr_period": [10, 14]}, 2) == 2
