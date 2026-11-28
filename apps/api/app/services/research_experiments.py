@@ -71,6 +71,33 @@ HOLDOUT_JOB = "experiment_holdout"
 WARMUP_DAYS = 70
 MAXIMUM_VARIANTS = 60
 
+# A job's time limit, from its size. Replay measured 1.6 s per share-session on a
+# desktop core (28 Nov 2026); 4 s allows for a slower machine, and the limit is
+# 1.5 times the estimate. The first selection got a fixed 6 hours for a ~13-hour
+# run and would have been killed part-way.
+SECONDS_PER_SHARE_SESSION = 4.0
+MINIMUM_TIMEOUT_SECONDS = 2 * 60 * 60
+MAXIMUM_TIMEOUT_SECONDS = 7 * 24 * 60 * 60
+
+
+def _weekdays(start: date, end: date) -> int:
+    days = (end - start).days + 1
+    if days <= 0:
+        return 0
+    full_weeks, rest = divmod(days, 7)
+    return full_weeks * 5 + sum((start.weekday() + offset) % 7 < 5 for offset in range(rest))
+
+
+def job_timeout_seconds(instruments: int, start: date, end: date, passes: int = 1) -> int:
+    """How long a replay of ``instruments`` shares from ``start`` to ``end`` may run, in seconds."""
+    estimate = instruments * _weekdays(start, end) * SECONDS_PER_SHARE_SESSION * max(1, passes)
+    return int(min(MAXIMUM_TIMEOUT_SECONDS, max(MINIMUM_TIMEOUT_SECONDS, estimate * 1.5)))
+
+
+def _selection_passes(grid: dict, variants: int) -> int:
+    """One shared replay when the grid varies only strategy fields, else one per variant (see ``_groups``)."""
+    return 1 if variants > 1 and set(grid) <= STRATEGY_PARAMS else max(1, variants)
+
 
 class ExperimentError(ValueError):
     """The experiment cannot move to the requested step, and why."""
@@ -137,8 +164,14 @@ async def register(session: AsyncSession, experiment_id: UUID, *, user_id) -> Re
     experiment.variants = await check_registration(session, experiment)
     experiment.status = QUEUED
     experiment.registered_at = datetime.now(UTC)
+    timeout = job_timeout_seconds(
+        len(experiment.instruments),
+        experiment.selection_start,
+        experiment.selection_end,
+        _selection_passes(experiment.parameter_grid, experiment.variants),
+    )
     await research_jobs.enqueue(
-        session, SELECTION_JOB, {"experiment_id": str(experiment.id)}, user_id=user_id, timeout_seconds=6 * 60 * 60
+        session, SELECTION_JOB, {"experiment_id": str(experiment.id)}, user_id=user_id, timeout_seconds=timeout
     )
     await session.flush()
     return experiment
@@ -155,8 +188,9 @@ async def request_holdout(session: AsyncSession, experiment_id: UUID, *, user_id
     if experiment.status != SELECTED:
         raise ExperimentError(f"The holdout is scored after selection; this experiment is {experiment.status}.")
     experiment.status = HOLDOUT_QUEUED
+    timeout = job_timeout_seconds(len(experiment.instruments), experiment.holdout_start, experiment.holdout_end)
     await research_jobs.enqueue(
-        session, HOLDOUT_JOB, {"experiment_id": str(experiment.id)}, user_id=user_id, timeout_seconds=2 * 60 * 60
+        session, HOLDOUT_JOB, {"experiment_id": str(experiment.id)}, user_id=user_id, timeout_seconds=timeout
     )
     await session.flush()
     return experiment

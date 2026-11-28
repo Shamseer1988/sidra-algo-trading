@@ -496,3 +496,21 @@ def test_only_an_administrator_may_cancel():
     with pytest.raises(HTTPException) as refused:
         asyncio.run(dependency.call(viewer))
     assert refused.value.status_code == 403
+
+
+def test_stop_signals_cancel_the_worker_so_its_job_is_released():
+    import signal
+
+    from app import research_worker
+
+    calls = []
+    loop = SimpleNamespace(add_signal_handler=lambda number, callback: calls.append((number, callback)))
+    task = SimpleNamespace(cancel=lambda: "cancelled")
+    installed = research_worker.stop_on_signals(loop, task)
+    assert installed == [signal.SIGTERM, signal.SIGINT]
+    assert all(callback() == "cancelled" for _, callback in calls)
+
+    def unsupported(number, callback):
+        raise NotImplementedError
+
+    assert research_worker.stop_on_signals(SimpleNamespace(add_signal_handler=unsupported), task) == []
